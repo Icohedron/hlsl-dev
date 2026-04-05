@@ -89,5 +89,6 @@ cd "$repo" && git fetch --depth 2
 Updates all submodules to the latest commits on their respective default remote branches (e.g., main or master).
 
 ```bash
-git submodule update --remote --recursive --depth 2
+git submodule update --remote --depth 2
+git submodule update --init --recursive --depth 2
 ```
