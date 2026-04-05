@@ -1,2 +1,19 @@
-# Project-local compilation cache
+AGENTS.md
+result
+.direnv/
+build/
+.cache/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+a.out
 .sccache/
+vkd3d-proton.cache
+compile_commands.json
+.clangd/
+.vs/
+.vscode/
+.idea/
