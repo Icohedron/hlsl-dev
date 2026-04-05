@@ -1,0 +1,16 @@
+[submodule "llvm-project"]
+	path = llvm-project
+	url = https://github.com/llvm/llvm-project.git
+	shallow = true
+[submodule "DirectXShaderCompiler"]
+	path = DirectXShaderCompiler
+	url = https://github.com/microsoft/DirectXShaderCompiler.git
+	shallow = true
+[submodule "offload-test-suite"]
+	path = offload-test-suite
+	url = https://github.com/llvm/offload-test-suite.git
+	shallow = true
+[submodule "offload-golden-images"]
+	path = offload-golden-images
+	url = https://github.com/llvm/offload-golden-images.git
+	shallow = true
