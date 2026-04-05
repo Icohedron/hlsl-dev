@@ -76,7 +76,6 @@
           # Base LLVM build options
           "-C ${LLVMDir}/clang/cmake/caches/HLSL.cmake"
           "-G Ninja"
-          "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
           "-DLLVM_ENABLE_ASSERTIONS=ON"
           "-DLLVM_ENABLE_LLD=ON"
           "-DLLVM_INCLUDE_SPIRV_TOOLS_TESTS=ON"
@@ -102,7 +101,6 @@
           # DirectXShaderCompiler build options
           "-C ${DXCDir}/cmake/caches/PredefinedParams.cmake"
           "-G Ninja"
-          "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
           "-DHLSL_DISABLE_SOURCE_GENERATION=ON"
         ];
 

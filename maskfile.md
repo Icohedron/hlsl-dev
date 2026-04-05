@@ -7,11 +7,15 @@ Initializes the submodules with a shallow clone (`--depth 2`) to save time and d
 git submodule update --init --recursive --depth 2
 ```
 
-## configure-llvm
+## configure-llvm [build_type]
 Configures LLVM using the environment variables set by Nix.
 
+**OPTIONS**
+* build_type: Optional CMake build type (e.g., Debug, Release, RelWithDebInfo, MinSizeRel). Defaults to RelWithDebInfo.
+
 ```bash
-cmake -S ./llvm-project/llvm -B ./llvm-project/build $LLVMCMakeFlags
+BUILD_TYPE=${build_type:-RelWithDebInfo}
+cmake -S ./llvm-project/llvm -B ./llvm-project/build -DCMAKE_BUILD_TYPE=$BUILD_TYPE $LLVMCMakeFlags
 ```
 
 ## build-llvm [target]
@@ -32,11 +36,15 @@ else
 fi
 ```
 
-## configure-dxc
+## configure-dxc [build_type]
 Configures DirectXShaderCompiler using the environment variables set by Nix.
 
+**OPTIONS**
+* build_type: Optional CMake build type (e.g., Debug, Release, RelWithDebInfo, MinSizeRel). Defaults to RelWithDebInfo.
+
 ```bash
-cmake -S ./DirectXShaderCompiler -B ./DirectXShaderCompiler/build $DXCCMakeFlags
+BUILD_TYPE=${build_type:-RelWithDebInfo}
+cmake -S ./DirectXShaderCompiler -B ./DirectXShaderCompiler/build -DCMAKE_BUILD_TYPE=$BUILD_TYPE $DXCCMakeFlags
 ```
 
 ## build-dxc [target]
