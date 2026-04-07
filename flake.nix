@@ -119,7 +119,7 @@
               );
             }
             {
-              name = "llvm-hlsl-env";
+              name = "hlsl";
 
               buildInputs = devShellPackages;
 
