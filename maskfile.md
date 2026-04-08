@@ -82,7 +82,7 @@ Truncates the commit history of a specific submodule back to a shallow depth of 
 * repo (required): Name of the submodule (e.g., llvm-project, DirectXShaderCompiler)
 
 ```bash
-cd "$repo" && git fetch --depth 2
+cd "$repo" && git fetch --depth 2 && git reflog expire --expire=now --all && git gc --prune=now
 ```
 
 ## update-submodules
