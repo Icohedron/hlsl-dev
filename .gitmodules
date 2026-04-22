@@ -14,3 +14,6 @@
 	path = offload-golden-images
 	url = https://github.com/llvm/offload-golden-images.git
 	shallow = true
+[submodule "compiler-explorer"]
+	path = compiler-explorer
+	url = https://github.com/compiler-explorer/compiler-explorer.git
