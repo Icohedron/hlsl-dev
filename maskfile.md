@@ -92,3 +92,32 @@ Updates all submodules to the latest commits on their respective default remote 
 git submodule update --remote --depth 2
 git submodule update --init --recursive --depth 2
 ```
+
+## compiler-explorer
+Runs Compiler Explorer with local DXC, clang, and clang-dxc compilers configured from the build directories.
+
+```bash
+HLSL_LOCAL="./compiler-explorer/etc/config/hlsl.local.properties"
+
+cat > "$HLSL_LOCAL" <<EOF
+compilers=&dxc:&clang
+
+defaultCompiler=dxc_local
+
+group.dxc.compilers=dxc_local
+compiler.dxc_local.exe=$PWD/DirectXShaderCompiler/build/bin/dxc
+compiler.dxc_local.name=DXC (local)
+
+group.clang.compilers=clang_local:clang_dxc_local
+group.clang.compilerType=clang-dxc
+
+compiler.clang_local.exe=$PWD/llvm-project/build/bin/clang
+compiler.clang_local.name=Clang (local)
+
+compiler.clang_dxc_local.exe=$PWD/llvm-project/build/bin/clang-dxc
+compiler.clang_dxc_local.name=Clang-DXC (local)
+EOF
+
+echo "Generated $HLSL_LOCAL"
+cd compiler-explorer && make dev EXTRA_ARGS="--language hlsl"
+```

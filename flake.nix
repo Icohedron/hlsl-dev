@@ -49,6 +49,7 @@
           directx-shader-compiler
           clang-tools
           mask # Used for task automation
+          nodejs_22 # Required for Compiler Explorer (pinned to v22 LTS)
         ];
 
         # ----------------------------------------------------------------------
