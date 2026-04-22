@@ -18,15 +18,6 @@
         pkgs = nixpkgs.legacyPackages.${system};
 
         # ----------------------------------------------------------------------
-        # Project Paths
-        # ----------------------------------------------------------------------
-        # These point to the local git submodules where the source code lives.
-        LLVMDir = "./llvm-project";
-        DXCDir = "./DirectXShaderCompiler";
-        OffloadTestDir = "./offload-test-suite";
-        GoldenImagesDir = "./offload-golden-images";
-
-        # ----------------------------------------------------------------------
         # Build Dependencies
         # ----------------------------------------------------------------------
         # Python with necessary packages for LLVM's lit testing framework and scripts.
@@ -63,12 +54,12 @@
         # ----------------------------------------------------------------------
         # CMake Configurations
         # ----------------------------------------------------------------------
-        # We define flags here as a Nix list. When exported to the shell, Nix
-        # automatically joins them with spaces, making them usable as shell variables.
+        # These are defined as functions of a root directory so that the
+        # shellHook can materialise them with the real workspace path.
 
-        LLVMCMakeFlags = [
+        mkLLVMCMakeFlags = root: [
           # Base LLVM build options
-          "-C ${LLVMDir}/clang/cmake/caches/HLSL.cmake"
+          "-C ${root}/llvm-project/clang/cmake/caches/HLSL.cmake"
           "-G Ninja"
           "-DLLVM_ENABLE_ASSERTIONS=ON"
           "-DLLVM_ENABLE_LLD=ON"
@@ -85,15 +76,15 @@
 
           # Offload Test Suite & DXC Integration
           "-DLLVM_EXTERNAL_PROJECTS=OffloadTest"
-          "-DLLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR=${OffloadTestDir}"
-          "-DGOLDENIMAGE_DIR=${GoldenImagesDir}"
+          "-DLLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR=${root}/offload-test-suite"
+          "-DGOLDENIMAGE_DIR=${root}/offload-golden-images"
           "-DOFFLOADTEST_TEST_CLANG=ON"
-          "-DDXC_DIR=${DXCDir}/build/bin"
+          "-DDXC_DIR=${root}/DirectXShaderCompiler/build/bin"
         ];
 
-        DXCCMakeFlags = [
+        mkDXCCMakeFlags = root: [
           # DirectXShaderCompiler build options
-          "-C ${DXCDir}/cmake/caches/PredefinedParams.cmake"
+          "-C ${root}/DirectXShaderCompiler/cmake/caches/PredefinedParams.cmake"
           "-G Ninja"
           "-DHLSL_DISABLE_SOURCE_GENERATION=ON"
         ];
@@ -117,10 +108,13 @@
 
               buildInputs = devShellPackages;
 
-              # Export these variables to the shell so `mask` tasks can utilize them
-              inherit LLVMCMakeFlags DXCCMakeFlags;
-
-              DXC_LIBS_DIR = "${DXCDir}/build/lib";
+              # Resolve project paths to absolute paths at shell entry time
+              # and export CMake flag variables for `mask` tasks.
+              shellHook = ''
+                export LLVMCMakeFlags="${builtins.concatStringsSep " " (mkLLVMCMakeFlags "\$PWD")}"
+                export DXCCMakeFlags="${builtins.concatStringsSep " " (mkDXCCMakeFlags "\$PWD")}"
+                export DXC_LIBS_DIR="$PWD/DirectXShaderCompiler/build/lib"
+              '';
             };
       }
     );
