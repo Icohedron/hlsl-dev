@@ -1,0 +1,84 @@
+2026-07-12T20:47:22.8879161Z ******************** TEST 'OffloadTest-vk :: Feature/HLSLLib/smoothstep.16.test' FAILED ********************
+2026-07-12T20:47:22.8880509Z Exit Code: 1
+2026-07-12T20:47:22.8882427Z 
+2026-07-12T20:47:22.8882871Z Command Output (stdout):
+2026-07-12T20:47:22.8883295Z --
+2026-07-12T20:47:22.8883820Z # RUN: at line 232
+2026-07-12T20:47:22.8887289Z c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\split-file.exe C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\test\Feature\HLSLLib\smoothstep.16.test C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\vk\Feature\HLSLLib\Output\smoothstep.16.test.tmp
+2026-07-12T20:47:22.8893560Z # executed command: 'c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\split-file.exe' 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\test\Feature\HLSLLib\smoothstep.16.test' 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\vk\Feature\HLSLLib\Output\smoothstep.16.test.tmp'
+2026-07-12T20:47:22.8896164Z # RUN: at line 233
+2026-07-12T20:47:22.8898352Z "C:\actions-runner\_work\offload-test-suite\offload-test-suite\dxc-dist\bin\dxc.exe" -spirv -fspv-target-env=vulkan1.3 -T cs_6_5 -enable-16bit-types -Fo C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\vk\Feature\HLSLLib\Output\smoothstep.16.test.tmp.o C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\vk\Feature\HLSLLib\Output\smoothstep.16.test.tmp/source.hlsl
+2026-07-12T20:47:22.8903323Z # executed command: 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\dxc-dist\bin\dxc.exe' -spirv -fspv-target-env=vulkan1.3 -T cs_6_5 -enable-16bit-types -Fo 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\vk\Feature\HLSLLib\Output\smoothstep.16.test.tmp.o' 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\vk\Feature\HLSLLib\Output\smoothstep.16.test.tmp/source.hlsl'
+2026-07-12T20:47:22.8908372Z # RUN: at line 234
+2026-07-12T20:47:22.8910317Z c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\offloader.exe -debug-layer C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\vk\Feature\HLSLLib\Output\smoothstep.16.test.tmp/pipeline.yaml C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\vk\Feature\HLSLLib\Output\smoothstep.16.test.tmp.o
+2026-07-12T20:47:22.8913760Z # executed command: 'c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\offloader.exe' -debug-layer 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\vk\Feature\HLSLLib\Output\smoothstep.16.test.tmp/pipeline.yaml' 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\vk\Feature\HLSLLib\Output\smoothstep.16.test.tmp.o'
+2026-07-12T20:47:22.8915709Z # .---command stdout------------
+2026-07-12T20:47:22.8915989Z # | Using Vulkan API
+2026-07-12T20:47:22.8916226Z # | Command buffer created.
+2026-07-12T20:47:22.8916493Z # | Compute Pipeline created.
+2026-07-12T20:47:22.8916776Z # | Memory buffers created.
+2026-07-12T20:47:22.8917037Z # | Executed copy command buffer.
+2026-07-12T20:47:22.8917334Z # | Execute command buffer created.
+2026-07-12T20:47:22.8917640Z # | Descriptors: { type = 7, count = 12 }
+2026-07-12T20:47:22.8921883Z # | Descriptor pool created.
+2026-07-12T20:47:22.8922338Z # | Num Descriptor sets: 1
+2026-07-12T20:47:22.8924180Z # | Updating Descriptor [0] { 0, 0 }
+2026-07-12T20:47:22.8924977Z # | Updating Descriptor [1] { 0, 1 }
+2026-07-12T20:47:22.8925316Z # | Updating Descriptor [2] { 0, 2 }
+2026-07-12T20:47:22.8925727Z # | Updating Descriptor [3] { 0, 3 }
+2026-07-12T20:47:22.8926032Z # | Updating Descriptor [4] { 0, 4 }
+2026-07-12T20:47:22.8926333Z # | Updating Descriptor [5] { 0, 5 }
+2026-07-12T20:47:22.8926617Z # | Updating Descriptor [6] { 0, 6 }
+2026-07-12T20:47:22.8926892Z # | Updating Descriptor [7] { 0, 7 }
+2026-07-12T20:47:22.8927183Z # | Updating Descriptor [8] { 0, 8 }
+2026-07-12T20:47:22.8927738Z # | Updating Descriptor [9] { 0, 9 }
+2026-07-12T20:47:22.8928057Z # | Updating Descriptor [10] { 0, 10 }
+2026-07-12T20:47:22.8928361Z # | Updating Descriptor [11] { 0, 11 }
+2026-07-12T20:47:22.8928664Z # | WriteDescriptors: 12
+2026-07-12T20:47:22.8928931Z # | Descriptor sets created.
+2026-07-12T20:47:22.8929213Z # | Dispatched compute shader: { 1, 1, 1 }
+2026-07-12T20:47:22.8929628Z # | Commands created.
+2026-07-12T20:47:22.8929948Z # | Executed compute command buffer.
+2026-07-12T20:47:22.8930258Z # | Compute pipeline created.
+2026-07-12T20:47:22.8930894Z # | Cleanup complete.
+2026-07-12T20:47:22.8931154Z # `-----------------------------
+2026-07-12T20:47:22.8931431Z # .---command stderr------------
+2026-07-12T20:47:22.8931998Z # |   Mismatch at element 7: expected=0x3be6, actual=0x3be3
+2026-07-12T20:47:22.8932372Z # | Test failed: CheckResult4D
+2026-07-12T20:47:22.8932649Z # | Comparison Rule: BufferFloatULP
+2026-07-12T20:47:22.8932919Z # | ULP: 2
+2026-07-12T20:47:22.8933110Z # | Expected:
+2026-07-12T20:47:22.8933317Z # | ---
+2026-07-12T20:47:22.8933522Z # | Name:            ExpectedResult4D
+2026-07-12T20:47:22.8933812Z # | Format:          Float16
+2026-07-12T20:47:22.8934071Z # | Stride:          8
+2026-07-12T20:47:22.8934400Z # | Data:            [ 0x17F0, 0x3BEA, 0x3AC0, 0x3BE6, 0x17F0, 0x3BEA, 0x3AC0, 
+2026-07-12T20:47:22.8959853Z # |                    0x3BE6 ]
+2026-07-12T20:47:22.8960159Z # | OutputProps:
+2026-07-12T20:47:22.8960393Z # |   Height:          0
+2026-07-12T20:47:22.8960638Z # |   Width:           0
+2026-07-12T20:47:22.8960921Z # |   Depth:           0
+2026-07-12T20:47:22.8961175Z # | ...
+2026-07-12T20:47:22.8961359Z # | Got:
+2026-07-12T20:47:22.8961554Z # | ---
+2026-07-12T20:47:22.8961774Z # | Name:            Result4D
+2026-07-12T20:47:22.8962045Z # | Format:          Float16
+2026-07-12T20:47:22.8962285Z # | Stride:          8
+2026-07-12T20:47:22.8962623Z # | Data:            [ 0x17F0, 0x3BEB, 0x3AC0, 0x3BE6, 0x17F1, 0x3BEC, 0x3AC0, 
+2026-07-12T20:47:22.8963016Z # |                    0x3BE3 ]
+2026-07-12T20:47:22.8963438Z # | OutputProps:
+2026-07-12T20:47:22.8963731Z # |   Height:          0
+2026-07-12T20:47:22.8964404Z # |   Width:           0
+2026-07-12T20:47:22.8964686Z # |   Depth:           0
+2026-07-12T20:47:22.8964922Z # | ...
+2026-07-12T20:47:22.8965190Z # | Full Hex representation of Expected Buffer Values:
+2026-07-12T20:47:22.8965665Z # | [ 0x17f0, 0x3bea, 0x3ac0, 0x3be6, 0x17f0, 0x3bea, 0x3ac0, 0x3be6 ]
+2026-07-12T20:47:22.8966159Z # | Full Hex representation of Actual Buffer Values:
+2026-07-12T20:47:22.8966606Z # | [ 0x17f0, 0x3beb, 0x3ac0, 0x3be6, 0x17f1, 0x3bec, 0x3ac0, 0x3be3 ]
+2026-07-12T20:47:22.8966995Z # | 
+2026-07-12T20:47:22.8967212Z # `-----------------------------
+2026-07-12T20:47:22.8967523Z # error: command failed with exit status: 1
+2026-07-12T20:47:22.8967757Z 
+2026-07-12T20:47:22.8967828Z --
+2026-07-12T20:47:22.8967944Z 
+2026-07-12T20:47:22.8968029Z ********************

@@ -18,3 +18,7 @@ compile_commands.json
 .vscode/
 .idea/
 *.local.properties
+
+# offloader-scripts tooling artifacts
+reports/
+__pycache__/

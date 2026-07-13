@@ -1,0 +1,111 @@
+2026-07-12T19:29:31.5580245Z ******************** TEST 'OffloadTest-clang-vk :: Basic/Matrix/matrix_swizzle_one_based.test' FAILED ********************
+2026-07-12T19:29:31.5580838Z Exit Code: 1
+2026-07-12T19:29:31.5581013Z 
+2026-07-12T19:29:31.5581150Z Command Output (stdout):
+2026-07-12T19:29:31.5581384Z --
+2026-07-12T19:29:31.5581543Z # RUN: at line 116
+2026-07-12T19:29:31.5583632Z c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\split-file.exe C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\test\Basic\Matrix\matrix_swizzle_one_based.test C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp
+2026-07-12T19:29:31.5586200Z # executed command: 'c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\split-file.exe' 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\test\Basic\Matrix\matrix_swizzle_one_based.test' 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp'
+2026-07-12T19:29:31.5587543Z # RUN: at line 117
+2026-07-12T19:29:31.5589296Z c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\clang-dxc.exe -spirv -fspv-target-env=vulkan1.3 -fspv-extension=DXC --dxv-path=C:\actions-runner\_work\offload-test-suite\offload-test-suite\dxc-dist\bin -T cs_6_0 -Fo C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp.o C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp/source.hlsl
+2026-07-12T19:29:31.5592714Z # executed command: 'c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\clang-dxc.exe' -spirv -fspv-target-env=vulkan1.3 -fspv-extension=DXC '--dxv-path=C:\actions-runner\_work\offload-test-suite\offload-test-suite\dxc-dist\bin' -T cs_6_0 -Fo 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp.o' 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp/source.hlsl'
+2026-07-12T19:29:31.5594625Z # .---command stderr------------
+2026-07-12T19:29:31.5595525Z # | C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp/source.hlsl:13:29: warning: implicit conversion changes signedness: 'int' to 'unsigned int' [-Wsign-conversion]
+2026-07-12T19:29:31.5596392Z # |    13 |         A._11_12_13_14 = In[I].xxxx;
+2026-07-12T19:29:31.5596605Z # |       |                          ~~ ^
+2026-07-12T19:29:31.5597520Z # | C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp/source.hlsl:14:29: warning: implicit conversion changes signedness: 'int' to 'unsigned int' [-Wsign-conversion]
+2026-07-12T19:29:31.5598455Z # |    14 |         B._11_21_31_41 = In[I].xxxx;
+2026-07-12T19:29:31.5598686Z # |       |                          ~~ ^
+2026-07-12T19:29:31.5599624Z # | C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp/source.hlsl:17:29: warning: implicit conversion changes signedness: 'int' to 'unsigned int' [-Wsign-conversion]
+2026-07-12T19:29:31.5600568Z # |    17 |         A._21_22_23_24 = In[I].xxxx;
+2026-07-12T19:29:31.5600803Z # |       |                          ~~ ^
+2026-07-12T19:29:31.5601742Z # | C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp/source.hlsl:18:29: warning: implicit conversion changes signedness: 'int' to 'unsigned int' [-Wsign-conversion]
+2026-07-12T19:29:31.5602696Z # |    18 |         B._12_22_32_42 = In[I].xxxx;
+2026-07-12T19:29:31.5602929Z # |       |                          ~~ ^
+2026-07-12T19:29:31.5604067Z # | C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp/source.hlsl:21:29: warning: implicit conversion changes signedness: 'int' to 'unsigned int' [-Wsign-conversion]
+2026-07-12T19:29:31.5605009Z # |    21 |         A._31_32_33_34 = In[I].xxxx;
+2026-07-12T19:29:31.5605233Z # |       |                          ~~ ^
+2026-07-12T19:29:31.5606290Z # | C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp/source.hlsl:22:29: warning: implicit conversion changes signedness: 'int' to 'unsigned int' [-Wsign-conversion]
+2026-07-12T19:29:31.5607222Z # |    22 |         B._13_23_33_43 = In[I].xxxx;
+2026-07-12T19:29:31.5607448Z # |       |                          ~~ ^
+2026-07-12T19:29:31.5608570Z # | C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp/source.hlsl:25:29: warning: implicit conversion changes signedness: 'int' to 'unsigned int' [-Wsign-conversion]
+2026-07-12T19:29:31.5609636Z # |    25 |         A._41_42_43_44 = In[I].xxxx;
+2026-07-12T19:29:31.5609874Z # |       |                          ~~ ^
+2026-07-12T19:29:31.5610829Z # | C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp/source.hlsl:26:29: warning: implicit conversion changes signedness: 'int' to 'unsigned int' [-Wsign-conversion]
+2026-07-12T19:29:31.5611792Z # |    26 |         B._14_24_34_44 = In[I].xxxx;
+2026-07-12T19:29:31.5612033Z # |       |                          ~~ ^
+2026-07-12T19:29:31.5613069Z # | C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp/source.hlsl:51:17: warning: implicit conversion changes signedness: 'int' to 'unsigned int' [-Wsign-conversion]
+2026-07-12T19:29:31.5614114Z # |    51 |       RowOut[I*4+VI] = vec1[VI];
+2026-07-12T19:29:31.5614349Z # |       |       ~~~~~~ ~~~^~~
+2026-07-12T19:29:31.5615261Z # | C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp/source.hlsl:52:18: warning: implicit conversion changes signedness: 'int' to 'unsigned int' [-Wsign-conversion]
+2026-07-12T19:29:31.5616227Z # |    52 |       ColOut[VI*4+I] = vec2[VI];
+2026-07-12T19:29:31.5616465Z # |       |       ~~~~~~ ~~~~^~
+2026-07-12T19:29:31.5616677Z # | Unhandled terminator type.
+2026-07-12T19:29:31.5617214Z # | UNREACHABLE executed at C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\lib\Target\SPIRV\SPIRVUtils.cpp:875!
+2026-07-12T19:29:31.5618058Z # | PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/ and include the crash backtrace and dumped files.
+2026-07-12T19:29:31.5618606Z # | Stack dump:
+2026-07-12T19:29:31.5625714Z # | 0.	Program arguments: C:\\actions-runner\\_work\\offload-test-suite\\offload-test-suite\\install\\bin\\clang-dxc.exe -cc1 -triple spirv1.6-unknown-vulkan1.3-compute -O3 -Wconversion -Wvector-conversion -Wmatrix-conversion -Wspir-compat -emit-obj -dumpdir a- -disable-free -clear-ast-before-backend -main-file-name source.hlsl -mrelocation-model static -mframe-pointer=all -fmath-errno -ffp-contract=on -fno-rounding-math -mconstructor-aliases -debugger-tuning=gdb -fdebug-compilation-dir=C:\\actions-runner\\_work\\offload-test-suite\\offload-test-suite\\install\\share\\hlsl-test-suite\\run\\test\\clang-vk\\Basic\\Matrix -fcoverage-compilation-dir=C:\\actions-runner\\_work\\offload-test-suite\\offload-test-suite\\install\\share\\hlsl-test-suite\\run\\test\\clang-vk\\Basic\\Matrix -resource-dir C:\\actions-runner\\_work\\offload-test-suite\\offload-test-suite\\install\\lib\\clang\\23 -ferror-limit 19 -O3 -finclude-default-header -fgnuc-version=4.2.1 -fskip-odr-check-in-gmf -vectorize-loops -vectorize-slp -mllvm -spirv-ext=+SPV_KHR_16bit_storage,+SPV_KHR_device_group,+SPV_KHR_fragment_shading_rate,+SPV_KHR_multiview,+SPV_KHR_post_depth_coverage,+SPV_KHR_non_semantic_info,+SPV_KHR_shader_draw_parameters,+SPV_KHR_ray_tracing,+SPV_KHR_shader_clock,+SPV_EXT_demote_to_helper_invocation,+SPV_EXT_descriptor_indexing,+SPV_EXT_fragment_fully_covered,+SPV_EXT_fragment_invocation_density,+SPV_EXT_fragment_shader_interlock,+SPV_EXT_mesh_shader,+SPV_EXT_shader_stencil_export,+SPV_EXT_shader_viewport_index_layer,+SPV_GOOGLE_hlsl_functionality1,+SPV_GOOGLE_user_type,+SPV_KHR_ray_query,+SPV_EXT_shader_image_int64,+SPV_KHR_fragment_shader_barycentric,+SPV_KHR_physical_storage_buffer,+SPV_KHR_vulkan_memory_model,+SPV_KHR_maximal_reconvergence,+SPV_KHR_float_controls,+SPV_NV_shader_subgroup_partitioned -o C:\\actions-runner\\_work\\offload-test-suite\\offload-test-suite\\install\\share\\hlsl-test-suite\\run\\test\\clang-vk\\Basic\\Matrix\\Output\\matrix_swizzle_one_based.test.tmp.o -x hlsl C:\\actions-runner\\_work\\offload-test-suite\\offload-test-suite\\install\\share\\hlsl-test-suite\\run\\test\\clang-vk\\Basic\\Matrix\\Output\\matrix_swizzle_one_based.test.tmp/source.hlsl
+2026-07-12T19:29:31.5632808Z # | 1.	<eof> parser at end of file
+2026-07-12T19:29:31.5633031Z # | 2.	Code generation
+2026-07-12T19:29:31.5633804Z # | 3.	Running pass 'Function Pass Manager' on module 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\clang-vk\Basic\Matrix\Output\matrix_swizzle_one_based.test.tmp/source.hlsl'.
+2026-07-12T19:29:31.5634752Z # | 4.	Running pass 'SPIRV split region exit blocks' on function '@main'
+2026-07-12T19:29:31.5635083Z # | Exception Code: 0xC000001D
+2026-07-12T19:29:31.5635662Z # |  #0 0x00007ff7e826b6b6 HandleAbort C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\lib\Support\Windows\Signals.inc:372:0
+2026-07-12T19:29:31.5636328Z # |  #1 0x00007ffd8f132139 (C:\WINDOWS\System32\ucrtbase.dll+0xc2139)
+2026-07-12T19:29:31.5636699Z # |  #2 0x00007ffd8f115261 (C:\WINDOWS\System32\ucrtbase.dll+0xa5261)
+2026-07-12T19:29:31.5637549Z # |  #3 0x00007ff7e82b6355 llvm::llvm_unreachable_internal(char const *, char const *, unsigned int) C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\lib\Support\ErrorHandling.cpp:244:0
+2026-07-12T19:29:31.5639454Z # |  #4 0x00007ff7e84fce36 llvm::createExitVariable(class llvm::BasicBlock *, class llvm::DenseMap<class llvm::BasicBlock *, class llvm::ConstantInt *, struct llvm::DenseMapInfo<class llvm::BasicBlock *, void>, struct llvm::detail::DenseMapPair<class llvm::BasicBlock *, class llvm::ConstantInt *>> const &) C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\lib\Target\SPIRV\SPIRVUtils.cpp:875:0
+2026-07-12T19:29:31.5641401Z # |  #5 0x00007ff7e8660d00 `anonymous namespace'::runOnConvergenceRegionNoRecurse C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\lib\Target\SPIRV\SPIRVMergeRegionExitTargets.cpp:82:0
+2026-07-12T19:29:31.5642928Z # |  #6 0x00007ff7e865fe89 `anonymous namespace'::runOnConvergenceRegion C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\lib\Target\SPIRV\SPIRVMergeRegionExitTargets.cpp:121:0
+2026-07-12T19:29:31.5644143Z # |  #7 0x00007ff7e865fd0e `anonymous namespace'::runImpl C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\lib\Target\SPIRV\SPIRVMergeRegionExitTargets.cpp:155:0
+2026-07-12T19:29:31.5651594Z # |  #8 0x00007ff7e7fe5d2a llvm::FPPassManager::runOnFunction(class llvm::Function &) C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\lib\IR\LegacyPassManager.cpp:1416:0
+2026-07-12T19:29:31.5653093Z # |  #9 0x00007ff7e7feceed llvm::FPPassManager::runOnModule(class llvm::Module &) C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\lib\IR\LegacyPassManager.cpp:1470:0
+2026-07-12T19:29:31.5654624Z # | #10 0x00007ff7e7fe68bc `anonymous namespace'::MPPassManager::runOnModule C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\lib\IR\LegacyPassManager.cpp:1561:0
+2026-07-12T19:29:31.5655890Z # | #11 0x00007ff7e7fe644e llvm::legacy::PassManagerImpl::run(class llvm::Module &) C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\lib\IR\LegacyPassManager.cpp:533:0
+2026-07-12T19:29:31.5657297Z # | #12 0x00007ff7e9471ce9 `anonymous namespace'::EmitAssemblyHelper::TimeCodegenPasses C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\clang\lib\CodeGen\BackendUtil.cpp:1342:0
+2026-07-12T19:29:31.5658507Z # | #13 0x00007ff7e9471aff std::default_delete<llvm::TargetLibraryInfoImpl>::operator() C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory:3309:0
+2026-07-12T19:29:31.5659982Z # | #14 0x00007ff7e9471aff std::unique_ptr<llvm::TargetLibraryInfoImpl,std::default_delete<llvm::TargetLibraryInfoImpl> >::~unique_ptr C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory:3427:0
+2026-07-12T19:29:31.5661544Z # | #15 0x00007ff7e9471aff `anonymous namespace'::EmitAssemblyHelper::RunCodegenPipelineLegacy C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\clang\lib\CodeGen\BackendUtil.cpp:1293:0
+2026-07-12T19:29:31.5662875Z # | #16 0x00007ff7e945e94a std::unique_ptr<llvm::ToolOutputFile,std::default_delete<llvm::ToolOutputFile> >::operator bool C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory:3461:0
+2026-07-12T19:29:31.5664225Z # | #17 0x00007ff7e945e94a `anonymous namespace'::EmitAssemblyHelper::emitAssembly C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\clang\lib\CodeGen\BackendUtil.cpp:1366:0
+2026-07-12T19:29:31.5665569Z # | #18 0x00007ff7e945d617 std::unique_ptr<llvm::TargetMachine,std::default_delete<llvm::TargetMachine> >::operator bool C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory:3461:0
+2026-07-12T19:29:31.5667917Z # | #19 0x00007ff7e945d617 clang::emitBackendOutput(class clang::CompilerInstance &, class clang::CodeGenOptions &, class llvm::StringRef, class llvm::Module *, enum clang::BackendAction, class llvm::IntrusiveRefCntPtr<class llvm::vfs::FileSystem>, class std::unique_ptr<class llvm::raw_pwrite_stream, struct std::default_delete<class llvm::raw_pwrite_stream>>, class clang::BackendConsumer *) C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\clang\lib\CodeGen\BackendUtil.cpp:1544:0
+2026-07-12T19:29:31.5670099Z # | #20 0x00007ff7e9ad604e std::unique_ptr<llvm::ToolOutputFile,std::default_delete<llvm::ToolOutputFile> >::operator bool C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory:3461:0
+2026-07-12T19:29:31.5671949Z # | #21 0x00007ff7e9ad604e llvm::LLVMRemarkFileHandle::operator bool C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\include\llvm\IR\LLVMRemarkStreamer.h:124:0
+2026-07-12T19:29:31.5673173Z # | #22 0x00007ff7e9ad604e clang::BackendConsumer::HandleTranslationUnit(class clang::ASTContext &) C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\clang\lib\CodeGen\CodeGenAction.cpp:326:0
+2026-07-12T19:29:31.5674376Z # | #23 0x00007ff7ebf24397 clang::ParseAST(class clang::Sema &, bool, bool) C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\clang\lib\Parse\ParseAST.cpp:183:0
+2026-07-12T19:29:31.5675527Z # | #24 0x00007ff7e9a8d156 clang::HLSLFrontendAction::ExecuteAction(void) C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\clang\lib\Frontend\FrontendActions.cpp:1357:0
+2026-07-12T19:29:31.5676669Z # | #25 0x00007ff7e9a25c11 clang::FrontendAction::Execute(void) C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\clang\lib\Frontend\FrontendAction.cpp:1348:0
+2026-07-12T19:29:31.5677696Z # | #26 0x00007ff7e83e2742 llvm::Error::getPtr C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\include\llvm\Support\Error.h:277:0
+2026-07-12T19:29:31.5679513Z # | #27 0x00007ff7e83e2742 llvm::Error::operator bool C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\include\llvm\Support\Error.h:241:0
+2026-07-12T19:29:31.5680780Z # | #28 0x00007ff7e83e2742 clang::CompilerInstance::ExecuteAction(class clang::FrontendAction &) C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\clang\lib\Frontend\CompilerInstance.cpp:1033:0
+2026-07-12T19:29:31.5682316Z # | #29 0x00007ff7e848e6f9 clang::ExecuteCompilerInvocation(class clang::CompilerInstance *) C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\clang\lib\FrontendTool\ExecuteCompilerInvocation.cpp:319:0
+2026-07-12T19:29:31.5683602Z # | #30 0x00007ff7e7d475c5 cc1_main(class llvm::ArrayRef<char const *>, char const *, void *) C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\clang\tools\driver\cc1_main.cpp:296:0
+2026-07-12T19:29:31.5684661Z # | #31 0x00007ff7e7d43310 ExecuteCC1Tool C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\clang\tools\driver\driver.cpp:229:0
+2026-07-12T19:29:31.5685653Z # | #32 0x00007ff7e7d4248d clang_main(int, char **, struct llvm::ToolContext const &) C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\clang\tools\driver\driver.cpp:277:0
+2026-07-12T19:29:31.5686608Z # | #33 0x00007ff7e7d57cbc main C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\build\tools\clang\tools\driver\clang-driver.cpp:17:0
+2026-07-12T19:29:31.5687410Z # | #34 0x00007ff7ee53bf04 invoke_main D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:78:0
+2026-07-12T19:29:31.5688018Z # | #35 0x00007ff7ee53bf04 __scrt_common_main_seh D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:288:0
+2026-07-12T19:29:31.5688525Z # | #36 0x00007ffd8f82e957 (C:\WINDOWS\System32\KERNEL32.DLL+0x2e957)
+2026-07-12T19:29:31.5688897Z # | #37 0x00007ffd91a07c1c (C:\WINDOWS\SYSTEM32\ntdll.dll+0x87c1c)
+2026-07-12T19:29:31.5689312Z # | clang-dxc: error: clang frontend command failed due to signal (use -v to see invocation)
+2026-07-12T19:29:31.5689854Z # | clang version 23.0.0git (https://github.com/llvm/llvm-project 5485d624eb95bb7a753c6088e452d32d0bd0c03d)
+2026-07-12T19:29:31.5690304Z # | Target: spirv1.6-unknown-vulkan1.3-compute
+2026-07-12T19:29:31.5690556Z # | Thread model: posix
+2026-07-12T19:29:31.5690887Z # | InstalledDir: C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin
+2026-07-12T19:29:31.5691271Z # | Build config: +assertions
+2026-07-12T19:29:31.5691490Z # | clang-dxc: note: diagnostic msg: 
+2026-07-12T19:29:31.5691710Z # | ********************
+2026-07-12T19:29:31.5691891Z # | 
+2026-07-12T19:29:31.5692140Z # | PLEASE ATTACH THE FOLLOWING CRASH REPRODUCER FILES TO THE BUG REPORT:
+2026-07-12T19:29:31.5692694Z # | clang-dxc: note: diagnostic msg: C:\WINDOWS\SERVIC~1\NETWOR~1\AppData\Local\Temp\lit-tmp-trnkylai\source-31143b.hlsl
+2026-07-12T19:29:31.5693364Z # | clang-dxc: note: diagnostic msg: C:\WINDOWS\SERVIC~1\NETWOR~1\AppData\Local\Temp\lit-tmp-trnkylai\source-31143b.sh
+2026-07-12T19:29:31.5693830Z # | clang-dxc: note: diagnostic msg: 
+2026-07-12T19:29:31.5694052Z # | 
+2026-07-12T19:29:31.5694204Z # | ********************
+2026-07-12T19:29:31.5694421Z # `-----------------------------
+2026-07-12T19:29:31.5694645Z # error: command failed with exit status: 1
+2026-07-12T19:29:31.5694807Z 
+2026-07-12T19:29:31.5694869Z --
+2026-07-12T19:29:31.5694957Z 
+2026-07-12T19:29:31.5695022Z ********************

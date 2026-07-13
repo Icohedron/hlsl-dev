@@ -1,0 +1,93 @@
+2026-07-12T18:54:01.5403598Z ******************** TEST 'OffloadTest-d3d12 :: Feature/InlineRT/primitive-index.test' FAILED ********************
+2026-07-12T18:54:01.5404095Z Exit Code: 3221225477
+2026-07-12T18:54:01.5404163Z 
+2026-07-12T18:54:01.5404210Z Command Output (stdout):
+2026-07-12T18:54:01.5404310Z --
+2026-07-12T18:54:01.5404395Z # RUN: at line 83
+2026-07-12T18:54:01.5405018Z c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\split-file.exe C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\test\Feature\InlineRT\primitive-index.test C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\d3d12\Feature\InlineRT\Output\primitive-index.test.tmp
+2026-07-12T18:54:01.5406209Z # executed command: 'c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\split-file.exe' 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\test\Feature\InlineRT\primitive-index.test' 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\d3d12\Feature\InlineRT\Output\primitive-index.test.tmp'
+2026-07-12T18:54:01.5406863Z # RUN: at line 84
+2026-07-12T18:54:01.5407532Z "C:\actions-runner\_work\offload-test-suite\offload-test-suite\dxc-dist\bin\dxc.exe" -T cs_6_5 -Fo C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\d3d12\Feature\InlineRT\Output\primitive-index.test.tmp.o C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\d3d12\Feature\InlineRT\Output\primitive-index.test.tmp/source.hlsl
+2026-07-12T18:54:01.5408805Z # executed command: 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\dxc-dist\bin\dxc.exe' -T cs_6_5 -Fo 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\d3d12\Feature\InlineRT\Output\primitive-index.test.tmp.o' 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\d3d12\Feature\InlineRT\Output\primitive-index.test.tmp/source.hlsl'
+2026-07-12T18:54:01.5409544Z # .---command stderr------------
+2026-07-12T18:54:01.5409958Z # | C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\d3d12\Feature\InlineRT\Output\primitive-index.test.tmp/source.hlsl:2:3: warning: 'binding' attribute ignored [-Wignored-attributes]
+2026-07-12T18:54:01.5410432Z # | [[vk::binding(0, 0)]] RaytracingAccelerationStructure Scene : register(t0);
+2026-07-12T18:54:01.5410601Z # |   ^
+2026-07-12T18:54:01.5410984Z # | C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\d3d12\Feature\InlineRT\Output\primitive-index.test.tmp/source.hlsl:3:3: warning: 'binding' attribute ignored [-Wignored-attributes]
+2026-07-12T18:54:01.5411440Z # | [[vk::binding(1, 0)]] RWStructuredBuffer<uint> Output : register(u0);
+2026-07-12T18:54:01.5411602Z # |   ^
+2026-07-12T18:54:01.5411677Z # | 
+2026-07-12T18:54:01.5411766Z # `-----------------------------
+2026-07-12T18:54:01.5411879Z # RUN: at line 85
+2026-07-12T18:54:01.5412572Z c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\offloader.exe -debug-layer C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\d3d12\Feature\InlineRT\Output\primitive-index.test.tmp/pipeline.yaml C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\d3d12\Feature\InlineRT\Output\primitive-index.test.tmp.o
+2026-07-12T18:54:01.5414038Z # executed command: 'c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\offloader.exe' -debug-layer 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\d3d12\Feature\InlineRT\Output\primitive-index.test.tmp/pipeline.yaml' 'C:\actions-runner\_work\offload-test-suite\offload-test-suite\install\share\hlsl-test-suite\run\test\d3d12\Feature\InlineRT\Output\primitive-index.test.tmp.o'
+2026-07-12T18:54:01.5414841Z # .---command stdout------------
+2026-07-12T18:54:01.5414954Z # | Using DirectX API
+2026-07-12T18:54:01.5415080Z # | Configuring execution on device: AMD Radeon RX 9070
+2026-07-12T18:54:01.5415227Z # | Descriptor heap created.
+2026-07-12T18:54:01.5415338Z # | Command buffer created.
+2026-07-12T18:54:01.5415445Z # | Buffers created.
+2026-07-12T18:54:01.5415544Z # `-----------------------------
+2026-07-12T18:54:01.5415654Z # .---command stderr------------
+2026-07-12T18:54:01.5415943Z # | PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/ and include the crash backtrace and instructions to reproduce the bug.
+2026-07-12T18:54:01.5416244Z # | Stack dump:
+2026-07-12T18:54:01.5417014Z # | 0.	Program arguments: c:\\actions-runner\\_work\\offload-test-suite\\offload-test-suite\\install\\bin\\offloader.exe -debug-layer C:\\actions-runner\\_work\\offload-test-suite\\offload-test-suite\\install\\share\\hlsl-test-suite\\run\\test\\d3d12\\Feature\\InlineRT\\Output\\primitive-index.test.tmp/pipeline.yaml C:\\actions-runner\\_work\\offload-test-suite\\offload-test-suite\\install\\share\\hlsl-test-suite\\run\\test\\d3d12\\Feature\\InlineRT\\Output\\primitive-index.test.tmp.o
+2026-07-12T18:54:01.5417797Z # | Exception Code: 0xC0000005
+2026-07-12T18:54:01.5418062Z # |  #0 0x00007ffcf7b5f866 (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0xf3f866)
+2026-07-12T18:54:01.5418456Z # |  #1 0x00007ffcf7c08836 (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0xfe8836)
+2026-07-12T18:54:01.5418842Z # |  #2 0x00007ffcf7bd7444 (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0xfb7444)
+2026-07-12T18:54:01.5419230Z # |  #3 0x00007ffcf7b759fe (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0xf559fe)
+2026-07-12T18:54:01.5419611Z # |  #4 0x00007ffcf7b77bde (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0xf57bde)
+2026-07-12T18:54:01.5420195Z # |  #5 0x00007ffcf7b64e1c (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0xf44e1c)
+2026-07-12T18:54:01.5420709Z # |  #6 0x00007ffcf7b63f8b (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0xf43f8b)
+2026-07-12T18:54:01.5421111Z # |  #7 0x00007ffcf7b639c1 (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0xf439c1)
+2026-07-12T18:54:01.5421507Z # |  #8 0x00007ffcf718981b (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x56981b)
+2026-07-12T18:54:01.5421897Z # |  #9 0x00007ffcf7189df7 (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x569df7)
+2026-07-12T18:54:01.5422354Z # | #10 0x00007ffcf71b6320 (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x596320)
+2026-07-12T18:54:01.5422750Z # | #11 0x00007ffcf7188ef0 (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x568ef0)
+2026-07-12T18:54:01.5423134Z # | #12 0x00007ffcf7188ab9 (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x568ab9)
+2026-07-12T18:54:01.5423535Z # | #13 0x00007ffcf71b11ae (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x5911ae)
+2026-07-12T18:54:01.5424192Z # | #14 0x00007ffcf71b047c (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x59047c)
+2026-07-12T18:54:01.5424578Z # | #15 0x00007ffcf716452b (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x54452b)
+2026-07-12T18:54:01.5424958Z # | #16 0x00007ffcf7166417 (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x546417)
+2026-07-12T18:54:01.5425408Z # | #17 0x00007ffcf71640a8 (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x5440a8)
+2026-07-12T18:54:01.5425858Z # | #18 0x00007ffcf6db5fce (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x195fce)
+2026-07-12T18:54:01.5426245Z # | #19 0x00007ffcf6db5a3f (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x195a3f)
+2026-07-12T18:54:01.5426633Z # | #20 0x00007ffcf6db20e3 (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x1920e3)
+2026-07-12T18:54:01.5427082Z # | #21 0x00007ffcf6e3eda3 (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x21eda3)
+2026-07-12T18:54:01.5427473Z # | #22 0x00007ffcf6e21c72 (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x201c72)
+2026-07-12T18:54:01.5427860Z # | #23 0x00007ffcf6e49978 (C:\WINDOWS\System32\DriverStore\FileRepository\u0202082.inf_amd64_61e8e071c4b56ef4\B026218\amdxc64.dll+0x229978)
+2026-07-12T18:54:01.5428158Z # | #24 0x00007ffd0810cc09 (C:\WINDOWS\SYSTEM32\D3D12Core.dll+0x5cc09)
+2026-07-12T18:54:01.5428375Z # | #25 0x00007ffd0810c8d7 (C:\WINDOWS\SYSTEM32\D3D12Core.dll+0x5c8d7)
+2026-07-12T18:54:01.5428614Z # | #26 0x00007ffd0810251d (C:\WINDOWS\SYSTEM32\D3D12Core.dll+0x5251d)
+2026-07-12T18:54:01.5428803Z # | #27 0x00007ffd081020b8 (C:\WINDOWS\SYSTEM32\D3D12Core.dll+0x520b8)
+2026-07-12T18:54:01.5428986Z # | #28 0x00007ffd0812ca39 (C:\WINDOWS\SYSTEM32\D3D12Core.dll+0x7ca39)
+2026-07-12T18:54:01.5429173Z # | #29 0x00007ffd0810078b (C:\WINDOWS\SYSTEM32\D3D12Core.dll+0x5078b)
+2026-07-12T18:54:01.5429378Z # | #30 0x00007ffd313749ee (C:\WINDOWS\SYSTEM32\D3D12SDKLayers.dll+0x549ee)
+2026-07-12T18:54:01.5429621Z # | #31 0x00007ffd313470fa (C:\WINDOWS\SYSTEM32\D3D12SDKLayers.dll+0x270fa)
+2026-07-12T18:54:01.5429838Z # | #32 0x00007ffd31348768 (C:\WINDOWS\SYSTEM32\D3D12SDKLayers.dll+0x28768)
+2026-07-12T18:54:01.5430030Z # | #33 0x00007ffd48821707 (C:\WINDOWS\SYSTEM32\d3d12.dll+0x1707)
+2026-07-12T18:54:01.5430216Z # | #34 0x00007ffd080d04d6 (C:\WINDOWS\SYSTEM32\D3D12Core.dll+0x204d6)
+2026-07-12T18:54:01.5430405Z # | #35 0x00007ffd0812ba4c (C:\WINDOWS\SYSTEM32\D3D12Core.dll+0x7ba4c)
+2026-07-12T18:54:01.5430602Z # | #36 0x00007ffd31344dda (C:\WINDOWS\SYSTEM32\D3D12SDKLayers.dll+0x24dda)
+2026-07-12T18:54:01.5430945Z # | #37 0x00007ff683ca2933 png_handle_sBIT C:\actions-runner\_work\offload-test-suite\offload-test-suite\OffloadTest\third-party\libpng\pngrutil.c:1232:0
+2026-07-12T18:54:01.5431410Z # | #38 0x00007ff683ca1166 inflateGetHeader C:\actions-runner\_work\offload-test-suite\offload-test-suite\OffloadTest\third-party\zlib\inflate.c:1342:0
+2026-07-12T18:54:01.5431943Z # | #39 0x00007ff683ae2155 llvm::createStringError C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\include\llvm\Support\Error.h:1351:0
+2026-07-12T18:54:01.5432410Z # | #40 0x00007ff683ae2155 run C:\actions-runner\_work\offload-test-suite\offload-test-suite\OffloadTest\tools\offloader\offloader.cpp:170:0
+2026-07-12T18:54:01.5433107Z # | #41 0x00007ff683ae1858 std::_Func_impl_no_alloc<`lambda at C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\include\llvm\Support\Error.h:1465:21',int,const llvm::Error &>::_Func_impl_no_alloc C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\functional:855:0
+2026-07-12T18:54:01.5433937Z # | #42 0x00007ff683ae1858 std::_Func_class<int,const llvm::Error &>::_Reset C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\functional:978:0
+2026-07-12T18:54:01.5434517Z # | #43 0x00007ff683ae1858 std::function<int (const llvm::Error &)>::function C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\functional:1106:0
+2026-07-12T18:54:01.5435089Z # | #44 0x00007ff683ae1858 llvm::ExitOnError::ExitOnError C:\actions-runner\_work\offload-test-suite\offload-test-suite\llvm-project\llvm\include\llvm\Support\Error.h:1465:0
+2026-07-12T18:54:01.5435546Z # | #45 0x00007ff683ae1858 run C:\actions-runner\_work\offload-test-suite\offload-test-suite\OffloadTest\tools\offloader\offloader.cpp:100:0
+2026-07-12T18:54:01.5435966Z # | #46 0x00007ff684a672b9 _tls_end (c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\offloader.exe+0xf872b9)
+2026-07-12T18:54:01.5436401Z # | #47 0x00007ff684a673f2 _tls_end (c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\offloader.exe+0xf873f2)
+2026-07-12T18:54:01.5436784Z # | #48 0x00007ff684a6747e _tls_end (c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\offloader.exe+0xf8747e)
+2026-07-12T18:54:01.5437213Z # | #49 0x00007ff684a6749e _tls_end (c:\actions-runner\_work\offload-test-suite\offload-test-suite\install\bin\offloader.exe+0xf8749e)
+2026-07-12T18:54:01.5437606Z # | #50 0x00007ffd8f82e957 (C:\WINDOWS\System32\KERNEL32.DLL+0x2e957)
+2026-07-12T18:54:01.5437800Z # | #51 0x00007ffd91a07c1c (C:\WINDOWS\SYSTEM32\ntdll.dll+0x87c1c)
+2026-07-12T18:54:01.5437958Z # `-----------------------------
+2026-07-12T18:54:01.5438097Z # error: command failed with exit status: 0xc0000005
+2026-07-12T18:54:01.5438203Z 
+2026-07-12T18:54:01.5438239Z --
+2026-07-12T18:54:01.5438287Z 
+2026-07-12T18:54:01.5438327Z ********************
