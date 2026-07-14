@@ -18,6 +18,7 @@ compile_commands.json
 .vscode/
 .idea/
 *.local.properties
+.env
 
 # offloader-scripts tooling artifacts
 reports/
