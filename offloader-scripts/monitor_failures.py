@@ -487,7 +487,7 @@ def extract_all_results(log_text: str) -> dict[tuple[str, str], str]:
 #   "Windows D3D12 AMD Clang GBV"        -> variant=GBV
 #   "Windows D3D12 Warp Preview Clang"   -> variant=Preview
 #   "macOS Metal DXC"                    -> host=macOS
-_API_TOKENS = ("D3D12", "Vulkan", "Metal", "Lavapipe")
+_API_TOKENS = ("D3D12", "Vulkan", "Metal")
 _GPU_TOKENS = ("AMD", "NVIDIA", "Intel", "QC", "Warp", "Lavapipe", "Metal")
 _VARIANT_TOKENS = ("GBV", "Preview")
 
@@ -498,24 +498,35 @@ def parse_workflow_axes(name: str) -> dict[str, str]:
     Returns keys 'api', 'gpu', 'compiler', 'host', 'variant' (each 'none' or
     'unknown' if missing).
     """
-    api = next((t for t in _API_TOKENS if re.search(rf"\b{t}\b", name, re.I)), "unknown")
-    gpu = "unknown"
-    for t in _GPU_TOKENS:
-        if re.search(rf"\b{t}\b", name, re.I) and t != api:
-            gpu = t
-            break
-    if gpu == "unknown" and api in ("Lavapipe", "Metal"):
-        # Lavapipe is a software Vulkan impl and Metal has no vendor token;
-        # bucket the API as its own "GPU" for divergence purposes.
-        gpu = api
+    # Lavapipe is a software Vulkan renderer, not an API and not vendor
+    # hardware. When it appears it *is* the device ("GPU") and its API is
+    # Vulkan (lit sees the llvmpipe device -> API=Vulkan, feature `Lavapipe`).
+    # Any vendor token in the name (e.g. "AMD") is just the physical builder
+    # host the software renderer runs on, not the device under test.
+    if re.search(r"\bLavapipe\b", name, re.I):
+        api = "Vulkan"
+        gpu = "Lavapipe"
+    else:
+        api = next((t for t in _API_TOKENS if re.search(rf"\b{t}\b", name, re.I)), "unknown")
+        gpu = "unknown"
+        for t in _GPU_TOKENS:
+            if re.search(rf"\b{t}\b", name, re.I) and t != api:
+                gpu = t
+                break
+        if gpu == "unknown" and api == "Metal":
+            # Metal carries no separate vendor token; bucket the API as its
+            # own "GPU" for divergence purposes.
+            gpu = api
     compiler = "clang" if re.search(r"\bClang\b", name) else ("dxc" if re.search(r"\bDXC\b", name) else "unknown")
     if re.search(r"\bARM64\b", name, re.I):
         host = "ARM64"
     elif re.search(r"\bmacOS\b", name, re.I):
         host = "macOS"
-    elif gpu == "QC":
+    elif re.search(r"\bQC\b", name):
         # Qualcomm boards (Snapdragon X Plus) are ARM64-only; the display name
         # doesn't carry an ARM64 token, but the host always is (RUNNER_ARCH=ARM64).
+        # Keyed on the QC *name* token, not the gpu axis, so a Lavapipe run on a
+        # Qualcomm board (gpu=Lavapipe) is still recognised as ARM64.
         host = "ARM64"
     elif re.search(r"\bWindows\b", name, re.I):
         host = "x64"
@@ -753,9 +764,10 @@ def workflow_features(name: str, runner_name: str | None = None) -> set[str]:
     """
     ax = parse_workflow_axes(name)
     feats: set[str] = set()
-    # API — lit uses "DirectX" for D3D12; Vulkan/Metal keep their names;
-    # Lavapipe is a software Vulkan implementation, so lit sees Vulkan.
-    api_map = {"D3D12": "DirectX", "Vulkan": "Vulkan", "Lavapipe": "Vulkan", "Metal": "Metal"}
+    # API — lit uses "DirectX" for D3D12; Vulkan/Metal keep their names.
+    # (A Lavapipe workflow already reports api=Vulkan since llvmpipe is a
+    # software Vulkan device.)
+    api_map = {"D3D12": "DirectX", "Vulkan": "Vulkan", "Metal": "Metal"}
     if ax["api"] in api_map:
         feats.add(api_map[ax["api"]])
     # Compiler token in test files is "Clang"/"DXC" (capitalised).
@@ -766,8 +778,10 @@ def workflow_features(name: str, runner_name: str | None = None) -> set[str]:
             feats.add("Clang-Vulkan")
     elif ax["compiler"] == "dxc":
         feats.add("DXC")
-    # GPU vendor
-    if ax["gpu"] in ("AMD", "NVIDIA", "Intel", "QC", "Warp"):
+    # GPU vendor / device. lit derives these from the selected device's
+    # description: NVIDIA -> NV, Warp -> WARP, and "Lavapipe" for the llvmpipe
+    # software renderer (no vendor-hardware token is added for Lavapipe).
+    if ax["gpu"] in ("AMD", "NVIDIA", "Intel", "QC", "Warp", "Lavapipe"):
         feats.add({"NVIDIA": "NV", "Warp": "WARP"}.get(ax["gpu"], ax["gpu"]))
     # Host / OS
     if ax["host"] == "macOS":
@@ -820,6 +834,9 @@ _BUILDER_FEATURES: dict[tuple[str, str], set[str]] = {
     ("Intel",    "x64"):   {"Intel-Gen-Current"},
     ("Warp",     "x64"):   set(),
     ("NVIDIA",   "x64"):   set(),
+    # Lavapipe-x64 (llvmpipe software Vulkan) runs on the AMD builder
+    # (HLSLPC-AMD01, Ryzen 7 9700X) so it inherits that host's AVX512.
+    ("Lavapipe", "x64"):   {"AVX512"},
     # QC (Snapdragon) is ARM64-only — there is no (QC, x64) configuration.
     ("Warp",     "ARM64"): set(),
     ("Lavapipe", "ARM64"): set(),
@@ -1335,7 +1352,7 @@ def main() -> None:
             expl = " ".join(expl.split())
             md.append(f"| `{label}` (×{n}) | {expl} |")
         md.append("")
-        md += ["Axes referenced above: **api** (D3D12 / Vulkan / Metal / Lavapipe), "
+        md += ["Axes referenced above: **api** (D3D12 / Vulkan / Metal), "
                "**gpu** (AMD / NVIDIA / Intel / QC / Warp / Lavapipe / Metal), "
                "**compiler** (clang / dxc), **host** (x64 / ARM64 / macOS), "
                "**variant** (GBV / Preview / none). A divergence row's `axes` "

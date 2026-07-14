@@ -37,8 +37,8 @@ class ParseWorkflowAxes(unittest.TestCase):
         ("Windows Vulkan AMD Clang",       {"api": "Vulkan",   "gpu": "AMD",      "compiler": "clang", "host": "x64",   "variant": "none"}),
         ("Windows D3D12 NVIDIA DXC",       {"api": "D3D12",    "gpu": "NVIDIA",   "compiler": "dxc",   "host": "x64",   "variant": "none"}),
         ("macOS Metal DXC",                {"api": "Metal",    "gpu": "Metal",    "compiler": "dxc",   "host": "macOS", "variant": "none"}),
-        ("Windows Lavapipe AMD DXC",       {"api": "Lavapipe", "gpu": "AMD",      "compiler": "dxc",   "host": "x64",   "variant": "none"}),
-        ("Windows ARM64 Lavapipe Clang",   {"api": "Lavapipe", "gpu": "Lavapipe", "compiler": "clang", "host": "ARM64", "variant": "none"}),
+        ("Windows Lavapipe AMD DXC",       {"api": "Vulkan",   "gpu": "Lavapipe", "compiler": "dxc",   "host": "x64",   "variant": "none"}),
+        ("Windows ARM64 Lavapipe Clang",   {"api": "Vulkan",   "gpu": "Lavapipe", "compiler": "clang", "host": "ARM64", "variant": "none"}),
         ("Windows D3D12 Warp DXC",         {"api": "D3D12",    "gpu": "Warp",     "compiler": "dxc",   "host": "x64",   "variant": "none"}),
         ("Windows D3D12 QC Clang",         {"api": "D3D12",    "gpu": "QC",       "compiler": "clang", "host": "ARM64", "variant": "none"}),
         ("Windows D3D12 AMD Clang GBV",    {"api": "D3D12",    "gpu": "AMD",      "compiler": "clang", "host": "x64",   "variant": "GBV"}),
@@ -521,11 +521,14 @@ class WorkflowFeatures(unittest.TestCase):
         ("Windows Vulkan AMD Clang",       {"Vulkan", "Clang", "Clang-Vulkan", "AMD", "Windows", "x64", "AVX512"}),
         ("Windows D3D12 Intel Clang",      {"DirectX", "Clang", "Intel", "Windows", "x64", "Intel-Gen-Current"}),
         ("macOS Metal DXC",                {"Metal", "DXC", "Darwin", "AppleM4"}),
-        # Lavapipe-x64 runs on the AMD builder (per docs/CI.md), inherits AVX512
-        ("Windows Lavapipe AMD DXC",       {"Vulkan", "DXC", "AMD", "Windows", "x64", "AVX512"}),
+        # Lavapipe is a software Vulkan renderer: lit reports api=Vulkan and a
+        # `Lavapipe` feature, and does NOT add the AMD vendor token (the device
+        # is llvmpipe, not the Radeon GPU). Lavapipe-x64 runs on the AMD builder
+        # (per docs/CI.md), so it still inherits that host's AVX512.
+        ("Windows Lavapipe AMD DXC",       {"Vulkan", "DXC", "Lavapipe", "Windows", "x64", "AVX512"}),
         # ARM64 hosts (QC or its ARM64 Warp/Lavapipe siblings) — no AVX512
         ("Windows ARM64 D3D12 Warp Clang", {"DirectX", "Clang", "WARP", "Windows", "ARM64"}),
-        ("Windows ARM64 Lavapipe DXC",     {"Vulkan", "DXC", "Windows", "ARM64"}),
+        ("Windows ARM64 Lavapipe DXC",     {"Vulkan", "DXC", "Lavapipe", "Windows", "ARM64"}),
         # QC (Snapdragon X Plus) is ARM64 even though the name has no ARM64
         # token — never x64, never AVX512.
         ("Windows Vulkan QC Clang",        {"Vulkan", "Clang", "Clang-Vulkan", "QC", "Windows", "ARM64"}),
@@ -549,6 +552,27 @@ class WorkflowFeatures(unittest.TestCase):
                 self.assertNotIn("x64", feats, name)
                 self.assertNotIn("AVX512", feats, name)
                 self.assertEqual(mf.parse_workflow_axes(name)["host"], "ARM64", name)
+
+    def test_lavapipe_is_gpu_not_api(self):
+        # Regression: Lavapipe is a software Vulkan renderer, not an API. It must
+        # never appear on the `api` axis; its api is Vulkan and it *is* the gpu.
+        # A vendor token in the name (AMD) is the builder host, not the device,
+        # so the AMD gpu feature must NOT be emitted for a Lavapipe run.
+        for name in ("Windows Lavapipe AMD DXC", "Windows ARM64 Lavapipe Clang",
+                     "Windows QC Clang Lavapipe"):
+            with self.subTest(name=name):
+                ax = mf.parse_workflow_axes(name)
+                self.assertEqual(ax["api"], "Vulkan", name)
+                self.assertEqual(ax["gpu"], "Lavapipe", name)
+                feats = mf.workflow_features(name)
+                self.assertIn("Vulkan", feats, name)
+                self.assertIn("Lavapipe", feats, name)
+                self.assertNotIn("AMD", feats, name)
+                self.assertNotIn("QC", feats, name)
+
+    def test_lavapipe_never_in_api_tokens(self):
+        self.assertNotIn("Lavapipe", mf._API_TOKENS)
+        self.assertIn("Lavapipe", mf._GPU_TOKENS)
 
 
 class MatchXpassToIssue(unittest.TestCase):
