@@ -211,10 +211,8 @@ def _parse_lit_commands(block: str) -> list[dict]:
 
 
 def _status_is_failure(status: str) -> bool:
-    if status == "0":
-        return False
-    # e.g. "1", "2", "0xc0000005", "3221225477"
-    return True
+    # Any non-"0" exit is a failure, e.g. "1", "0xc0000005", "3221225477".
+    return status != "0"
 
 
 def classify_shader_compile(block: str) -> str | None:
@@ -498,41 +496,51 @@ def parse_workflow_axes(name: str) -> dict[str, str]:
     Returns keys 'api', 'gpu', 'compiler', 'host', 'variant' (each 'none' or
     'unknown' if missing).
     """
+    def has(token: str, ci: bool = True) -> bool:
+        """True if `token` appears in the name as a whole word."""
+        return re.search(rf"\b{token}\b", name, re.I if ci else 0) is not None
+
     # Lavapipe is a software Vulkan renderer, not an API and not vendor
     # hardware. When it appears it *is* the device ("GPU") and its API is
     # Vulkan (lit sees the llvmpipe device -> API=Vulkan, feature `Lavapipe`).
     # Any vendor token in the name (e.g. "AMD") is just the physical builder
     # host the software renderer runs on, not the device under test.
-    if re.search(r"\bLavapipe\b", name, re.I):
+    if has("Lavapipe"):
         api = "Vulkan"
         gpu = "Lavapipe"
     else:
-        api = next((t for t in _API_TOKENS if re.search(rf"\b{t}\b", name, re.I)), "unknown")
-        gpu = "unknown"
-        for t in _GPU_TOKENS:
-            if re.search(rf"\b{t}\b", name, re.I) and t != api:
-                gpu = t
-                break
+        api = next((t for t in _API_TOKENS if has(t)), "unknown")
+        gpu = next((t for t in _GPU_TOKENS if has(t) and t != api), "unknown")
         if gpu == "unknown" and api == "Metal":
             # Metal carries no separate vendor token; bucket the API as its
             # own "GPU" for divergence purposes.
             gpu = api
-    compiler = "clang" if re.search(r"\bClang\b", name) else ("dxc" if re.search(r"\bDXC\b", name) else "unknown")
-    if re.search(r"\bARM64\b", name, re.I):
+
+    # Clang/DXC/QC have fixed casing in real names, so they match
+    # case-sensitively; the remaining tokens are matched case-insensitively.
+    if has("Clang", ci=False):
+        compiler = "clang"
+    elif has("DXC", ci=False):
+        compiler = "dxc"
+    else:
+        compiler = "unknown"
+
+    if has("ARM64"):
         host = "ARM64"
-    elif re.search(r"\bmacOS\b", name, re.I):
+    elif has("macOS"):
         host = "macOS"
-    elif re.search(r"\bQC\b", name):
+    elif has("QC", ci=False):
         # Qualcomm boards (Snapdragon X Plus) are ARM64-only; the display name
         # doesn't carry an ARM64 token, but the host always is (RUNNER_ARCH=ARM64).
         # Keyed on the QC *name* token, not the gpu axis, so a Lavapipe run on a
         # Qualcomm board (gpu=Lavapipe) is still recognised as ARM64.
         host = "ARM64"
-    elif re.search(r"\bWindows\b", name, re.I):
+    elif has("Windows"):
         host = "x64"
     else:
         host = "unknown"
-    variant = next((t for t in _VARIANT_TOKENS if re.search(rf"\b{t}\b", name, re.I)), "none")
+
+    variant = next((t for t in _VARIANT_TOKENS if has(t)), "none")
     return {"api": api, "gpu": gpu, "compiler": compiler, "host": host, "variant": variant}
 
 
@@ -559,7 +567,7 @@ def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
         drop_from_fails = {"unknown", "none"} if axis == "variant" else {"unknown"}
         fvals = {x[axis] for x in fa} - drop_from_fails
         pvals = {x[axis] for x in pa} - {"unknown"}
-        if len(fvals) == 1 and fvals and (pvals - fvals):
+        if len(fvals) == 1 and (pvals - fvals):
             out[f"{axis}_pattern"] = f"{next(iter(fvals))}-only"
     return out
 
@@ -1116,14 +1124,10 @@ def classify_run(log_text: str, gh: GH, otss_root: pathlib.Path, issue_cache: di
     result["runners"] = runners
     test_runner = runners.get("test")
 
-    build_failed_without_tests = False
+    # No test-stage output at all -> the job failed during build/infra.
     if not has_test_stage_output(log_text):
-        build_failed_without_tests = True
-
-    if build_failed_without_tests:
-        kind = classify_build_failure(log_text)
         result["category"] = "build_failure"
-        result["detail"] = kind
+        result["detail"] = classify_build_failure(log_text)
         return result
 
     # Otherwise we made it into testing. Extract failure blocks.
@@ -1199,6 +1203,15 @@ def classify_run(log_text: str, gh: GH, otss_root: pathlib.Path, issue_cache: di
         result["tests"].append(entry)
     return result
 
+
+# Base runtime label -> suffix used when the cross-workflow pivot upgrades it.
+# The prefix is `api_backend_suspected` (clean API-axis split) or
+# `runtime_driver_suspected` (per-vendor split); see CLASSIFICATION_LEGEND.
+_RUNTIME_UPGRADE_SUFFIX = {
+    "runtime_miscompile": "miscompile",
+    "runtime_driver_error": "crash",
+    "runtime_unknown": "unknown",
+}
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
@@ -1296,20 +1309,11 @@ def main() -> None:
                 # itself may specify pipeline inputs/outputs in a way only some
                 # runtimes reject — so these upgrades stay 'suspected', never
                 # 'confirmed'.
-                if "api_pattern" in axes and "gpu_pattern" not in axes:
-                    if t["classification"] == "runtime_miscompile":
-                        t["classification"] = "api_backend_suspected_miscompile"
-                    elif t["classification"] == "runtime_driver_error":
-                        t["classification"] = "api_backend_suspected_crash"
-                    elif t["classification"] == "runtime_unknown":
-                        t["classification"] = "api_backend_suspected_unknown"
-                else:
-                    if t["classification"] == "runtime_miscompile":
-                        t["classification"] = "runtime_driver_suspected_miscompile"
-                    elif t["classification"] == "runtime_driver_error":
-                        t["classification"] = "runtime_driver_suspected_crash"
-                    elif t["classification"] == "runtime_unknown":
-                        t["classification"] = "runtime_driver_suspected_unknown"
+                suffix = _RUNTIME_UPGRADE_SUFFIX.get(t["classification"])
+                if suffix:
+                    api_only = "api_pattern" in axes and "gpu_pattern" not in axes
+                    prefix = "api_backend_suspected" if api_only else "runtime_driver_suspected"
+                    t["classification"] = f"{prefix}_{suffix}"
                 if key not in seen_div:
                     seen_div.add(key)
                     divergences.append({
