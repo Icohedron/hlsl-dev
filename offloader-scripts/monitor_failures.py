@@ -33,6 +33,7 @@ import argparse
 import csv
 import datetime as dt
 import gzip
+import html
 import io
 import json
 import os
@@ -699,6 +700,37 @@ def _truncate(text: str, limit: int = 60) -> str:
     """Collapse whitespace and clip to `limit` chars (for table cells)."""
     text = " ".join((text or "").split())
     return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
+# --- Linked-issue rendering shared by the markdown and HTML reports ----------
+
+def _issue_records(t: dict) -> list[dict]:
+    """Every linked-issue dict for a test entry, primary first, de-duped by url."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    li = t.get("linked_issue")
+    for rec in ([li] if li else []) + (t.get("linked_issues") or []):
+        u = rec.get("url")
+        if u and u not in seen:
+            seen.add(u)
+            out.append(rec)
+    return out
+
+
+def _issue_number(url: str) -> str:
+    m = ISSUE_URL_RE.search(url or "")
+    return f"#{m.group('num')}" if m else "issue"
+
+
+def _issue_emoji(state: str | None, state_reason: str | None = None) -> str:
+    """Compact status glyph: open / completed-closed / not-planned-closed."""
+    s = (state or "").lower()
+    if s == "open":
+        return "\U0001F7E2"          # green circle
+    if s == "closed":
+        # completed (fixed) vs not_planned (won't-fix) get different glyphs.
+        return "\U0001F7E3" if (state_reason or "").lower() == "completed" else "\u26AB"
+    return "\u26AA"                  # white circle: unknown / unfetched
 
 
 def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
@@ -1493,6 +1525,193 @@ def _fmt_commits(commits: dict) -> str:
         bits.append(f"dxc `{commits['directxshadercompiler'][:9]}`")
     return " · ".join(bits)
 
+
+# ---------------------------------------------------------------------------
+# HTML report
+#
+# A single self-contained file (inline CSS/JS, no external requests) meant to be
+# opened locally or served via GitHub Pages — GitHub does NOT render committed
+# .html in the repo file view, so summary.md stays the on-GitHub surface and
+# this is the richer local view. Wrapping cells, colour-coded chips, issue
+# status badges with the title on hover, and a live text filter.
+# ---------------------------------------------------------------------------
+
+_HTML_CSS = """
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  margin:1.5rem;color:#1f2328;background:#fff;line-height:1.45}
+h1{font-size:1.5rem} h2{font-size:1.15rem;margin-top:1.6rem}
+h1,h2{border-bottom:1px solid #d0d7de;padding-bottom:.3rem}
+a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
+.meta{color:#656d76;font-size:13px;margin:.2rem 0 1rem}
+table{border-collapse:collapse;width:100%;margin:.5rem 0 1rem;font-size:13px}
+th,td{border:1px solid #d0d7de;padding:5px 8px;text-align:left;vertical-align:top}
+th{background:#f6f8fa;position:sticky;top:0;z-index:1}
+tbody tr:nth-child(even){background:#f9fafb}
+td.test{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
+  white-space:nowrap;max-width:34ch;overflow:hidden;text-overflow:ellipsis}
+td.note{max-width:44ch;color:#57606a;font-size:12px}
+.muted{color:#656d76;font-size:12px}
+.chip{display:inline-block;padding:1px 7px;border-radius:2em;font-size:11px;
+  font-weight:600;color:#fff;white-space:nowrap}
+.badge{display:inline-block;padding:0 6px;border-radius:2em;font-size:11px;
+  font-weight:600;text-decoration:none;margin:1px 3px 1px 0;white-space:nowrap;
+  border:1px solid transparent}
+.b-open{background:#dafbe1;color:#1a7f37;border-color:#1a7f37}
+.b-fixed{background:#fbefff;color:#8250df;border-color:#8250df}
+.b-wontfix{background:#eaeef2;color:#57606a;border-color:#8c959f}
+.b-unknown{background:#fff;color:#57606a;border-color:#d0d7de}
+.res-FAIL{color:#cf222e;font-weight:700}
+.res-XPASS{color:#0969da;font-weight:700}
+.ok{color:#1a7f37;font-weight:600}.bad{color:#cf222e;font-weight:600}
+details{margin:.3rem 0}summary{cursor:pointer;font-weight:600}
+#filter{margin:.6rem 0;padding:6px 10px;width:min(360px,90%);font-size:13px;
+  border:1px solid #d0d7de;border-radius:6px}
+.count{color:#656d76;font-weight:400;font-size:12px}
+"""
+
+_HTML_JS = """
+function filt(v){v=v.toLowerCase();
+  document.querySelectorAll('tr.f').forEach(function(r){
+    r.style.display=r.textContent.toLowerCase().indexOf(v)>=0?'':'none';});}
+"""
+
+
+def _label_color(label: str) -> str:
+    l = label or ""
+    if "miscompile" in l:
+        return "#8250df"
+    if "crash" in l or "driver_error" in l:
+        return "#cf222e"
+    if "pipeline" in l:
+        return "#bf8700"
+    if "shader_compile" in l:
+        return "#953800"
+    if l == "build_failure":
+        return "#cf222e"
+    if l == "xpass":
+        return "#0969da"
+    return "#57606a"  # unknown / other
+
+
+def _html_chip(label: str) -> str:
+    if not label:
+        return ""
+    return f'<span class="chip" style="background:{_label_color(label)}">{html.escape(label)}</span>'
+
+
+def _html_issue_badges(t: dict) -> str:
+    recs = _issue_records(t)
+    if not recs:
+        return '<span class="muted">\u2014</span>'
+    out = []
+    for r in recs:
+        state = (r.get("state") or "").lower()
+        reason = (r.get("state_reason") or "").lower()
+        cls = ("b-open" if state == "open"
+               else "b-fixed" if reason == "completed"
+               else "b-wontfix" if state == "closed"
+               else "b-unknown")
+        label = f"{_issue_number(r['url'])} {state or '?'}"
+        tip = html.escape(r.get("title") or "", quote=True)
+        out.append(f'<a class="badge {cls}" href="{html.escape(r["url"])}" '
+                   f'title="{tip}" target="_blank">{html.escape(label)}</a>')
+    return "".join(out)
+
+
+def _html_note(t: dict) -> str:
+    bits = []
+    if t.get("note"):
+        bits.append(html.escape(t["note"]))
+    if t.get("passes_on"):
+        bits.append('<span class="muted">passes on '
+                    + html.escape(_compact_wf_list(t["passes_on"])) + "</span>")
+    return "<br>".join(bits) or '<span class="muted">\u2014</span>'
+
+
+def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict],
+                       used_labels: Counter) -> str:
+    esc = html.escape
+    h: list[str] = [
+        "<!doctype html><html lang=en><head><meta charset=utf-8>",
+        f"<title>offload-test-suite report {esc(run_ts)}</title>",
+        f"<style>{_HTML_CSS}</style>",
+        "</head><body>",
+        f"<h1>offload-test-suite scheduled-workflow report</h1>",
+        f'<div class=meta>{esc(run_ts)} \u00b7 repo <code>{esc(REPO)}</code> '
+        f"\u00b7 {len(summary)} scheduled workflows</div>",
+    ]
+
+    # Legend (collapsible).
+    if used_labels:
+        h.append("<details><summary>Classification legend "
+                 f'<span class=count>({len(used_labels)} labels in this report)</span></summary>')
+        h.append("<table><thead><tr><th>label</th><th>count</th><th>meaning</th></tr></thead><tbody>")
+        for label, n in used_labels.most_common():
+            expl = " ".join(CLASSIFICATION_LEGEND.get(label, "(no legend entry)").split())
+            h.append(f"<tr><td>{_html_chip(label)}</td><td>{n}</td><td>{esc(expl)}</td></tr>")
+        h.append("</tbody></table></details>")
+
+    # Per-workflow summary table.
+    h.append("<h2>Workflows</h2>")
+    h.append("<table><thead><tr><th>workflow</th><th>conclusion</th><th>category</th>"
+             "<th>detail</th><th># fails</th><th>build (llvm / dxc)</th><th>run</th></tr></thead><tbody>")
+    for r in summary:
+        concl = r.get("conclusion") or r.get("status") or ""
+        ccls = "ok" if concl == "success" else "bad" if concl == "failure" else "muted"
+        n = len(r.get("tests") or [])
+        build = esc(_fmt_commits(r.get("commits") or {})).replace("`", "")
+        h.append(
+            f"<tr><td>{esc(r['workflow'])}</td>"
+            f'<td class="{ccls}">{esc(concl)}</td>'
+            f"<td>{esc(r.get('category') or '')}</td>"
+            f"<td>{esc(r.get('detail') or '')}</td>"
+            f"<td>{n or ''}</td><td>{build}</td>"
+            f'<td><a href="{esc(r["run_url"])}" target=_blank>run</a></td></tr>')
+    h.append("</tbody></table>")
+
+    # Divergences.
+    if divergences:
+        h.append("<h2>Cross-workflow divergences "
+                 '<span class=count>(GPU/API/compiler-specific failures)</span></h2>')
+        h.append("<table><thead><tr><th>test</th><th>classification</th><th>axis</th>"
+                 "<th>fails on</th><th>passes on</th></tr></thead><tbody>")
+        for d in divergences:
+            axis = "; ".join(f"{k.replace('_pattern','')}: {v}"
+                             for k, v in (d.get("axes") or {}).items()) or "\u2014"
+            h.append(
+                f'<tr class=f><td class=test>{esc(d["test"])}</td>'
+                f"<td>{_html_chip(d['classification'])}</td>"
+                f"<td>{esc(axis)}</td>"
+                f'<td class=note>{esc(_compact_wf_list(d["fails_on"]))}</td>'
+                f'<td class=note>{esc(_compact_wf_list(d["passes_on"]))}</td></tr>')
+        h.append("</tbody></table>")
+
+    # Per-workflow failure detail (collapsible), with a shared filter box.
+    workflows_with_tests = [r for r in summary if r.get("tests")]
+    if workflows_with_tests:
+        h.append("<h2>Failures by workflow</h2>")
+        h.append('<input id=filter placeholder="filter tests / classification / issue\u2026" '
+                 'oninput="filt(this.value)">')
+        for r in workflows_with_tests:
+            tests = r["tests"]
+            h.append(f"<details open><summary>{esc(r['workflow'])} "
+                     f'<span class=count>\u2014 {len(tests)} failure(s)</span></summary>')
+            h.append("<table><thead><tr><th>result</th><th>test</th><th>classification</th>"
+                     "<th>issues</th><th>notes</th></tr></thead><tbody>")
+            for t in tests:
+                res = t.get("result", "")
+                h.append(
+                    f'<tr class=f><td class="res-{esc(res)}">{esc(res)}</td>'
+                    f"<td class=test>{esc(t['test'])}</td>"
+                    f"<td>{_html_chip(t.get('classification',''))}</td>"
+                    f"<td>{_html_issue_badges(t)}</td>"
+                    f'<td class=note>{_html_note(t)}</td></tr>')
+            h.append("</tbody></table></details>")
+
+    h.append(f"<script>{_HTML_JS}</script>")
+    h.append("</body></html>")
+    return "\n".join(h)
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--otss-root", default=str(pathlib.Path(__file__).resolve().parent.parent / "offload-test-suite"))
@@ -1644,8 +1863,8 @@ def main() -> None:
                 used_labels[c] += 1
 
     if used_labels:
-        md += ["## Classification legend", "",
-               "Every row's `category` / `classification` column uses one of the labels below.",
+        md += ["<details>",
+               f"<summary>Classification legend ({len(used_labels)} labels in this report)</summary>",
                "",
                "| label (count) | meaning |",
                "|---|---|"]
@@ -1654,14 +1873,16 @@ def main() -> None:
             # collapse newlines/multiple spaces so it fits in a table cell
             expl = " ".join(expl.split())
             md.append(f"| `{label}` (×{n}) | {expl} |")
-        md.append("")
-        md += ["Axes referenced above: **api** (D3D12 / Vulkan / Metal), "
+        md += ["",
+               "Axes: **api** (D3D12 / Vulkan / Metal), "
                "**gpu** (AMD / NVIDIA / Intel / QC / Warp / Lavapipe / Metal), "
                "**compiler** (clang / dxc), **host** (x64 / ARM64 / macOS), "
                "**variant** (GBV / Preview / none). A divergence row's `axes` "
                "dict names the axis on which the failing set is homogeneous — "
                "e.g. `api_pattern: Vulkan-only` means every failing workflow is "
                "Vulkan and at least one non-Vulkan workflow passes.",
+               "",
+               "</details>",
                ""]
 
     md += ["| workflow | conclusion | category | detail | # test failures | build (llvm / dxc) | run |",
@@ -1699,30 +1920,39 @@ def main() -> None:
                       f"{_compact_wf_list(d['fails_on'])} | {_compact_wf_list(d['passes_on'])} |")
         md.append("")
 
-    for r in summary:
-        tests = r.get("tests") or []
-        if not tests:
-            continue
-        md += [f"## {r['workflow']}", "",
-               "| result | test | classification | note |",
-               "|---|---|---|---|"]
+    tested = [r for r in summary if r.get("tests")]
+    if tested:
+        md += ["## Failures by workflow", ""]
+    for r in tested:
+        tests = r["tests"]
+        md += ["<details open>",
+               f"<summary><b>{r['workflow']}</b> — {len(tests)} failure(s)</summary>",
+               "",
+               "| result | test | classification | issues | notes |",
+               "|---|---|---|---|---|"]
         for t in tests:
-            note = []
-            if "linked_issue" in t:
-                li = t["linked_issue"]
-                note.append(f"issue [{li.get('state')}]({li['url']}) — {_truncate(li.get('title',''))}")
-                for extra in t.get("linked_issues") or []:
-                    if extra.get("url") == li.get("url"):
-                        continue
-                    note.append(f"also [{extra.get('state')}]({extra['url']}) — {_truncate(extra.get('title',''))}")
+            recs = _issue_records(t)
+            issues = "<br>".join(
+                f"{_issue_emoji(x.get('state'), x.get('state_reason'))} "
+                f"[{_issue_number(x['url'])}]({x['url']})"
+                for x in recs
+            ) or "—"
+            ncell = []
             if t.get("note"):
-                note.append(t["note"])
+                # Escape pipes so an XFAIL expr like `AMD || NVIDIA` in the note
+                # can't break the markdown table cell.
+                ncell.append(t["note"].replace("|", "\\|"))
             if t.get("passes_on"):
-                note.append(f"passes on {_compact_wf_list(t['passes_on'])}")
-            md.append(f"| {t['result']} | `{t['test']}` | {t.get('classification','')} | {' • '.join(note)} |")
-        md.append("")
+                ncell.append(f"passes on {_compact_wf_list(t['passes_on'])}")
+            notes = "<br>".join(ncell) or "—"
+            md.append(f"| {t['result']} | `{t['test']}` | "
+                      f"{t.get('classification','')} | {issues} | {notes} |")
+        md += ["", "</details>", ""]
     (out_dir / "summary.md").write_text("\n".join(md))
 
+    # html (self-contained rich view for local / GitHub Pages)
+    (out_dir / "summary.html").write_text(
+        render_html_report(run_ts, summary, divergences, used_labels))
     # csv
     with (out_dir / "summary.csv").open("w", newline="") as f:
         w = csv.writer(f)
@@ -1742,7 +1972,7 @@ def main() -> None:
                             ";".join(all_urls), li.get("state",""), r["run_url"]])
 
     print(f"\nReport: {out_dir}", file=sys.stderr)
-    print(f"  summary.md / summary.json / summary.csv / divergences.json", file=sys.stderr)
+    print(f"  summary.md / summary.html / summary.json / summary.csv / divergences.json", file=sys.stderr)
     print(f"  {len(divergences)} cross-GPU divergences", file=sys.stderr)
 
 
