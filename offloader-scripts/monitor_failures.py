@@ -486,6 +486,31 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
     "api_backend_suspected_unknown":
         "Base label was `runtime_unknown`, upgraded via API-axis attribution. The "
         "API/backend correlates but the specific failure mode wasn't parsed from the log.",
+    "api_backend_suspected_unknown":
+        "Base label was `runtime_unknown`, upgraded via API-axis attribution. The "
+        "API/backend correlates but the specific failure mode wasn't parsed from the log.",
+    "compiler_suspected_miscompile":
+        "Base label was `runtime_miscompile`, and the failing set aligns cleanly on the "
+        "**compiler axis** (all failures use one compiler — DXC or clang-dxc — and at "
+        "least one workflow using the other compiler passes) *without* aligning on any "
+        "GPU vendor or API. Every workflow runs the exact same test from the exact same "
+        "source; the only difference is which compiler produced the shader, so a value "
+        "mismatch confined to one compiler points at that compiler's frontend/codegen "
+        "(e.g. DXC vs clang-dxc DXIL differences) rather than a driver or backend. "
+        "Still 'suspected': an under-specified test input can also diverge. See `axes` "
+        "for the pattern (e.g. compiler_pattern: clang-only).",
+    "compiler_suspected_crash":
+        "Base label was `runtime_driver_error`, upgraded on the compiler axis (all "
+        "failures share one compiler, at least one workflow on the other compiler "
+        "passes, with no per-GPU or per-API alignment). A crash confined to shaders "
+        "from one compiler points at that compiler emitting something the runtime "
+        "rejects — but, as with the other suspected labels, it can equally be a "
+        "test-spec issue only that compiler's output surfaces. Compiler-specific crash, "
+        "root cause unconfirmed (compiler bug OR test-spec bug).",
+    "compiler_suspected_unknown":
+        "Base label was `runtime_unknown`, upgraded via compiler-axis attribution. The "
+        "compiler (DXC vs clang-dxc) correlates but the specific failure mode wasn't "
+        "parsed from the log.",
 }
 
 
@@ -1294,8 +1319,9 @@ def classify_run(log_text: str, gh: GH, otss_root: pathlib.Path, issue_cache: di
 
 
 # Base runtime label -> suffix used when the cross-workflow pivot upgrades it.
-# The prefix is `api_backend_suspected` (clean API-axis split) or
-# `runtime_driver_suspected` (per-vendor split); see CLASSIFICATION_LEGEND.
+# The prefix names the tightest aligning axis: `runtime_driver_suspected`
+# (per-vendor GPU split), `api_backend_suspected` (clean API-axis split), or
+# `compiler_suspected` (DXC vs clang-dxc split); see CLASSIFICATION_LEGEND.
 _RUNTIME_UPGRADE_SUFFIX = {
     "runtime_miscompile": "miscompile",
     "runtime_driver_error": "crash",
@@ -1405,17 +1431,32 @@ def main() -> None:
             if passes_on and fails_on and t.get("classification", "").startswith("runtime_"):
                 axes = attribute_divergence(fails_on, passes_on)
                 t["axes"] = axes
-                # If failures line up cleanly on the API axis (e.g. all Vulkan
-                # fail, D3D12/Metal pass), that points at a backend/API layer
-                # rather than a per-vendor driver. Note: a GPU/API-specific
-                # failure is not proof of a driver/backend defect — the test
-                # itself may specify pipeline inputs/outputs in a way only some
-                # runtimes reject — so these upgrades stay 'suspected', never
-                # 'confirmed'.
+                # Pick the axis that most tightly explains the divergence and
+                # attribute the suspected layer accordingly:
+                #   * gpu-aligned      -> per-vendor driver (runtime_driver_suspected)
+                #   * api-aligned      -> API/backend layer  (api_backend_suspected)
+                #   * compiler-aligned -> DXC vs clang-dxc frontend/codegen
+                #                         (compiler_suspected) — same shader source,
+                #                         same runtime, only the compiler differs
+                #   * none of the above -> environment-dependent (runtime_driver_suspected)
+                # More specific axes win: a per-vendor split is checked before an
+                # API split, which is checked before a compiler split, so
+                # compiler_suspected fires only for a clean compiler-only pattern
+                # (heterogeneous api and gpu). Note: a GPU/API/compiler-specific
+                # failure is not proof of a defect in that layer — the test itself
+                # may specify pipeline inputs/outputs in a way only some
+                # configurations reject — so these upgrades stay 'suspected',
+                # never 'confirmed'.
                 suffix = _RUNTIME_UPGRADE_SUFFIX.get(t["classification"])
                 if suffix:
-                    api_only = "api_pattern" in axes and "gpu_pattern" not in axes
-                    prefix = "api_backend_suspected" if api_only else "runtime_driver_suspected"
+                    if "gpu_pattern" in axes:
+                        prefix = "runtime_driver_suspected"
+                    elif "api_pattern" in axes:
+                        prefix = "api_backend_suspected"
+                    elif "compiler_pattern" in axes:
+                        prefix = "compiler_suspected"
+                    else:
+                        prefix = "runtime_driver_suspected"
                     t["classification"] = f"{prefix}_{suffix}"
                 if key not in seen_div:
                     seen_div.add(key)
@@ -1479,12 +1520,15 @@ def main() -> None:
     md.append("")
 
     if divergences:
-        md += ["## Cross-workflow divergences (GPU/API-specific failures)", "",
-               "Tests that fail on some workflows but pass on others. Same shader binary is",
-               "produced on all backends, so divergence points at something",
-               "runtime-environment-specific — a driver/backend bug, or a test that specifies",
-               "pipeline inputs/outputs in a way only some runtimes reject. Labels stay",
-               "'suspected'; none of this alone confirms a driver defect.",
+        md += ["## Cross-workflow divergences (GPU/API/compiler-specific failures)", "",
+               "Tests that fail on some workflows but pass on others. The same test source",
+               "runs everywhere, so divergence points at something configuration-specific:",
+               "a per-vendor driver bug, an API/backend bug, a compiler (DXC vs clang-dxc)",
+               "codegen difference, or a test that specifies pipeline inputs/outputs in a way",
+               "only some configurations reject. On the gpu/api axes the shader binary is",
+               "identical across the diverging workflows; on the compiler axis the binary",
+               "differs (DXC vs clang-dxc), which is itself the suspected cause. Labels stay",
+               "'suspected'; none of this alone confirms a defect.",
                "The 'axis' column names the axis (api / gpu / compiler) on which the failure",
                "set is homogeneous — e.g. 'api: Vulkan-only' = all failing workflows are",
                "Vulkan, at least one non-Vulkan workflow passes.",
