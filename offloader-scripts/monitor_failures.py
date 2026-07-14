@@ -489,6 +489,40 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
 }
 
 
+# lit suite names encode the platform as a suffix on a shared base name:
+#   OffloadTest-vk, OffloadTest-clang-vk, OffloadTest-d3d12,
+#   OffloadTest-warp-d3d12, OffloadTest-clang-warp-d3d12, OffloadTest-mtl, ...
+# (config.name = "OffloadTest-" + <suite>, where <suite> is one of the platform
+#  targets in offload-test-suite/test/CMakeLists.txt: [clang-][warp-]<api>.)
+#
+# The SAME test file (e.g. `Basic/simple.test`) is run under every platform's
+# suite, so `OffloadTest-vk :: Basic/simple.test` and
+# `OffloadTest-warp-d3d12 :: Basic/simple.test` are the same test, differing only
+# in the workflow/runner. To compare a test across workflows we must key on its
+# platform-independent identity: the base suite (platform suffix stripped) + the
+# test path. The platform tokens the suffix carried (vk / d3d12 / warp / ...)
+# are already recovered as pivot axes from the workflow display name
+# (parse_workflow_axes), so dropping them from the key loses no information.
+_SUITE_PLATFORM_SUFFIX_RE = re.compile(
+    r"-(?:clang-)?(?:warp-)?(?:vk|vulkan|d3d12|directx|mtl|metal)$", re.I
+)
+
+
+def normalize_suite(suite: str) -> str:
+    """
+    Strip the platform-specific suffix from a lit suite name so the same test
+    file compares as one identity across workflows. `OffloadTest-clang-warp-d3d12`
+    and `OffloadTest-vk` both normalise to `OffloadTest`. Suite names without a
+    recognised platform suffix (e.g. `OffloadTest-Unit`) are returned unchanged.
+    """
+    return _SUITE_PLATFORM_SUFFIX_RE.sub("", suite)
+
+
+def normalize_test_key(suite: str, test: str) -> tuple[str, str]:
+    """Platform-independent (base_suite, test_path) identity for a lit test."""
+    return (normalize_suite(suite), test)
+
+
 def extract_all_results(log_text: str) -> dict[tuple[str, str], str]:
     """
     Scan the entire log for lit status lines and return a
@@ -1345,9 +1379,12 @@ def main() -> None:
             row["log_file"] = str(log_path.relative_to(out_dir))
             row["commits"] = extract_built_commits(log_text)
 
-            # Feed the pass matrix from every completed run.
+            # Feed the pass matrix from every completed run. Key on the
+            # platform-independent (base_suite, test) identity so the same test
+            # file is grouped across workflows (e.g. OffloadTest-vk and
+            # OffloadTest-warp-d3d12 both fold into OffloadTest for comparison).
             for (suite, test), res in extract_all_results(log_text).items():
-                matrix[(suite, test)][wf["name"]] = res
+                matrix[normalize_test_key(suite, test)][wf["name"]] = res
 
             # Classify only failing runs.
             if run["conclusion"] == "failure":
@@ -1359,7 +1396,7 @@ def main() -> None:
     divergences: list[dict] = []
     for r in summary:
         for t in r.get("tests") or []:
-            key = (t["suite"], t["test"])
+            key = normalize_test_key(t["suite"], t["test"])
             per_wf = matrix.get(key, {})
             passes_on = sorted(w for w, res in per_wf.items() if res == "PASS")
             fails_on = sorted(w for w, res in per_wf.items() if res in ("FAIL", "XPASS"))
@@ -1383,7 +1420,7 @@ def main() -> None:
                 if key not in seen_div:
                     seen_div.add(key)
                     divergences.append({
-                        "suite": t["suite"], "test": t["test"],
+                        "suite": normalize_suite(t["suite"]), "test": t["test"],
                         "classification": t["classification"],
                         "axes": axes,
                         "fails_on": fails_on, "passes_on": passes_on,
