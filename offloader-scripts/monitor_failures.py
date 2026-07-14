@@ -234,7 +234,8 @@ def classify_runtime(block: str) -> str:
     """
     Called when the dxc/clang-dxc step succeeded but a later step failed.
     Distinguish driver crash (offloader access violation, TDR, device lost)
-    from a value/image mismatch (miscompile) vs unknown.
+    from a pipeline-state creation failure, a value/image mismatch
+    (miscompile), or unknown.
     """
     cmds = _parse_lit_commands(block)
     # Focus on the first failing non-compiler command
@@ -244,6 +245,18 @@ def classify_runtime(block: str) -> str:
         "device removed", "device lost", "dxgi_error", "vk_error_device_lost",
         "hung", "tdr", "access violation", "unhandled exception",
         "driver crashed", "d3d12: removing device",
+    )
+    # Pipeline/PSO creation was rejected by the runtime. The shader compiled to
+    # DXIL/SPIR-V fine, but Create*PipelineState / vkCreate*Pipelines failed.
+    # This is distinct from both a driver crash (the process survives and
+    # reports a clean error) and a miscompile (nothing ever executed). Depending
+    # on the HRESULT/VkResult it's usually a backend/driver rejection or a
+    # malformed pipeline spec in the test itself.
+    pipeline_markers = (
+        "failed to create pso",
+        "failed to create pipeline",
+        "failed to create compute pipeline",
+        "failed to create graphics pipeline",
     )
     miscompile_markers = (
         "mismatch", "verify failed", "verification failed",
@@ -260,6 +273,8 @@ def classify_runtime(block: str) -> str:
             payload = (c["stdout"] + "\n" + c["stderr"]).lower()
             if any(m in payload for m in driver_markers):
                 return "runtime_driver_error"
+            if any(m in payload for m in pipeline_markers):
+                return "runtime_pipeline_error"
             if any(re.search(m, payload) for m in miscompile_markers):
                 return "runtime_miscompile"
         if c["kind"] == "filecheck":
@@ -269,6 +284,8 @@ def classify_runtime(block: str) -> str:
     lower = block.lower()
     if any(m in lower for m in driver_markers):
         return "runtime_driver_error"
+    if any(m in lower for m in pipeline_markers):
+        return "runtime_pipeline_error"
     if any(re.search(m, lower) for m in miscompile_markers):
         return "runtime_miscompile"
     return "runtime_unknown"
@@ -405,6 +422,14 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
         "Shader compiled OK, but a later step (typically `offloader.exe`) crashed with "
         "an NT status like 0xC0000005, hit a device-lost / TDR / access-violation "
         "marker, or otherwise reported the driver had gone away.",
+    "runtime_pipeline_error":
+        "Shader compiled OK, but the runtime rejected pipeline-state creation "
+        "(D3D12 `Failed to create PSO.`, Vulkan `Failed to create compute/graphics "
+        "pipeline.`). The offloader reported a clean non-zero error rather than "
+        "crashing, and nothing ever executed. Usually a backend/driver rejection of "
+        "the compiled shader OR a malformed pipeline spec in the test itself "
+        "(root signature / bindings). Distinct from runtime_driver_error (crash) and "
+        "runtime_miscompile (ran, wrong result).",
     "runtime_miscompile":
         "Shader compiled OK, the pipeline ran to completion, but output values or "
         "images didn't match the golden reference (FileCheck failed, verify failed, "
