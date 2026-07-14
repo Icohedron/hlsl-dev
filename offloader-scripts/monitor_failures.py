@@ -1159,16 +1159,37 @@ def match_xpass_to_issue(
         result["issue_urls"] = matched[0].get("issue_urls") or []
         result["matched_expr"] = matched[0]["expr"]
     elif len(matched) > 1:
-        # Multiple clauses fire — pick the one with an issue URL if unique,
-        # else emit them all.
-        with_url = [m for m in matched if m["issue_url"]]
+        # Multiple XFAIL clauses legitimately fire for this runner (e.g. a
+        # Vulkan+Clang+AMD run matches both `Clang && Vulkan` and `AMD`). An
+        # XPASS means every one of those expected-failure conditions passed, so
+        # each linked bug is a candidate. If exactly one matched clause carries
+        # an issue the attribution is unambiguous; otherwise report ALL matched
+        # clauses' issues (with their statuses) rather than dropping them.
+        with_url = [c for c in matched if c["issue_url"]]
         if len(with_url) == 1:
             result["issue_url"] = with_url[0]["issue_url"]
             result["issue_urls"] = with_url[0].get("issue_urls") or []
             result["matched_expr"] = with_url[0]["expr"]
-            result["note"] = f"{len(matched)} XFAIL clauses matched; used the one with a linked issue"
+            result["note"] = f"{len(matched)} XFAIL clauses matched; used the only one with a linked issue"
+        elif with_url:
+            # Aggregate every matched clause's issues, in source order, de-duped.
+            all_urls: list[str] = []
+            seen: set[str] = set()
+            for c in with_url:
+                for u in (c.get("issue_urls") or [c["issue_url"]]):
+                    if u and u not in seen:
+                        seen.add(u)
+                        all_urls.append(u)
+            result["issue_url"] = all_urls[0]
+            result["issue_urls"] = all_urls
+            result["matched_expr"] = "; ".join(c["expr"] for c in with_url)
+            result["ambiguous"] = True
+            result["note"] = (
+                f"ambiguous — {len(with_url)} XFAIL clauses matched "
+                f"({', '.join(c['expr'] for c in with_url)}); all linked issues reported"
+            )
         else:
-            result["note"] = f"{len(matched)} XFAIL clauses matched — ambiguous"
+            result["note"] = f"{len(matched)} XFAIL clauses matched, none linked to an issue"
     else:
         # No definitively-matching clause.
         if inconclusive:
@@ -1430,6 +1451,10 @@ def classify_run(log_text: str, gh: GH, otss_root: pathlib.Path, issue_cache: di
                         "note": match.get("note"),
                         "features": match["features"],
                     }
+                    # Surface an ambiguous / multi-clause match in the summary
+                    # note so it's visible next to the linked issue statuses.
+                    if match.get("note"):
+                        entry["note"] = match["note"]
                 # If we couldn't read the file at the run's commit, the XFAIL
                 # clauses may not reflect what actually ran — flag it.
                 if src == "worktree" and otss_commit:
