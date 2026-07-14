@@ -658,6 +658,48 @@ def parse_workflow_axes(name: str) -> dict[str, str]:
     return {"api": api, "gpu": gpu, "compiler": compiler, "host": host, "variant": variant}
 
 
+def compact_workflow(name: str) -> str:
+    """
+    Short, unambiguous slug for a workflow display name, for dense table cells.
+    Builds `<gpu>/<api>/<compiler>[/<host>][/<variant>]` from the parsed axes,
+    dropping unknown / duplicate tokens (Metal reports gpu==api, so it collapses
+    to one). Host is shown only when it's notable (ARM64 / macOS); x64 is the
+    common default and omitted. Examples:
+      "Windows Vulkan AMD DXC"        -> "AMD/Vulkan/DXC"
+      "macOS Metal DXC"               -> "Metal/DXC/macOS"
+      "Windows ARM64 D3D12 Warp DXC"  -> "Warp/D3D12/DXC/ARM64"
+      "Windows D3D12 AMD Clang GBV"   -> "AMD/D3D12/Clang/GBV"
+    Falls back to the raw name if nothing parses.
+    """
+    ax = parse_workflow_axes(name)
+    parts: list[str] = []
+
+    def add(v: str) -> None:
+        if v and v not in ("unknown", "none") and v not in parts:
+            parts.append(v)
+
+    add(ax["gpu"])
+    add(ax["api"])
+    add({"clang": "Clang", "dxc": "DXC"}.get(ax["compiler"], ""))
+    if ax["host"] in ("ARM64", "macOS"):
+        add(ax["host"])
+    add(ax["variant"])
+    return "/".join(parts) or name
+
+
+def _compact_wf_list(names: list[str]) -> str:
+    """Comma-join workflow names as compact slugs, prefixed with the count."""
+    if not names:
+        return "-"
+    return f"{len(names)}: " + ", ".join(compact_workflow(n) for n in names)
+
+
+def _truncate(text: str, limit: int = 60) -> str:
+    """Collapse whitespace and clip to `limit` chars (for table cells)."""
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
 def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
     """
     Given the workflow-name lists, figure out whether the failure pattern
@@ -1531,7 +1573,9 @@ def main() -> None:
                "'suspected'; none of this alone confirms a defect.",
                "The 'axis' column names the axis (api / gpu / compiler) on which the failure",
                "set is homogeneous — e.g. 'api: Vulkan-only' = all failing workflows are",
-               "Vulkan, at least one non-Vulkan workflow passes.",
+               "Vulkan, at least one non-Vulkan workflow passes. "
+               "The 'fails on' / 'passes on' columns use compact `gpu/api/compiler` "
+               "slugs (with the count) instead of full workflow names.",
                "",
                "| test | classification | axis | fails on | passes on |",
                "|---|---|---|---|---|"]
@@ -1539,7 +1583,7 @@ def main() -> None:
             axis_bits = [f"{k.replace('_pattern','')}: {v}" for k, v in (d.get("axes") or {}).items()]
             axis_str = "; ".join(axis_bits) or "-"
             md.append(f"| `{d['test']}` | {d['classification']} | {axis_str} | "
-                      f"{', '.join(d['fails_on'])} | {', '.join(d['passes_on'])} |")
+                      f"{_compact_wf_list(d['fails_on'])} | {_compact_wf_list(d['passes_on'])} |")
         md.append("")
 
     for r in summary:
@@ -1553,15 +1597,15 @@ def main() -> None:
             note = []
             if "linked_issue" in t:
                 li = t["linked_issue"]
-                note.append(f"issue [{li.get('state')}]({li['url']}) — {li.get('title','')}")
+                note.append(f"issue [{li.get('state')}]({li['url']}) — {_truncate(li.get('title',''))}")
                 for extra in t.get("linked_issues") or []:
                     if extra.get("url") == li.get("url"):
                         continue
-                    note.append(f"also [{extra.get('state')}]({extra['url']}) — {extra.get('title','')}")
+                    note.append(f"also [{extra.get('state')}]({extra['url']}) — {_truncate(extra.get('title',''))}")
             if t.get("note"):
                 note.append(t["note"])
             if t.get("passes_on"):
-                note.append(f"passes on: {', '.join(t['passes_on'])}")
+                note.append(f"passes on {_compact_wf_list(t['passes_on'])}")
             md.append(f"| {t['result']} | `{t['test']}` | {t.get('classification','')} | {' • '.join(note)} |")
         md.append("")
     (out_dir / "summary.md").write_text("\n".join(md))
