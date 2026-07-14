@@ -7,9 +7,11 @@ Run:  python3 -m unittest discover -s offloader-scripts/tests -v
 """
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import sys
+import tempfile
 import unittest
 import unittest.mock
 
@@ -1088,6 +1090,145 @@ class HtmlReport(unittest.TestCase):
 
     def test_classification_chip_present(self):
         self.assertIn("chip", self._report())
+
+
+# ---------------------------------------------------------------------------
+# End-to-end smoke test: drive main() with the network boundary mocked so the
+# full report-generation path runs — workflow loop, classification, the
+# cross-workflow pivot, and the markdown / html / json / csv assembly.
+# ---------------------------------------------------------------------------
+
+_LOG_A = """\
+Runner name: 'HLSLPC-AMD01'
+Syncing repository: llvm/offload-test-suite
+HEAD is now at abc1234ef offload commit
+Syncing repository: llvm/llvm-project
+HEAD is now at f60650c77 llvm commit
+Testing: 3 tests
+PASS: OffloadTest-clang-vk :: Feature/Foo/keep.test (1 of 3)
+FAIL: OffloadTest-clang-vk :: Feature/Foo/bar.test (2 of 3)
+XPASS: OffloadTest-clang-vk :: Feature/StructuredBuffer/inc_counter_array.test (3 of 3)
+******************** TEST 'OffloadTest-clang-vk :: Feature/Foo/bar.test' FAILED ********************
+# executed command: dxc.exe -T cs_6_0 -Fo bar.o bar.hlsl
+# executed command: offloader.exe pipeline.yaml bar.o
+# .---command stdout------------
+# | Test failed: image mismatch
+# `-----------------------------
+# error: command failed with exit status: 1
+********************
+"""
+
+_LOG_B = """\
+Runner name: 'HLSLPC-AMD01'
+Syncing repository: llvm/offload-test-suite
+HEAD is now at abc1234ef offload commit
+Testing: 2 tests
+PASS: OffloadTest-d3d12 :: Feature/Foo/bar.test (1 of 2)
+PASS: OffloadTest-d3d12 :: Feature/Foo/keep.test (2 of 2)
+"""
+
+_LOG_C = """\
+Runner name: 'HLSLPC-NVIDIA01'
+Syncing repository: llvm/llvm-project
+HEAD is now at f60650c77 llvm commit
+CMake Error at clang/CMakeLists.txt:10 (message):
+  something broke in llvm-project
+ninja: build stopped: subcommand failed.
+"""
+
+
+class MainSmoke(unittest.TestCase):
+    def _run_main(self, out_root: pathlib.Path, otss_root: pathlib.Path):
+        workflows = [
+            {"id": 1, "name": "Windows Vulkan AMD Clang",
+             "path": ".github/workflows/a.yaml", "state": "active"},
+            {"id": 2, "name": "Windows D3D12 AMD DXC",
+             "path": ".github/workflows/b.yaml", "state": "active"},
+            {"id": 3, "name": "Windows D3D12 NVIDIA Clang",
+             "path": ".github/workflows/c.yaml", "state": "active"},
+        ]
+        runs = {
+            1: {"id": 1, "html_url": "https://x/1", "conclusion": "failure",
+                "status": "completed", "created_at": "t", "head_sha": "aaa"},
+            2: {"id": 2, "html_url": "https://x/2", "conclusion": "success",
+                "status": "completed", "created_at": "t", "head_sha": "bbb"},
+            3: {"id": 3, "html_url": "https://x/3", "conclusion": "failure",
+                "status": "completed", "created_at": "t", "head_sha": "ccc"},
+        }
+        logs = {1: _LOG_A, 2: _LOG_B, 3: _LOG_C}
+        argv = ["monitor_failures.py",
+                "--otss-root", str(otss_root), "--out-root", str(out_root)]
+        with unittest.mock.patch.object(mf, "load_token", return_value="tok"), \
+             unittest.mock.patch.object(mf, "fetch_workflows", return_value=workflows), \
+             unittest.mock.patch.object(mf, "latest_scheduled_run",
+                                        side_effect=lambda gh, wid: runs[wid]), \
+             unittest.mock.patch.object(mf, "download_run_logs",
+                                        side_effect=lambda gh, rid: rid), \
+             unittest.mock.patch.object(mf, "combined_log_text",
+                                        side_effect=lambda z: logs[z]), \
+             unittest.mock.patch.object(mf, "git_commit_available", return_value=False), \
+             unittest.mock.patch.object(mf, "fetch_issue_state",
+                 return_value={"state": "closed", "state_reason": "completed", "title": "AMD bug"}), \
+             unittest.mock.patch.object(sys, "argv", argv):
+            mf.main()
+        out_dirs = [p for p in out_root.iterdir() if p.is_dir()]
+        self.assertEqual(len(out_dirs), 1)
+        return out_dirs[0]
+
+    def test_full_report_generation(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            otss = td / "otss"
+            tf = otss / "test" / "Feature" / "StructuredBuffer" / "inc_counter_array.test"
+            tf.parent.mkdir(parents=True)
+            tf.write_text("# Bug https://github.com/llvm/offload-test-suite/issues/337\n"
+                          "# XFAIL: AMD\n")
+            out_root = td / "reports"
+            out_dir = self._run_main(out_root, otss)
+
+            # All five artifacts exist.
+            for name in ("summary.md", "summary.html", "summary.json",
+                         "summary.csv", "divergences.json"):
+                self.assertTrue((out_dir / name).exists(), f"missing {name}")
+
+            summary = json.loads((out_dir / "summary.json").read_text())
+            self.assertEqual(len(summary), 3)
+            by_wf = {r["workflow"]: r for r in summary}
+
+            # Build failure classified.
+            self.assertEqual(by_wf["Windows D3D12 NVIDIA Clang"]["category"], "build_failure")
+            self.assertEqual(by_wf["Windows D3D12 NVIDIA Clang"]["detail"], "clang_llvm")
+
+            # Runtime miscompile + XPASS classified on workflow A.
+            a_tests = {t["test"]: t for t in by_wf["Windows Vulkan AMD Clang"]["tests"]}
+            self.assertIn("Feature/Foo/bar.test", a_tests)
+            self.assertEqual(a_tests["Feature/StructuredBuffer/inc_counter_array.test"]["result"], "XPASS")
+            self.assertEqual(
+                a_tests["Feature/StructuredBuffer/inc_counter_array.test"]["linked_issue"]["url"],
+                "https://github.com/llvm/offload-test-suite/issues/337")
+
+            # Cross-workflow pivot upgraded bar.test (fails on Vulkan, passes on D3D12).
+            self.assertTrue(a_tests["Feature/Foo/bar.test"]["classification"].endswith("_suspected_miscompile"))
+            divs = json.loads((out_dir / "divergences.json").read_text())
+            self.assertTrue(any(d["test"] == "Feature/Foo/bar.test" for d in divs))
+
+            # Markdown structure: collapsible sections, short issue link, no suite prefix.
+            md = (out_dir / "summary.md").read_text()
+            self.assertIn("<details", md)
+            self.assertIn("## Failures by workflow", md)
+            self.assertIn("[#337](", md)
+            self.assertIn("| result | test | classification | issues | notes |", md)
+            self.assertNotIn("OffloadTest-clang-vk ::", md)  # suite prefix stripped
+
+            # HTML: badge with hover title + chip, well-formed close.
+            h = (out_dir / "summary.html").read_text()
+            self.assertIn('title="AMD bug"', h)
+            self.assertIn("chip", h)
+            self.assertTrue(h.rstrip().endswith("</html>"))
+
+            # Log archives written per workflow.
+            self.assertTrue((out_dir / "logs").is_dir())
+            self.assertTrue(list((out_dir / "logs").glob("*.log.gz")))
 
 if __name__ == "__main__":
     unittest.main()
