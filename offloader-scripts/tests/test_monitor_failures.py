@@ -748,7 +748,8 @@ class ClassificationLegend(unittest.TestCase):
         # Base labels from classify_run
         "build_failure",
         "shader_compile_dxc", "shader_compile_clang_dxc",
-        "runtime_driver_error", "runtime_miscompile", "runtime_unknown",
+        "runtime_driver_error", "runtime_pipeline_error",
+        "runtime_miscompile", "runtime_unknown",
         "xpass",
         # Upgraded labels from the cross-workflow pivot
         "runtime_driver_suspected_miscompile",
@@ -757,6 +758,9 @@ class ClassificationLegend(unittest.TestCase):
         "api_backend_suspected_miscompile",
         "api_backend_suspected_crash",
         "api_backend_suspected_unknown",
+        "compiler_suspected_miscompile",
+        "compiler_suspected_crash",
+        "compiler_suspected_unknown",
     }
 
     def test_every_label_documented(self):
@@ -810,6 +814,280 @@ class BuiltCommits(unittest.TestCase):
     def test_empty(self):
         self.assertEqual(mf.extract_built_commits(""), {})
 
+# ---------------------------------------------------------------------------
+# Session additions: pipeline-error classification, suite normalisation,
+# compiler axis, compact slugs, issue rendering, commit-pinned test reads,
+# ambiguous XFAIL, and HTML report.
+# ---------------------------------------------------------------------------
+
+
+def _runtime_block(cmd_kind: str, exit_status: str, stdout: str = "", stderr: str = "") -> str:
+    """
+    Build a minimal lit failure block: a dxc compile that succeeds followed by a
+    later command that fails, in the exact shape _parse_lit_commands expects.
+    """
+    tool = {"offloader": "offloader.exe", "filecheck": "FileCheck"}.get(cmd_kind, cmd_kind)
+    lines = [
+        "# executed command: dxc.exe -T cs_6_0 -Fo shader.o shader.hlsl",
+        f"# executed command: {tool} pipeline.yaml shader.o",
+    ]
+    if stdout:
+        lines += ["# .---command stdout------------"]
+        lines += [f"# | {ln}" for ln in stdout.splitlines()]
+        lines += ["# `-----------------------------"]
+    if stderr:
+        lines += ["# .---command stderr------------"]
+        lines += [f"# | {ln}" for ln in stderr.splitlines()]
+        lines += ["# `-----------------------------"]
+    lines += [f"# error: command failed with exit status: {exit_status}"]
+    return "\n".join(lines)
+
+
+class RuntimePipelineError(unittest.TestCase):
+    def test_d3d12_pso_creation(self):
+        b = _runtime_block("offloader", "1", stdout="Failed to create PSO.")
+        self.assertEqual(mf.classify_runtime(b), "runtime_pipeline_error")
+
+    def test_vulkan_pipeline_creation(self):
+        b = _runtime_block("offloader", "1", stderr="Failed to create compute pipeline.")
+        self.assertEqual(mf.classify_runtime(b), "runtime_pipeline_error")
+
+    def test_driver_crash_takes_precedence_over_pipeline(self):
+        # A device-removed during PSO creation is still a driver crash.
+        b = _runtime_block("offloader", "1", stdout="Failed to create PSO. device removed")
+        self.assertEqual(mf.classify_runtime(b), "runtime_driver_error")
+
+    def test_nt_status_crash_still_driver_error(self):
+        b = _runtime_block("offloader", "0xc0000005", stdout="Failed to create PSO.")
+        self.assertEqual(mf.classify_runtime(b), "runtime_driver_error")
+
+    def test_miscompile_not_misclassified_as_pipeline(self):
+        b = _runtime_block("offloader", "1", stdout="Test failed: image mismatch")
+        self.assertEqual(mf.classify_runtime(b), "runtime_miscompile")
+
+    def test_plain_nonzero_still_unknown(self):
+        b = _runtime_block("offloader", "1", stdout="something unhelpful")
+        self.assertEqual(mf.classify_runtime(b), "runtime_unknown")
+
+
+class NormalizeSuite(unittest.TestCase):
+    def test_platform_suffixes_collapse(self):
+        for s in ["OffloadTest-vk", "OffloadTest-clang-vk", "OffloadTest-d3d12",
+                  "OffloadTest-clang-d3d12", "OffloadTest-warp-d3d12",
+                  "OffloadTest-clang-warp-d3d12", "OffloadTest-mtl",
+                  "OffloadTest-clang-mtl"]:
+            with self.subTest(suite=s):
+                self.assertEqual(mf.normalize_suite(s), "OffloadTest")
+
+    def test_non_platform_suite_unchanged(self):
+        self.assertEqual(mf.normalize_suite("OffloadTest-Unit"), "OffloadTest-Unit")
+
+    def test_test_key_groups_across_platforms(self):
+        k1 = mf.normalize_test_key("OffloadTest-warp-d3d12", "Basic/simple.test")
+        k2 = mf.normalize_test_key("OffloadTest-clang-vk", "Basic/simple.test")
+        self.assertEqual(k1, k2)
+        self.assertEqual(k1, ("OffloadTest", "Basic/simple.test"))
+
+
+class DivergenceSuspectPrefix(unittest.TestCase):
+    def test_gpu_wins(self):
+        self.assertEqual(
+            mf.divergence_suspect_prefix({"gpu_pattern": "AMD-only", "api_pattern": "Vulkan-only"}),
+            "runtime_driver_suspected")
+
+    def test_api_when_no_gpu(self):
+        self.assertEqual(
+            mf.divergence_suspect_prefix({"api_pattern": "Vulkan-only"}),
+            "api_backend_suspected")
+
+    def test_compiler_when_no_gpu_or_api(self):
+        self.assertEqual(
+            mf.divergence_suspect_prefix({"compiler_pattern": "clang-only"}),
+            "compiler_suspected")
+
+    def test_fallback(self):
+        self.assertEqual(
+            mf.divergence_suspect_prefix({"host_pattern": "ARM64-only"}),
+            "runtime_driver_suspected")
+
+
+class CompactWorkflow(unittest.TestCase):
+    CASES = [
+        ("Windows Vulkan AMD DXC",        "AMD/Vulkan/DXC"),
+        ("Windows Vulkan AMD Clang",      "AMD/Vulkan/Clang"),
+        ("Windows D3D12 Warp DXC",        "Warp/D3D12/DXC"),
+        ("macOS Metal DXC",              "Metal/DXC/macOS"),
+        ("Windows ARM64 D3D12 Warp DXC",  "Warp/D3D12/DXC/ARM64"),
+        ("Windows D3D12 AMD Clang GBV",   "AMD/D3D12/Clang/GBV"),
+    ]
+
+    def test_slugs(self):
+        for name, slug in self.CASES:
+            with self.subTest(name=name):
+                self.assertEqual(mf.compact_workflow(name), slug)
+
+    def test_compact_list_has_count(self):
+        out = mf._compact_wf_list(["Windows Vulkan AMD DXC", "macOS Metal DXC"])
+        self.assertEqual(out, "2: AMD/Vulkan/DXC, Metal/DXC/macOS")
+
+    def test_compact_list_empty(self):
+        self.assertEqual(mf._compact_wf_list([]), "-")
+
+    def test_truncate(self):
+        self.assertEqual(mf._truncate("abcdef", 10), "abcdef")
+        self.assertTrue(mf._truncate("x" * 100, 20).endswith("\u2026"))
+        self.assertEqual(len(mf._truncate("x" * 100, 20)), 20)
+
+
+class IssueRendering(unittest.TestCase):
+    T = {
+        "linked_issue": {"url": "https://github.com/llvm/offload-test-suite/issues/337",
+                         "state": "closed", "state_reason": "completed", "title": "AMD bug"},
+        "linked_issues": [
+            {"url": "https://github.com/llvm/llvm-project/issues/162841",
+             "state": "open", "state_reason": None, "title": "VK bug"},
+            {"url": "https://github.com/llvm/offload-test-suite/issues/337",
+             "state": "closed", "state_reason": "completed", "title": "AMD bug"},
+        ],
+    }
+
+    def test_records_primary_first_deduped(self):
+        recs = mf._issue_records(self.T)
+        urls = [r["url"] for r in recs]
+        self.assertEqual(urls, [
+            "https://github.com/llvm/offload-test-suite/issues/337",
+            "https://github.com/llvm/llvm-project/issues/162841",
+        ])
+
+    def test_issue_number(self):
+        self.assertEqual(mf._issue_number("https://github.com/o/r/issues/42"), "#42")
+        self.assertEqual(mf._issue_number("not-a-url"), "issue")
+
+    def test_emoji(self):
+        self.assertEqual(mf._issue_emoji("open"), "\U0001F7E2")
+        self.assertEqual(mf._issue_emoji("closed", "completed"), "\U0001F7E3")
+        self.assertEqual(mf._issue_emoji("closed", "not_planned"), "\u26AB")
+        self.assertEqual(mf._issue_emoji(None), "\u26AA")
+
+
+class AmbiguousXfailMatch(unittest.TestCase):
+    TEXT = (
+        "# Bug https://github.com/llvm/llvm-project/issues/162841\n"
+        "# XFAIL: Clang && Vulkan\n"
+        "\n"
+        "# Bug https://github.com/llvm/offload-test-suite/issues/337\n"
+        "# XFAIL: AMD\n"
+    )
+
+    def test_reports_all_matched_issues(self):
+        r = mf.match_xpass_to_issue(self.TEXT, "Windows Vulkan AMD Clang", "HLSLPC-AMD01")
+        self.assertTrue(r.get("ambiguous"))
+        self.assertEqual(sorted(r["issue_urls"]), [
+            "https://github.com/llvm/llvm-project/issues/162841",
+            "https://github.com/llvm/offload-test-suite/issues/337",
+        ])
+        self.assertIn("ambiguous", r["note"])
+
+    def test_single_match_not_ambiguous(self):
+        # A D3D12 AMD DXC run matches only the AMD clause.
+        r = mf.match_xpass_to_issue(self.TEXT, "Windows D3D12 AMD DXC", "HLSLPC-AMD01")
+        self.assertNotIn("ambiguous", r)
+        self.assertEqual(r["issue_url"], "https://github.com/llvm/offload-test-suite/issues/337")
+
+
+class ReadTestFileForRun(unittest.TestCase):
+    def test_worktree_fallback_when_no_commit(self):
+        # commit=None -> always the working tree, source 'worktree'.
+        with unittest.mock.patch.object(mf, "find_test_file") as ff:
+            fake = pathlib.Path(FIX) / "lit_status_lines.txt"  # any real file under tests/
+            ff.return_value = fake
+            # relative_to needs a root that contains the file:
+            text, rel, src = mf.read_test_file_for_run(FIX, "OffloadTest-vk", "lit_status_lines.txt", None)
+        self.assertEqual(src, "worktree")
+        self.assertTrue(text)
+
+    def test_prefers_commit_blob_when_available(self):
+        with unittest.mock.patch.object(mf, "find_test_file") as ff, \
+             unittest.mock.patch.object(mf, "git_commit_available", return_value=True), \
+             unittest.mock.patch.object(mf, "git_show_file", return_value="BLOB CONTENT") as gs:
+            ff.return_value = pathlib.Path(FIX) / "lit_status_lines.txt"
+            text, rel, src = mf.read_test_file_for_run(FIX, "OffloadTest-vk", "lit_status_lines.txt", "abc1234567")
+        self.assertEqual(text, "BLOB CONTENT")
+        self.assertEqual(src, "abc123456")  # short sha (9)
+        gs.assert_called_once()
+
+    def test_falls_back_when_blob_missing(self):
+        with unittest.mock.patch.object(mf, "find_test_file") as ff, \
+             unittest.mock.patch.object(mf, "git_commit_available", return_value=True), \
+             unittest.mock.patch.object(mf, "git_show_file", return_value=None):
+            ff.return_value = pathlib.Path(FIX) / "lit_status_lines.txt"
+            text, rel, src = mf.read_test_file_for_run(FIX, "OffloadTest-vk", "lit_status_lines.txt", "abc1234567")
+        self.assertEqual(src, "worktree")
+        self.assertTrue(text)
+
+    def test_missing_file_returns_none(self):
+        with unittest.mock.patch.object(mf, "find_test_file", return_value=None):
+            text, rel, src = mf.read_test_file_for_run(FIX, "OffloadTest-vk", "nope.test", "abc")
+        self.assertIsNone(text)
+        self.assertIsNone(rel)
+
+
+class HtmlReport(unittest.TestCase):
+    def _report(self):
+        from collections import Counter
+        summary = [{
+            "workflow": "Windows Vulkan AMD Clang", "conclusion": "failure",
+            "category": "test_failure", "detail": None, "run_url": "https://x/1",
+            "commits": {}, "tests": [{
+                "result": "XPASS", "suite": "OffloadTest-clang-vk",
+                "test": "Feature/StructuredBuffer/inc_counter_array.test",
+                "classification": "xpass", "note": "ambiguous \u2014 2 clauses",
+                "linked_issue": {"url": "https://github.com/llvm/offload-test-suite/issues/337",
+                                 "state": "closed", "state_reason": "completed", "title": "AMD bug"},
+                "linked_issues": [
+                    {"url": "https://github.com/llvm/offload-test-suite/issues/337",
+                     "state": "closed", "state_reason": "completed", "title": "AMD bug"}],
+                "passes_on": ["Windows D3D12 Warp DXC"]}]}]
+        divs = [{"suite": "OffloadTest", "test": "Feature/StructuredBuffer/inc_counter_array.test",
+                 "classification": "api_backend_suspected_miscompile",
+                 "axes": {"api_pattern": "Vulkan-only"},
+                 "fails_on": ["Windows Vulkan AMD Clang"], "passes_on": ["Windows D3D12 Warp DXC"]}]
+        return mf.render_html_report("2026-07-14T00-00-00Z", summary, divs, Counter({"xpass": 1}))
+
+    def test_well_formed_and_contains_key_content(self):
+        h = self._report()
+        self.assertTrue(h.lstrip().lower().startswith("<!doctype"))
+        self.assertTrue(h.rstrip().endswith("</html>"))
+        # balanced non-void tags
+        from html.parser import HTMLParser
+
+        class V(HTMLParser):
+            void = {"meta", "input", "br", "img", "link", "hr"}
+
+            def __init__(self):
+                super().__init__()
+                self.stack = []
+
+            def handle_starttag(self, t, a):
+                if t not in self.void:
+                    self.stack.append(t)
+
+            def handle_endtag(self, t):
+                if self.stack and self.stack[-1] == t:
+                    self.stack.pop()
+                elif t in self.stack:
+                    while self.stack and self.stack.pop() != t:
+                        pass
+
+        v = V()
+        v.feed(h)
+        self.assertEqual(v.stack, [])
+
+    def test_issue_badge_has_hover_title(self):
+        self.assertIn('title="AMD bug"', self._report())
+
+    def test_classification_chip_present(self):
+        self.assertIn("chip", self._report())
 
 if __name__ == "__main__":
     unittest.main()

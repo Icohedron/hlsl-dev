@@ -1516,6 +1516,23 @@ _RUNTIME_UPGRADE_SUFFIX = {
 }
 
 
+def divergence_suspect_prefix(axes: dict) -> str:
+    """
+    Choose the suspected-layer prefix for a cross-workflow divergence from its
+    attributed axes. More specific axes win: a per-vendor GPU split is checked
+    before an API split, which is checked before a compiler split; anything else
+    is treated as environment-dependent. Returns one of
+    'runtime_driver_suspected' | 'api_backend_suspected' | 'compiler_suspected'.
+    """
+    if "gpu_pattern" in axes:
+        return "runtime_driver_suspected"
+    if "api_pattern" in axes:
+        return "api_backend_suspected"
+    if "compiler_pattern" in axes:
+        return "compiler_suspected"
+    return "runtime_driver_suspected"
+
+
 def _fmt_commits(commits: dict) -> str:
     """Compact `llvm <sha> · dxc <sha>` for the summary table (empty if unknown)."""
     bits = []
@@ -1823,14 +1840,7 @@ def main() -> None:
                 # never 'confirmed'.
                 suffix = _RUNTIME_UPGRADE_SUFFIX.get(t["classification"])
                 if suffix:
-                    if "gpu_pattern" in axes:
-                        prefix = "runtime_driver_suspected"
-                    elif "api_pattern" in axes:
-                        prefix = "api_backend_suspected"
-                    elif "compiler_pattern" in axes:
-                        prefix = "compiler_suspected"
-                    else:
-                        prefix = "runtime_driver_suspected"
+                    prefix = divergence_suspect_prefix(axes)
                     t["classification"] = f"{prefix}_{suffix}"
                 if key not in seen_div:
                     seen_div.add(key)
