@@ -38,6 +38,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -1198,6 +1199,83 @@ def find_test_file(repo_root: pathlib.Path, suite: str, relpath: str) -> pathlib
         return hit
     return None
 
+# --- Reading test files at the commit the CI run actually tested -------------
+#
+# The XPASS -> issue matcher parses XFAIL clauses out of the test file. If we
+# read the file from the current working tree, clauses added or removed since
+# the run executed corrupt the match (e.g. a `# XFAIL: Clang && Vulkan` clause
+# added after the run makes a Vulkan+Clang XPASS look like it matches two
+# clauses -> "ambiguous", when at run time only `# XFAIL: AMD` existed). Each
+# scheduled run logs the offload-test-suite commit it built (extract_built_
+# commits), so we read the file content as it existed at *that* commit via
+# `git show <sha>:<path>`, without mutating the working tree. Falls back to the
+# working tree when the commit isn't available locally (shallow clone).
+
+# (repo_root, commit) -> bool: is the commit object present locally?
+_GIT_COMMIT_AVAILABLE: dict[tuple[str, str], bool] = {}
+
+
+def _git(repo_root: pathlib.Path, *args: str, timeout: int = 60):
+    """Run a git command in repo_root; return CompletedProcess or None on error."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            capture_output=True, timeout=timeout,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+
+
+def git_commit_available(repo_root: pathlib.Path, commit: str) -> bool:
+    """
+    True if `commit` is a resolvable commit object in repo_root. If it's missing
+    (shallow clone), make one best-effort attempt to fetch just that commit
+    (works against servers that allow fetch-by-sha; harmless otherwise). Cached.
+    """
+    key = (str(repo_root), commit)
+    if key in _GIT_COMMIT_AVAILABLE:
+        return _GIT_COMMIT_AVAILABLE[key]
+    r = _git(repo_root, "cat-file", "-e", f"{commit}^{{commit}}")
+    ok = r is not None and r.returncode == 0
+    if not ok:
+        fr = _git(repo_root, "fetch", "--quiet", "--depth", "1", "origin", commit, timeout=120)
+        if fr is not None and fr.returncode == 0:
+            r2 = _git(repo_root, "cat-file", "-e", f"{commit}^{{commit}}")
+            ok = r2 is not None and r2.returncode == 0
+    _GIT_COMMIT_AVAILABLE[key] = ok
+    return ok
+
+
+def git_show_file(repo_root: pathlib.Path, commit: str, gitpath: str) -> str | None:
+    """Return the text of `gitpath` at `commit`, or None if it can't be read."""
+    r = _git(repo_root, "show", f"{commit}:{gitpath}")
+    if r is not None and r.returncode == 0:
+        return r.stdout.decode("utf-8", errors="replace")
+    return None
+
+
+def read_test_file_for_run(
+    otss_root: pathlib.Path, suite: str, relpath: str, commit: str | None
+) -> tuple[str | None, str | None, str | None]:
+    """
+    Return (text, rel_path, source) for a test file, preferring its content at the
+    CI run's offload-test-suite `commit` so XFAIL clauses match what actually ran.
+    `source` is the short commit sha when the git blob was used, or 'worktree'
+    when we fell back to the checked-out file (its clauses may be newer/older than
+    the run). Locates the on-disk path first to derive the repo-relative git path.
+    """
+    p = find_test_file(otss_root, suite, relpath)
+    if p is None:
+        return None, None, None
+    rel = p.relative_to(otss_root)
+    if commit and git_commit_available(otss_root, commit):
+        text = git_show_file(otss_root, commit, rel.as_posix())
+        if text is not None:
+            return text, str(rel), commit[:9]
+    try:
+        return p.read_text(errors="replace"), str(rel), "worktree"
+    except OSError:
+        return None, str(rel), None
 
 def fetch_issue_state(gh: GH, owner: str, repo: str, number: int) -> dict | None:
     try:
@@ -1296,20 +1374,24 @@ def classify_run(log_text: str, gh: GH, otss_root: pathlib.Path, issue_cache: di
         return result
 
     result["category"] = "test_failure"
+    # Commit the run built — used to read each XFAIL test file as it existed then.
+    otss_commit = extract_built_commits(log_text).get("offload-test-suite")
     for b in blocks:
         entry = {"result": b["result"], "suite": b["suite"], "test": b["test"]}
         if b["result"] == "XPASS":
-            testfile = find_test_file(otss_root, b["suite"], b["test"])
-            if testfile is None:
+            text, test_rel, src = read_test_file_for_run(
+                otss_root, b["suite"], b["test"], otss_commit
+            )
+            if not text:
                 entry["classification"] = "xpass"
-                entry["note"] = "test file not found on disk"
+                entry["note"] = (
+                    "test file not found on disk" if test_rel is None
+                    else "could not read test file"
+                )
             else:
-                entry["test_file"] = str(testfile.relative_to(otss_root))
-                try:
-                    text = testfile.read_text(errors="replace")
-                except OSError:
-                    text = ""
-                match = match_xpass_to_issue(text, workflow_name, test_runner) if text else None
+                entry["test_file"] = test_rel
+                entry["test_file_source"] = src  # commit sha, or 'worktree' fallback
+                match = match_xpass_to_issue(text, workflow_name, test_runner)
                 entry["classification"] = "xpass"
                 if match is None:
                     entry["note"] = "could not read test file"
@@ -1348,6 +1430,12 @@ def classify_run(log_text: str, gh: GH, otss_root: pathlib.Path, issue_cache: di
                         "note": match.get("note"),
                         "features": match["features"],
                     }
+                # If we couldn't read the file at the run's commit, the XFAIL
+                # clauses may not reflect what actually ran — flag it.
+                if src == "worktree" and otss_commit:
+                    warn = (f"XFAIL read from working tree; run commit "
+                            f"{otss_commit[:9]} unavailable, clauses may be stale")
+                    entry["note"] = f"{entry['note']} • {warn}" if entry.get("note") else warn
         else:
             compile_kind = classify_shader_compile(b["block"])
             if compile_kind:
