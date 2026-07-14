@@ -1538,7 +1538,7 @@ def main() -> None:
         for d in divergences:
             axis_bits = [f"{k.replace('_pattern','')}: {v}" for k, v in (d.get("axes") or {}).items()]
             axis_str = "; ".join(axis_bits) or "-"
-            md.append(f"| `{d['suite']} :: {d['test']}` | {d['classification']} | {axis_str} | "
+            md.append(f"| `{d['test']}` | {d['classification']} | {axis_str} | "
                       f"{', '.join(d['fails_on'])} | {', '.join(d['passes_on'])} |")
         md.append("")
 
@@ -1562,7 +1562,7 @@ def main() -> None:
                 note.append(t["note"])
             if t.get("passes_on"):
                 note.append(f"passes on: {', '.join(t['passes_on'])}")
-            md.append(f"| {t['result']} | `{t['suite']} :: {t['test']}` | {t.get('classification','')} | {' • '.join(note)} |")
+            md.append(f"| {t['result']} | `{t['test']}` | {t.get('classification','')} | {' • '.join(note)} |")
         md.append("")
     (out_dir / "summary.md").write_text("\n".join(md))
 
