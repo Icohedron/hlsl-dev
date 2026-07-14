@@ -331,6 +331,22 @@ def full_failure_block(snap: Snapshot, workflow: str, suite: str, test: str) -> 
     return None
 
 
+def build_failure_excerpt(snap: Snapshot, workflow: str, before: int = 25,
+                          after: int = 8) -> str | None:
+    """Log lines around the first build-error marker (falls back to the log tail)."""
+    text = snap._log(workflow)
+    if not text:
+        return None
+    lines = text.splitlines()
+    for idx, raw in enumerate(lines):
+        line = mf.strip_ts(raw)
+        for _kind, rx in mf.BUILD_FAIL_MARKERS:
+            if rx.search(line):
+                lo, hi = max(0, idx - before), min(len(lines), idx + after)
+                return "\n".join(mf.strip_ts(l) for l in lines[lo:hi]) or None
+    return "\n".join(mf.strip_ts(l) for l in lines[-40:]) or None
+
+
 _SPLIT_MARK_RE = re.compile(r"^[#/;]{1,3}---\s+(\S+)\s*$")
 
 
@@ -447,15 +463,18 @@ def _slug(*parts: str) -> str:
 
 
 def triage_bisect(ctx: "Ctx", workflow: str, category: str | None, detail: str | None,
-                  suite: str, test: str, classification: str | None) -> tuple[str, dict]:
+                  suite: str, test: str, classification: str | None,
+                  rng: "Range | None" = None) -> tuple[str, dict]:
     repo = repo_for_failure(category, detail, classification)
     kind = classification or category or "failure"
     if category == "build_failure":
-        rng = ctx.history.bound_build(repo, workflow)
+        if rng is None:
+            rng = ctx.history.bound_build(repo, workflow)
         signature = f"{workflow} build failed (detail={detail})"
-        block = None
+        block = build_failure_excerpt(ctx.target, workflow)
     else:
-        rng = ctx.history.bound_test(repo, workflow, suite, test)
+        if rng is None:
+            rng = ctx.history.bound_test(repo, workflow, suite, test)
         signature = f"{suite} :: {test} — {classification}"
         block = full_failure_block(ctx.target, workflow, suite, test)
 
@@ -503,11 +522,25 @@ def triage_bisect(ctx: "Ctx", workflow: str, category: str | None, detail: str |
         md.append("")
     meta["candidate_count"] = len(commits)
 
-    # Agent narrowing (optional).
-    prompt = _bisect_prompt(kind, workflow, signature, repo, rng, commits, block)
-    md += _agent_section(ctx, prompt,
-                         cwd=ctx.repo_root(repo) if repo and rng.bounded else None,
-                         heading="Suspected first-faulting commit")
+    # Agent step 1 — commit bisection. Only meaningful with a bounded good..bad
+    # range; without a last-passing report there is no known-good commit to
+    # bisect against, so skip it entirely rather than request a range-less bisect.
+    if rng.good_sha:
+        bisect_prompt = _bisect_prompt(kind, workflow, signature, repo, rng, commits, block)
+        md += _agent_section(ctx, bisect_prompt,
+                             cwd=ctx.repo_root(repo) if repo and rng.bounded else None,
+                             heading="Suspected first-faulting commit")
+    else:
+        md += ["## Bisect skipped", "",
+               "_No last-passing report in the available history, so there is no "
+               "known-good commit to bound a bisect. Proceeding straight to "
+               "reproduction and root-cause analysis._", ""]
+    meta["bisect_requested"] = bool(rng.good_sha)
+
+    # Agent step 2 — always reproduce the failure and determine a root cause.
+    repro_prompt = _repro_prompt(kind, workflow, signature, category, detail, repo, rng, block)
+    md += _agent_section(ctx, repro_prompt, cwd=WORKSPACE,
+                         heading="Reproduction and root cause")
     return "\n".join(md), meta
 
 
@@ -528,6 +561,64 @@ def _bisect_prompt(kind, workflow, signature, repo, rng: Range,
         "touch code paths named in the failure. Output markdown:\n"
         "## Suspected first-faulting commit\n`<sha>` — <subject>\n"
         "## Reasoning\n- ...\n## Confidence\nlow | medium | high\n"
+    )
+
+
+def _repro_prompt(kind, workflow, signature, category, detail, repo,
+                  rng: Range, block) -> str:
+    """Ask the agent to reproduce the failure locally and pin the root cause.
+
+    Runs regardless of whether a bisect was possible: even a bounded range only
+    narrows *where* the regression entered; this step nails down *why* it fails.
+    """
+    is_build = category == "build_failure"
+    what = "build" if is_build else "shader compilation"
+    if is_build:
+        repo_dir = repo.dirname if repo else "the affected checkout"
+        how = (
+            f"The failure is a compiler **build** break in `{repo_dir}` (detail={detail}). "
+            "Reproduce it by configuring and building from the workspace root:\n"
+            "  - llvm/llvm-project: `mask configure-llvm` then `mask build-llvm` "
+            "(narrow with e.g. `mask build-llvm clang`)\n"
+            "  - microsoft/DirectXShaderCompiler: `mask configure-dxc` then `mask build-dxc`\n"
+            "Then read the first real compiler/linker error and trace it to source."
+        )
+    else:
+        how = (
+            "The failure is a **shader compilation** error. Reproduce it by locating the "
+            "offload-test-suite test and invoking the compiler on its shader with the same "
+            "`-T` profile, `-E` entry, and `-D` defines from the test's RUN line. A prebuilt "
+            "`dxc` / `clang-dxc` may already exist under the relevant `build/bin` directory."
+        )
+    if is_build:
+        mintc = ("Reduce the failure to a **minimal reproducible test case**: the smallest "
+                 "self-contained input (e.g. a trimmed source snippet or preprocessed "
+                 "translation unit) that, fed to the built compiler, still triggers the same "
+                 "error. Give the exact command and the minimized input.")
+    else:
+        mintc = ("Reduce the failure to a **minimal reproducible test case**: the smallest "
+                 "self-contained HLSL shader that still reproduces the compile error, plus the "
+                 "exact compile command (profile / entry / defines). Strip unrelated "
+                 "functions, resources, and inputs while confirming the error persists.")
+    return (
+        f"You are triaging a {what} failure. Reproduce it locally and determine the ROOT "
+        "CAUSE. You MAY build the compiler and re-run the failing compilation. Do NOT run "
+        "the offload test suite or any GPU workload.\n\n"
+        f"Failure: {signature}\nKind: {kind}\nWorkflow: {workflow}\n"
+        f"Repo: {repo.slug if repo else 'unknown'}\n"
+        f"Failing (bad) commit: {rng.bad_sha or 'unknown'}\n"
+        f"Last-good commit: {rng.good_sha or '(none in available history)'}\n\n"
+        f"{how}\n\n"
+        "Failure log excerpt:\n"
+        f"{_clip(block, 3000)}\n\n"
+        f"{mintc}\n\n"
+        "Steps: (1) reproduce the failure and quote the exact error you observe; (2) read the "
+        "relevant source to explain WHY it fails; (3) state the root cause; (4) reduce it to a "
+        "minimal reproducible test case as described above. Output markdown:\n"
+        "## Reproduction\n- commands run and the observed error\n"
+        "## Root cause\n- ...\n"
+        "## Minimal reproducible test case\n- exact command\n```\n<minimized source>\n```\n"
+        "## Fix suggestion\n- ...\n## Confidence\nlow | medium | high\n"
     )
 
 
@@ -724,17 +815,40 @@ def triage_report(report_dir: pathlib.Path, args) -> dict:
     )
 
     items: list[dict] = []
+    seen: dict[Any, dict] = {}   # dedup key -> already-emitted item meta
     n = 0
+    deduped = 0
+
+    def _repo_slug(repo: RepoCfg | None) -> str | None:
+        return repo.slug if repo else None
+
     for row in target.rows:
         wf = row["workflow"]
         category = row.get("category")
         detail = row.get("detail")
 
         if category == "build_failure":
-            n += 1
+            repo = repo_for_failure(category, detail, None)
+            rng = ctx.history.bound_build(repo, wf)
+            # Same repo + same good..bad commit range == the same build break,
+            # regardless of which workflow surfaced it. Only merge when we could
+            # actually pin commits; otherwise keep them separate (can't prove same).
+            if rng.good_sha or rng.bad_sha:
+                key = ("build", _repo_slug(repo), rng.good_sha, rng.bad_sha)
+            else:
+                key = ("build", _repo_slug(repo), detail, wf)
+            dup = seen.get(key)
+            if dup is not None:
+                _mark_shared(dup, wf)
+                deduped += 1
+                print(f"  [dedup   ] {wf} shares build triage -> triage/{dup['file']}",
+                      file=sys.stderr)
+                continue
             _emit(ctx, items, "bisect", wf,
-                  triage_bisect(ctx, wf, category, detail, "", "", None),
+                  triage_bisect(ctx, wf, category, detail, "", "", None, rng),
                   _slug("build", wf))
+            seen[key] = items[-1]
+            n += 1
             if args.max and n >= args.max:
                 break
             continue
@@ -744,15 +858,39 @@ def triage_report(report_dir: pathlib.Path, args) -> dict:
             suite, test = t["suite"], t["test"]
             div = divergences.get((suite, test))
             if cls in BISECT_CLS:
-                res = triage_bisect(ctx, wf, category, detail, suite, test, cls)
+                repo = repo_for_failure(category, detail, cls)
+                rng = ctx.history.bound_test(repo, wf, suite, test)
+                if rng.good_sha or rng.bad_sha:
+                    key = ("shader", _repo_slug(repo), suite, test,
+                           rng.good_sha, rng.bad_sha)
+                else:
+                    key = ("shader", suite, test, cls, wf)
+                make = lambda: triage_bisect(ctx, wf, category, detail,
+                                             suite, test, cls, rng)
             elif cls.endswith("_miscompile"):
-                res = triage_miscompile(ctx, wf, suite, test, cls, div)
+                # DXIL analysis is per-(test, classification); workflow-independent.
+                key = ("miscompile", suite, test, cls)
+                make = lambda: triage_miscompile(ctx, wf, suite, test, cls, div)
             elif cls.startswith(("runtime_driver_suspected", "api_backend_suspected")):
-                res = triage_evidence(ctx, wf, suite, test, cls, div)
+                # Evidence report reasons over the whole pass/fail split (div),
+                # so it only needs producing once per (test, classification).
+                key = ("evidence", suite, test, cls)
+                make = lambda: triage_evidence(ctx, wf, suite, test, cls, div)
             else:
                 continue  # xpass etc. — already carries linked issues
-            n += 1
+
+            dup = seen.get(key)
+            if dup is not None:
+                _mark_shared(dup, wf)
+                deduped += 1
+                print(f"  [dedup   ] {wf} shares {suite}::{test} triage "
+                      f"-> triage/{dup['file']}", file=sys.stderr)
+                continue
+
+            res = make()
             _emit(ctx, items, res[1]["strategy"], wf, res, _slug(wf, suite, test))
+            seen[key] = items[-1]
+            n += 1
             if args.max and n >= args.max:
                 break
         if args.max and n >= args.max:
@@ -760,7 +898,7 @@ def triage_report(report_dir: pathlib.Path, args) -> dict:
 
     _write_index(ctx, items, target)
     (triage_dir / "triage.json").write_text(json.dumps(items, indent=2))
-    return {"triaged": len(items), "dir": str(triage_dir)}
+    return {"triaged": len(items), "deduped": deduped, "dir": str(triage_dir)}
 
 
 def _emit(ctx: Ctx, items: list[dict], strategy: str, workflow: str,
@@ -773,15 +911,27 @@ def _emit(ctx: Ctx, items: list[dict], strategy: str, workflow: str,
     print(f"  [{strategy:8s}] {workflow} -> triage/{fname}", file=sys.stderr)
 
 
+def _mark_shared(item: dict, workflow: str) -> None:
+    """Record that another workflow hit the same failure this item already covers."""
+    shared = item.setdefault("shared_workflows", [])
+    if workflow != item.get("workflow") and workflow not in shared:
+        shared.append(workflow)
+
+
 def _write_index(ctx: Ctx, items: list[dict], target: Snapshot) -> None:
+    total_shared = sum(len(it.get("shared_workflows") or []) for it in items)
     md = [f"# Triage — {target.ts}", "",
-          f"{len(items)} item(s). Agent: "
+          f"{len(items)} item(s)"
+          f"{f' (collapsed {total_shared} duplicate workflow(s))' if total_shared else ''}"
+          f". Agent: "
           f"{'on' if ctx.agent.enabled else 'off'}"
           f"{' (' + ctx.agent.model + ')' if ctx.agent.model else ''}.", "",
           "| strategy | workflow | detail | file |", "|---|---|---|---|"]
     for it in items:
         detail = it.get("repo") or it.get("layer") or it.get("test_file") or ""
-        md.append(f"| {it['strategy']} | {it['workflow']} | {detail} | "
+        shared = it.get("shared_workflows") or []
+        wf = it["workflow"] + (f" (+{len(shared)})" if shared else "")
+        md.append(f"| {it['strategy']} | {wf} | {detail} | "
                   f"[{it['file']}]({it['file']}) |")
     (ctx.triage_dir / "README.md").write_text("\n".join(md) + "\n")
 
@@ -807,7 +957,10 @@ def main() -> None:
         raise SystemExit(f"not a report directory (no summary.json): {report_dir}")
 
     result = triage_report(report_dir, args)
-    print(f"\nTriage: {result['triaged']} item(s) -> {result['dir']}", file=sys.stderr)
+    dd = result.get("deduped") or 0
+    print(f"\nTriage: {result['triaged']} item(s)"
+          f"{f' ({dd} duplicate workflow(s) collapsed)' if dd else ''}"
+          f" -> {result['dir']}", file=sys.stderr)
 
 
 if __name__ == "__main__":
