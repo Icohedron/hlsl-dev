@@ -791,5 +791,25 @@ class ClassificationLegend(unittest.TestCase):
                 )
 
 
+class BuiltCommits(unittest.TestCase):
+    LOG = "\n".join([
+        "2026-07-14T06:58:33Z   repository: Microsoft/DirectXShaderCompiler",
+        "2026-07-14T06:58:33Z Syncing repository: Microsoft/DirectXShaderCompiler",
+        "2026-07-14T06:58:33Z HEAD is now at dc3e6c48 [SM6.10] LinAlg (#8608)",
+        "2026-07-14T06:58:37Z HEAD is now at dc3e6c48 [SM6.10] LinAlg (#8608)",
+        "2026-07-14T06:58:46Z   repository: llvm/llvm-project",
+        "2026-07-14T06:58:46Z Syncing repository: llvm/llvm-project",
+        "2026-07-14T06:58:47Z HEAD is now at f60650c77 [BitcodeReader] (#208175)",
+    ])
+
+    def test_attributes_and_dedups(self):
+        c = mf.extract_built_commits(self.LOG)
+        self.assertEqual(c["directxshadercompiler"], "dc3e6c48")
+        self.assertEqual(c["llvm-project"], "f60650c77")
+
+    def test_empty(self):
+        self.assertEqual(mf.extract_built_commits(""), {})
+
+
 if __name__ == "__main__":
     unittest.main()

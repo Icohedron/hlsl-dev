@@ -37,3 +37,28 @@ case "${mode:-full}" in
   *) echo "unknown mode: $mode (want: full | fast | status)" >&2; exit 2 ;;
 esac
 ```
+
+## triage (report)
+Triages a report produced by `monitor_failures.py` (`mask monitor`). Writes
+triage artifacts under `<report>/triage/`:
+
+* **build / shader-compile failures** — bounds the first-faulting commit range
+  in `llvm-project` (clang / clang-dxc) or `DirectXShaderCompiler` (dxc) by
+  comparing across the report history (no building required), then narrows to
+  the culprit commit.
+* **suspected driver / API-backend failures** — writes an evidence report from
+  the cross-workflow pass/fail split.
+* **suspected miscompiles** — compiles the shader to DXIL locally and reasons
+  about it statically (never runs the offload test suite / a GPU).
+
+Reasoning-heavy steps use an agent (`pi -p`) when available; pass `--no-agent`
+(via env `TRIAGE_ARGS`) to emit prompts instead. Offline; no GitHub token needed.
+Run after `mask monitor` on the freshly written report; the more history under
+`reports/`, the tighter the commit ranges.
+
+**OPTIONS**
+* report (required): path to a report directory (the one containing `summary.json`).
+
+```bash
+python3 triage_report.py "$report" ${TRIAGE_ARGS:-}
+```

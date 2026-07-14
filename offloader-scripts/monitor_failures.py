@@ -478,6 +478,36 @@ def extract_all_results(log_text: str) -> dict[tuple[str, str], str]:
     return results
 
 
+# Each scheduled run checks out the compiler repos it builds; the checkout logs
+# them as `Syncing repository: <owner>/<repo>` followed by `HEAD is now at <sha>`.
+# Recording these in the summary means downstream triage never has to re-open the
+# logs just to learn which llvm-project / DXC commit produced a failure.
+_REPO_DECL_RE = re.compile(r"(?:Syncing repository|repository):\s*(\S+/\S+)\s*$")
+_HEAD_AT_RE = re.compile(r"HEAD is now at ([0-9a-f]{7,40})\b")
+
+
+def extract_built_commits(log_text: str) -> dict[str, str]:
+    """
+    Map repo-dir-key -> built commit sha (e.g. {'llvm-project': 'f60650c77',
+    'directxshadercompiler': 'dc3e6c48', 'offload-test-suite': 'bda4d3e'}), by
+    pairing each repository declaration with the next `HEAD is now at <sha>`.
+    First sha wins per repo (fetch + checkout log it twice, identically).
+    """
+    commits: dict[str, str] = {}
+    pending: str | None = None
+    for raw in log_text.splitlines():
+        line = strip_ts(raw)
+        m = _REPO_DECL_RE.search(line)
+        if m:
+            pending = m.group(1).split("/")[-1].lower()
+            continue
+        h = _HEAD_AT_RE.search(line)
+        if h and pending:
+            commits.setdefault(pending, h.group(1))
+            pending = None
+    return commits
+
+
 # Workflow names encode (host, API, GPU vendor, compiler, variant) in their
 # display name, e.g.:
 #   "Windows Vulkan AMD Clang"           -> host=x64, api=Vulkan, gpu=AMD
@@ -1213,6 +1243,16 @@ _RUNTIME_UPGRADE_SUFFIX = {
     "runtime_unknown": "unknown",
 }
 
+
+def _fmt_commits(commits: dict) -> str:
+    """Compact `llvm <sha> · dxc <sha>` for the summary table (empty if unknown)."""
+    bits = []
+    if commits.get("llvm-project"):
+        bits.append(f"llvm `{commits['llvm-project'][:9]}`")
+    if commits.get("directxshadercompiler"):
+        bits.append(f"dxc `{commits['directxshadercompiler'][:9]}`")
+    return " · ".join(bits)
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--otss-root", default=str(pathlib.Path(__file__).resolve().parent.parent / "offload-test-suite"))
@@ -1278,6 +1318,7 @@ def main() -> None:
             with gzip.open(log_path, "wt", encoding="utf-8") as f:
                 f.write(log_text)
             row["log_file"] = str(log_path.relative_to(out_dir))
+            row["commits"] = extract_built_commits(log_text)
 
             # Feed the pass matrix from every completed run.
             for (suite, test), res in extract_all_results(log_text).items():
@@ -1365,13 +1406,14 @@ def main() -> None:
                "Vulkan and at least one non-Vulkan workflow passes.",
                ""]
 
-    md += ["| workflow | conclusion | category | detail | # test failures | run |",
-           "|---|---|---|---|---|---|"]
+    md += ["| workflow | conclusion | category | detail | # test failures | build (llvm / dxc) | run |",
+           "|---|---|---|---|---|---|---|"]
     for r in summary:
         cat = r.get("category") or ""
         det = r.get("detail") or ""
         n = len(r.get("tests") or [])
-        md.append(f"| {r['workflow']} | {r['conclusion'] or r['status']} | {cat} | {det} | {n} | [run]({r['run_url']}) |")
+        build = _fmt_commits(r.get("commits") or {})
+        md.append(f"| {r['workflow']} | {r['conclusion'] or r['status']} | {cat} | {det} | {n} | {build} | [run]({r['run_url']}) |")
     md.append("")
 
     if divergences:
