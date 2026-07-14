@@ -198,6 +198,262 @@ class ParseXfailClauses(unittest.TestCase):
         self.assertEqual(cs[0]["expr"], "Vulkan")
         self.assertIsNone(cs[0]["issue_url"])
 
+    def test_backward_compat_issue_urls_singleton(self):
+        # Each clause in the canonical convention has exactly one linked issue.
+        cs = mf.parse_xfail_clauses(_MULTI_XFAIL)
+        self.assertEqual(
+            cs[0]["issue_urls"],
+            ["https://github.com/llvm/llvm-project/issues/156775"],
+        )
+        self.assertEqual(cs[1]["issue_urls"],
+                         ["https://github.com/llvm/offload-test-suite/issues/525"])
+
+    def test_multiple_issues_per_clause(self):
+        # Real offload-test-suite pattern: one clause referencing two bugs.
+        text = (
+            "# Metal: two separate defects.\n"
+            "# Bug https://github.com/llvm/offload-test-suite/issues/304\n"
+            "# Bug https://github.com/llvm/offload-test-suite/issues/305\n"
+            "# XFAIL: Metal\n"
+        )
+        cs = mf.parse_xfail_clauses(text)
+        self.assertEqual(len(cs), 1)
+        # issue_urls preserves source order (top-to-bottom).
+        self.assertEqual(cs[0]["issue_urls"], [
+            "https://github.com/llvm/offload-test-suite/issues/304",
+            "https://github.com/llvm/offload-test-suite/issues/305",
+        ])
+        # issue_url stays the nearest (closest to the XFAIL line) for back-compat.
+        self.assertEqual(cs[0]["issue_url"],
+                         "https://github.com/llvm/offload-test-suite/issues/305")
+
+    def test_two_urls_on_one_comment_line(self):
+        text = (
+            "# Bug A https://github.com/x/y/issues/1 and B https://github.com/x/y/issues/2\n"
+            "# XFAIL: Metal\n"
+        )
+        cs = mf.parse_xfail_clauses(text)
+        self.assertEqual(cs[0]["issue_urls"],
+                         ["https://github.com/x/y/issues/1", "https://github.com/x/y/issues/2"])
+
+    def test_url_in_multiline_description(self):
+        # URL embedded mid-sentence, several description lines above the XFAIL.
+        text = (
+            "# SV_CullDistance whole-primitive culling. Tracked under\n"
+            "# https://github.com/llvm/wg-hlsl/issues/25 for the frontend.\n"
+            "# Clang does not yet lower it on either backend path.\n"
+            "# XFAIL: Clang\n"
+        )
+        cs = mf.parse_xfail_clauses(text)
+        self.assertEqual(cs[0]["issue_url"], "https://github.com/llvm/wg-hlsl/issues/25")
+
+    def test_blank_lines_inside_comment_block(self):
+        # A blank line splitting the rationale must not sever the link search.
+        text = (
+            "# Bug https://github.com/x/y/issues/7\n"
+            "#\n"
+            "\n"
+            "# rationale continues here\n"
+            "# XFAIL: Vulkan\n"
+        )
+        cs = mf.parse_xfail_clauses(text)
+        self.assertEqual(cs[0]["issue_url"], "https://github.com/x/y/issues/7")
+
+    def test_does_not_bleed_across_previous_xfail(self):
+        # The issue belongs to the DirectX clause; the Clang clause below has
+        # no link of its own and must NOT steal it across the XFAIL boundary.
+        text = (
+            "# Bug https://github.com/x/y/issues/664\n"
+            "# XFAIL: DirectX || Metal\n"
+            "# min16 not supported.\n"
+            "# XFAIL: Clang\n"
+        )
+        cs = mf.parse_xfail_clauses(text)
+        self.assertEqual(cs[0]["issue_url"], "https://github.com/x/y/issues/664")
+        self.assertIsNone(cs[1]["issue_url"])
+        self.assertEqual(cs[1]["issue_urls"], [])
+
+    def test_does_not_bleed_across_other_directive(self):
+        # An UNSUPPORTED line above also bounds the block.
+        text = (
+            "# Bug https://github.com/x/y/issues/1294\n"
+            "# UNSUPPORTED: Metal || DirectX\n"
+            "# min16 not supported.\n"
+            "# XFAIL: Clang\n"
+        )
+        cs = mf.parse_xfail_clauses(text)
+        self.assertEqual(len(cs), 1)
+        self.assertIsNone(cs[0]["issue_url"])
+
+    def test_prose_unsupported_word_is_not_a_boundary(self):
+        # Prose 'Unsupported:' (mixed case) is description, not a lit directive,
+        # so the URL on it is still collected. Real: StaticSamplers.test.
+        text = (
+            "# Unsupported: https://github.com/llvm/llvm-project/issues/101558\n"
+            "# XFAIL: Clang\n"
+        )
+        cs = mf.parse_xfail_clauses(text)
+        self.assertEqual(cs[0]["issue_url"],
+                         "https://github.com/llvm/llvm-project/issues/101558")
+
+
+# ---------------------------------------------------------------------------
+# Corpus-shape coverage: every distinct XFAIL comment-block shape observed in
+# llvm/offload-test-suite/test as of this writing. Each fixture faithfully
+# mirrors a real file (cited in `src`) but is inlined so the suite stays
+# offline and independent of the sibling checkout. `expected` is the list of
+# issue URLs the clause under test should resolve to (issue_urls), and the
+# nearest one (issue_url) is asserted to be the last of that list.
+# ---------------------------------------------------------------------------
+
+_U = "https://github.com/llvm/offload-test-suite/issues/"
+_L = "https://github.com/llvm/llvm-project/issues/"
+_D = "https://github.com/microsoft/DirectXShaderCompiler/issues/"
+
+
+class RealCorpusXfailShapes(unittest.TestCase):
+    # (label, source citation, file body, index of clause under test, expected urls)
+    CASES = [
+        # 1. Bug + XFAIL, preceded by a blank then a previous XFAIL clause
+        #    (the most common shape).
+        ("bug_then_xfail_after_prev_clause",
+         "Basic/Matrix/matrix_bool_and_operator.test:131",
+         f"# Bug {_D}8129\n"
+         f"# XFAIL: DXC && Vulkan\n"
+         f"\n"
+         f"# Bug {_U}703\n"
+         f"# XFAIL: Clang && NV && Vulkan\n",
+         1, [f"{_U}703"]),
+
+        # 2. First clause in a file: Bug + XFAIL with a #--- end marker above.
+        ("first_clause_after_source_marker",
+         "Basic/Matrix/matrix_bool_and_operator.test:128",
+         f"#--- end\n"
+         f"# Bug {_D}8129\n"
+         f"# XFAIL: DXC && Vulkan\n",
+         0, [f"{_D}8129"]),
+
+        # 3. Two stacked XFAILs, second has no link of its own (boundary stop).
+        ("stacked_xfail_no_link",
+         "Bugs/Texture-Row-Pitch-Readback.test:281",
+         f"# XFAIL: Clang && DirectX\n"
+         f"# XFAIL: Clang && Metal\n",
+         1, []),
+
+        # 4. Multiline rationale + Bug + XFAIL, bounded above by REQUIRES.
+        ("multiline_desc_bug_bounded_by_requires",
+         "Bugs/Adjacent-Partial-Writes.yaml:65",
+         f"# REQUIRES: Int64\n"
+         f"\n"
+         f"# When compiled with DXC this hits a memory coherence issue on Intel\n"
+         f"# UHD drivers. Does not reproduce with Clang.\n"
+         f"# Bug {_U}226\n"
+         f"# XFAIL: Intel-Memory-Coherence-Issue-226 && !Clang\n",
+         0, [f"{_U}226"]),
+
+        # 5. Multiline rationale with NO link, blank line above it.
+        ("multiline_desc_no_link",
+         "Bugs/Texture-Row-Pitch-Readback.test:280",
+         f"# unpadded last row and silently sidestep the bug.\n"
+         f"\n"
+         f"# Clang's HLSL -> DXIL lowering does not implement the graphics-stage\n"
+         f"# signature intrinsics needed for SV_POSITION / SV_TARGET plumbing.\n"
+         f"# XFAIL: Clang && DirectX\n",
+         0, []),
+
+        # 6. Bug + XFAIL directly under a previous clause (no blank), boundary.
+        ("bug_xfail_adjacent_prev_clause",
+         "Feature/CBuffer/arrays.test:98",
+         f"# Bug: {_D}7819\n"
+         f"# XFAIL: DXC && Vulkan\n"
+         f"# Bug: {_L}180600\n"
+         f"# XFAIL: Clang && Vulkan\n",
+         1, [f"{_L}180600"]),
+
+        # 7. XFAIL after a blank then an UNSUPPORTED directive: no link.
+        ("xfail_after_unsupported_block",
+         "Feature/Semantics/DomainSystemValues.test:243",
+         f"# Mapping HLSL HS/DS onto Metal isn't wired up, so skip Metal.\n"
+         f"# UNSUPPORTED: Metal\n"
+         f"\n"
+         f"# XFAIL: Clang\n",
+         0, []),
+
+        # 8. One clause, TWO linked issues, with a leading description line.
+        ("two_issues_one_clause_with_desc",
+         "Feature/StructuredBuffer/inc_counter_array.test:45",
+         f"# Offload tests are missing counter/resource-array support on Metal\n"
+         f"# Unimplemented {_U}304\n"
+         f"# Unimplemented {_U}305\n"
+         f"# XFAIL: Metal\n",
+         0, [f"{_U}304", f"{_U}305"]),
+
+        # 9. BUG + XFAIL, blank line then source above.
+        ("bug_xfail_blank_then_source",
+         "Feature/CBuffer/Matrix/SingleSubscript/mat_cbuffer.f32.test:172",
+         f"        Binding: 7\n"
+         f"\n"
+         f"# BUG {_L}191070\n"
+         f"# XFAIL: Clang && Vulkan\n",
+         0, [f"{_L}191070"]),
+
+        # 10. Bug + XFAIL immediately under a #--- end marker (no blank).
+        ("bug_xfail_under_end_marker",
+         "Feature/HLSLLib/asuint_mat.32.test:345",
+         f"#--- end\n"
+         f"# Bug: {_L}186864\n"
+         f"# XFAIL: Clang && Vulkan\n",
+         0, [f"{_L}186864"]),
+
+        # 11. Bug + XFAIL bounded above by an UNSUPPORTED directive (link kept).
+        ("bug_xfail_bounded_by_unsupported",
+         "Feature/PushConstant/types_16bit.test:53",
+         f"# UNSUPPORTED: Metal || DirectX\n"
+         f"#\n"
+         f"# Bug {_U}1294\n"
+         f"# XFAIL: Vulkan && DXC && Intel-Gen-Current\n",
+         0, [f"{_U}1294"]),
+
+        # 12. Two linked issues, blank + REQUIRES boundary above.
+        ("two_issues_bounded_by_requires",
+         "WaveOps/QuadReadAcrossX.int64.test:237",
+         f"# REQUIRES: Int64\n"
+         f"\n"
+         f"# Bug: {_U}988\n"
+         f"# Bug: {_U}989\n"
+         f"# XFAIL: Metal\n",
+         0, [f"{_U}988", f"{_U}989"]),
+    ]
+
+    def test_all_shapes(self):
+        for label, src, body, idx, expected in self.CASES:
+            with self.subTest(shape=label, src=src):
+                cs = mf.parse_xfail_clauses(body)
+                self.assertGreater(len(cs), idx, f"{label}: clause {idx} missing")
+                c = cs[idx]
+                self.assertEqual(c["issue_urls"], expected,
+                                 f"{label} ({src}): issue_urls mismatch")
+                # issue_url is the nearest (last-in-source-order) linked issue,
+                # or None when the clause has no link.
+                self.assertEqual(c["issue_url"], expected[-1] if expected else None,
+                                 f"{label} ({src}): issue_url mismatch")
+
+    def test_every_clause_parses_without_error(self):
+        # Sanity: each fixture yields at least the clause under test and every
+        # returned clause carries the expected keys.
+        for label, src, body, idx, expected in self.CASES:
+            with self.subTest(shape=label, src=src):
+                for c in mf.parse_xfail_clauses(body):
+                    self.assertIn("expr", c)
+                    self.assertIn("issue_url", c)
+                    self.assertIn("issue_urls", c)
+                    self.assertIn("line_no", c)
+                    # issue_url, when present, is always the last of issue_urls.
+                    if c["issue_urls"]:
+                        self.assertEqual(c["issue_url"], c["issue_urls"][-1])
+                    else:
+                        self.assertIsNone(c["issue_url"])
+
 
 class XfailExpressionEval(unittest.TestCase):
     def test_simple_true(self):
@@ -247,6 +503,21 @@ class MatchXpassToIssue(unittest.TestCase):
     def test_metal(self):
         r = mf.match_xpass_to_issue(_MULTI_XFAIL, "macOS Metal DXC")
         self.assertEqual(r["issue_url"], "https://github.com/llvm/offload-test-suite/issues/393")
+
+    def test_surfaces_issue_urls_for_matched_clause(self):
+        # A matched clause with two linked bugs exposes both via issue_urls,
+        # while issue_url stays the nearest one.
+        text = (
+            "# Bug https://github.com/llvm/offload-test-suite/issues/304\n"
+            "# Bug https://github.com/llvm/offload-test-suite/issues/305\n"
+            "# XFAIL: Metal\n"
+        )
+        r = mf.match_xpass_to_issue(text, "macOS Metal DXC")
+        self.assertEqual(r["issue_url"], "https://github.com/llvm/offload-test-suite/issues/305")
+        self.assertEqual(r["issue_urls"], [
+            "https://github.com/llvm/offload-test-suite/issues/304",
+            "https://github.com/llvm/offload-test-suite/issues/305",
+        ])
 
     def test_runner_hardware_feature_now_decidable(self):
         # Intel-Gen-Current is a runner-hardware feature we CAN now infer from

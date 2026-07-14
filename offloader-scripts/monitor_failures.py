@@ -405,9 +405,9 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
         "value-mismatch signal was found in the log. Fell through both classifiers.",
     "xpass":
         "Test was marked XFAIL but passed. Report also links the specific XFAIL "
-        "clause's GitHub issue (chosen by evaluating the clause's lit feature "
+        "clause's GitHub issue(s) (chosen by evaluating the clause's lit feature "
         "expression against the actual test-runner's feature set — see the row's "
-        "`linked_issue` and `xfail_match`).",
+        "`linked_issue`, `linked_issues`, and `xfail_match`).",
 
     # Upgraded labels — applied by the cross-workflow pivot after the pass
     # matrix reveals the same test passes on at least one other workflow.
@@ -546,12 +546,43 @@ def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
 ISSUE_URL_RE = re.compile(r"https?://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)/issues/(?P<num>\d+)")
 XFAIL_LINE_RE = re.compile(r"^\s*#?\s*XFAIL:\s*(?P<expr>.+?)\s*$")
 
+# Other lit directive lines that mark the boundary of a *different* clause's
+# comment block. When walking backward from an XFAIL to find its linked
+# issue(s) we must stop here, otherwise a description belonging to the
+# preceding clause (or a bare RUN/UNSUPPORTED line) would bleed into this one.
+# Matched case-sensitively: real lit directives are uppercase, so prose like
+# `# Unsupported: <url>` or `# Requires review` reads as description, not a
+# boundary.
+LIT_DIRECTIVE_RE = re.compile(
+    r"^\s*#?\s*(?:RUN|XFAIL|UNSUPPORTED|REQUIRES|ALLOW_RETRIES|DEFINE|REDEFINE|COM):"
+)
+
+# How far back (in comment lines) to scan for a clause's linked issue, and how
+# many blank lines we tolerate inside the comment block before giving up.
+_XFAIL_MAX_LOOKBACK = 15
+_XFAIL_MAX_BLANK_RUN = 2
+
 
 def parse_xfail_clauses(text: str) -> list[dict]:
     """
-    Return one dict per XFAIL clause: {expr, issue_url|None, line_no}.
-    The issue URL is the one on the nearest preceding comment line (searched
-    backward, stopping at a blank line or a non-comment line).
+    Return one dict per XFAIL clause:
+        {expr, issue_url|None, issue_urls, line_no}
+
+    ``issue_urls`` is the list of every distinct GitHub issue URL linked in the
+    clause's preceding comment block, in source order (top-to-bottom).
+    ``issue_url`` is kept for backward compatibility and is the *nearest*
+    preceding URL (the one closest to the XFAIL line) or None.
+
+    The comment block is the run of ``#`` comment lines immediately above the
+    XFAIL line. The backward walk:
+      * tolerates up to ``_XFAIL_MAX_BLANK_RUN`` consecutive blank lines, so a
+        multi-paragraph rationale split by a blank line is still searched;
+      * stops at a non-comment (code) line;
+      * stops at another lit directive line (XFAIL/UNSUPPORTED/RUN/...), which
+        marks the boundary of a neighbouring clause's comment block;
+      * scans at most ``_XFAIL_MAX_LOOKBACK`` comment lines back.
+    This collects issue links from multi-line descriptions and multiple bugs
+    per clause, without stealing links that belong to an adjacent clause.
     """
     lines = text.splitlines()
     out: list[dict] = []
@@ -560,19 +591,50 @@ def parse_xfail_clauses(text: str) -> list[dict]:
         if not m:
             continue
         expr = m.group("expr").strip()
-        # Walk backward for a linked issue URL. Stop at blank or non-comment.
-        url = None
-        for j in range(i - 1, max(-1, i - 10), -1):
+        # Walk backward through the comment block, building the issue list in
+        # source order (top-to-bottom). Each line's own URLs are already
+        # left-to-right; since we walk upward we prepend each line's list.
+        issue_urls: list[str] = []
+        seen: set[str] = set()
+        nearest_url: str | None = None
+        blank_run = 0
+        comment_lines_seen = 0
+        j = i - 1
+        while j >= 0:
             prev = lines[j].rstrip()
-            if not prev.strip():
+            stripped = prev.strip()
+            if not stripped:
+                blank_run += 1
+                if blank_run > _XFAIL_MAX_BLANK_RUN:
+                    break
+                j -= 1
+                continue
+            if not stripped.startswith("#"):
                 break
-            if not prev.lstrip().startswith("#"):
+            # Boundary: reached the previous clause's own directive line.
+            if LIT_DIRECTIVE_RE.match(prev):
                 break
-            u = ISSUE_URL_RE.search(prev)
-            if u:
-                url = u.group(0)
+            blank_run = 0
+            comment_lines_seen += 1
+            if comment_lines_seen > _XFAIL_MAX_LOOKBACK:
                 break
-        out.append({"expr": expr, "issue_url": url, "line_no": i + 1})
+            line_urls = [u.group(0) for u in ISSUE_URL_RE.finditer(prev)]
+            if line_urls and nearest_url is None:
+                # Nearest = first (leftmost) URL on the closest linking line,
+                # matching the historical single-URL behaviour.
+                nearest_url = line_urls[0]
+            # Prepend this (higher) line's URLs, de-duplicating.
+            for url in reversed(line_urls):
+                if url not in seen:
+                    seen.add(url)
+                    issue_urls.insert(0, url)
+            j -= 1
+        out.append({
+            "expr": expr,
+            "issue_url": nearest_url,  # nearest linking line, leftmost (back-compat)
+            "issue_urls": issue_urls,
+            "line_no": i + 1,
+        })
     return out
 
 
@@ -885,6 +947,7 @@ def match_xpass_to_issue(
     }
     if len(matched) == 1:
         result["issue_url"] = matched[0]["issue_url"]
+        result["issue_urls"] = matched[0].get("issue_urls") or []
         result["matched_expr"] = matched[0]["expr"]
     elif len(matched) > 1:
         # Multiple clauses fire — pick the one with an issue URL if unique,
@@ -892,6 +955,7 @@ def match_xpass_to_issue(
         with_url = [m for m in matched if m["issue_url"]]
         if len(with_url) == 1:
             result["issue_url"] = with_url[0]["issue_url"]
+            result["issue_urls"] = with_url[0].get("issue_urls") or []
             result["matched_expr"] = with_url[0]["expr"]
             result["note"] = f"{len(matched)} XFAIL clauses matched; used the one with a linked issue"
         else:
@@ -1049,18 +1113,32 @@ def classify_run(log_text: str, gh: GH, otss_root: pathlib.Path, issue_cache: di
                     entry["xfail_match"] = {"note": match["note"], "matched_expr": match.get("matched_expr")}
                     entry["note"] = match["note"]
                 else:
-                    url = match["issue_url"]
-                    u = ISSUE_URL_RE.search(url)
-                    key = (u.group("owner"), u.group("repo"), int(u.group("num")))
-                    if key not in issue_cache:
-                        issue_cache[key] = fetch_issue_state(gh, *key)
-                    st = issue_cache[key] or {}
-                    entry["linked_issue"] = {
-                        "url": url,
-                        "state": st.get("state"),
-                        "state_reason": st.get("state_reason"),
-                        "title": st.get("title"),
-                    }
+                    # Fetch state for every linked issue on the matched clause.
+                    # `issue_url` (nearest) stays the primary for back-compat;
+                    # `issue_urls` carries the full set in source order.
+                    urls = match.get("issue_urls") or [match["issue_url"]]
+
+                    def _fetch(url: str) -> dict:
+                        u = ISSUE_URL_RE.search(url)
+                        key = (u.group("owner"), u.group("repo"), int(u.group("num")))
+                        if key not in issue_cache:
+                            issue_cache[key] = fetch_issue_state(gh, *key)
+                        st = issue_cache[key] or {}
+                        return {
+                            "url": url,
+                            "state": st.get("state"),
+                            "state_reason": st.get("state_reason"),
+                            "title": st.get("title"),
+                        }
+
+                    linked = [_fetch(u) for u in urls]
+                    primary = next(
+                        (li for li in linked if li["url"] == match["issue_url"]),
+                        linked[0],
+                    )
+                    entry["linked_issue"] = primary
+                    if len(linked) > 1:
+                        entry["linked_issues"] = linked
                     entry["xfail_match"] = {
                         "matched_expr": match["matched_expr"],
                         "note": match.get("note"),
@@ -1273,6 +1351,10 @@ def main() -> None:
             if "linked_issue" in t:
                 li = t["linked_issue"]
                 note.append(f"issue [{li.get('state')}]({li['url']}) — {li.get('title','')}")
+                for extra in t.get("linked_issues") or []:
+                    if extra.get("url") == li.get("url"):
+                        continue
+                    note.append(f"also [{extra.get('state')}]({extra['url']}) — {extra.get('title','')}")
             if t.get("note"):
                 note.append(t["note"])
             if t.get("passes_on"):
@@ -1293,10 +1375,11 @@ def main() -> None:
                             "", "", "", "", "", "", "", "", r["run_url"]])
             for t in tests:
                 li = t.get("linked_issue") or {}
+                all_urls = [d["url"] for d in (t.get("linked_issues") or ([li] if li else []))]
                 w.writerow([r["workflow"], r["conclusion"] or r["status"], r.get("category",""), r.get("detail",""),
                             t["result"], t["suite"], t["test"], t.get("classification",""),
                             ";".join(t.get("passes_on") or []), ";".join(t.get("fails_on") or []),
-                            li.get("url",""), li.get("state",""), r["run_url"]])
+                            ";".join(all_urls), li.get("state",""), r["run_url"]])
 
     print(f"\nReport: {out_dir}", file=sys.stderr)
     print(f"  summary.md / summary.json / summary.csv / divergences.json", file=sys.stderr)
