@@ -40,7 +40,7 @@ class ParseWorkflowAxes(unittest.TestCase):
         ("Windows Lavapipe AMD DXC",       {"api": "Lavapipe", "gpu": "AMD",      "compiler": "dxc",   "host": "x64",   "variant": "none"}),
         ("Windows ARM64 Lavapipe Clang",   {"api": "Lavapipe", "gpu": "Lavapipe", "compiler": "clang", "host": "ARM64", "variant": "none"}),
         ("Windows D3D12 Warp DXC",         {"api": "D3D12",    "gpu": "Warp",     "compiler": "dxc",   "host": "x64",   "variant": "none"}),
-        ("Windows D3D12 QC Clang",         {"api": "D3D12",    "gpu": "QC",       "compiler": "clang", "host": "x64",   "variant": "none"}),
+        ("Windows D3D12 QC Clang",         {"api": "D3D12",    "gpu": "QC",       "compiler": "clang", "host": "ARM64", "variant": "none"}),
         ("Windows D3D12 AMD Clang GBV",    {"api": "D3D12",    "gpu": "AMD",      "compiler": "clang", "host": "x64",   "variant": "GBV"}),
         ("Windows D3D12 Warp Preview DXC", {"api": "D3D12",    "gpu": "Warp",     "compiler": "dxc",   "host": "x64",   "variant": "Preview"}),
         ("Windows ARM64 D3D12 Warp DXC",   {"api": "D3D12",    "gpu": "Warp",     "compiler": "dxc",   "host": "ARM64", "variant": "none"}),
@@ -56,13 +56,15 @@ class AttributeDivergence(unittest.TestCase):
     def test_api_only(self):
         # Vulkan fails; D3D12 passes. The passing set spans multiple hosts
         # (Windows + macOS), so 'api_pattern' should be reported. The failing
-        # set is also all-x64, so 'host_pattern: x64-only' is a legitimate
-        # secondary attribution — both are true, we assert on the primary.
+        # set mixes x64 (AMD/NVIDIA) with ARM64 (QC), so NO host_pattern should
+        # be attributed — QC is an ARM64 board, not x64. (Regression guard: this
+        # used to wrongly report 'host_pattern: x64-only'.)
         a = mf.attribute_divergence(
             fails_on=["Windows Vulkan AMD Clang", "Windows Vulkan NVIDIA Clang", "Windows Vulkan QC Clang"],
             passes_on=["Windows D3D12 AMD Clang", "Windows D3D12 NVIDIA Clang", "macOS Metal Clang"],
         )
         self.assertEqual(a.get("api_pattern"), "Vulkan-only")
+        self.assertNotIn("host_pattern", a)
 
     def test_gpu_only(self):
         a = mf.attribute_divergence(
@@ -118,6 +120,48 @@ class LitBlockParsing(unittest.TestCase):
         blocks = mf.extract_failure_blocks(load("shader_compile_clang_dxc.txt"))
         fails = [b for b in blocks if b["result"] == "FAIL"]
         self.assertTrue(any("matrix_swizzle_one_based" in b["test"] for b in fails))
+
+    def test_xpass_test_not_double_counted_as_fail(self):
+        # Regression: lit counts an unexpected pass as a suite failure, so the
+        # SAME test emits BOTH an `XPASS:` summary line and a `TEST '...' FAILED`
+        # banner. It must yield exactly one block (XPASS), never a duplicate
+        # FAIL + XPASS pair. Mirrors Feature/WaveOps/WaveActiveCountBits.test on
+        # Windows Vulkan QC Clang.
+        log = (
+            "2026-07-14T02:38:56.8Z XPASS: OffloadTest-clang-vk :: Feature/WaveOps/WaveActiveCountBits.test (439 of 570)\n"
+            "2026-07-14T02:38:56.8Z ******************** TEST 'OffloadTest-clang-vk :: Feature/WaveOps/WaveActiveCountBits.test' FAILED ********************\n"
+            "2026-07-14T02:38:56.8Z offloader.exe -debug-layer pipeline.yaml out.o\n"
+            "2026-07-14T02:38:56.8Z # command output: some noise\n"
+            "2026-07-14T02:38:56.8Z ********************\n"
+        )
+        blocks = mf.extract_failure_blocks(log)
+        wac = [b for b in blocks
+               if b["test"] == "Feature/WaveOps/WaveActiveCountBits.test"]
+        self.assertEqual(len(wac), 1, f"expected one block, got {[(b['result'], b['test']) for b in wac]}")
+        self.assertEqual(wac[0]["result"], "XPASS")
+
+    def test_no_test_appears_as_both_fail_and_xpass(self):
+        # General invariant: a given (suite, test) is never emitted as both a
+        # FAIL and an XPASS block.
+        log = (
+            "XPASS: S :: a.test (1 of 3)\n"
+            "******************** TEST 'S :: a.test' FAILED ********************\n"
+            "body\n"
+            "********************\n"
+            "******************** TEST 'S :: b.test' FAILED ********************\n"
+            "body\n"
+            "********************\n"
+        )
+        blocks = mf.extract_failure_blocks(log)
+        from collections import defaultdict
+        seen = defaultdict(set)
+        for b in blocks:
+            seen[(b["suite"], b["test"])].add(b["result"])
+        conflicting = {k: v for k, v in seen.items() if len(v) > 1}
+        self.assertFalse(conflicting, f"tests recorded as both FAIL and XPASS: {conflicting}")
+        # a.test is the XPASS; b.test is a genuine FAIL.
+        self.assertEqual(seen[("S", "a.test")], {"XPASS"})
+        self.assertEqual(seen[("S", "b.test")], {"FAIL"})
 
     def test_parse_lit_commands_extracts_compiler_step(self):
         b = first_block("shader_compile_clang_dxc.txt", "matrix_swizzle_one_based")
@@ -482,12 +526,29 @@ class WorkflowFeatures(unittest.TestCase):
         # ARM64 hosts (QC or its ARM64 Warp/Lavapipe siblings) — no AVX512
         ("Windows ARM64 D3D12 Warp Clang", {"DirectX", "Clang", "WARP", "Windows", "ARM64"}),
         ("Windows ARM64 Lavapipe DXC",     {"Vulkan", "DXC", "Windows", "ARM64"}),
+        # QC (Snapdragon X Plus) is ARM64 even though the name has no ARM64
+        # token — never x64, never AVX512.
+        ("Windows Vulkan QC Clang",        {"Vulkan", "Clang", "Clang-Vulkan", "QC", "Windows", "ARM64"}),
+        ("Windows D3D12 QC DXC",           {"DirectX", "DXC", "QC", "Windows", "ARM64"}),
     ]
 
     def test_all(self):
         for name, expected in self.CASES:
             with self.subTest(name=name):
                 self.assertEqual(mf.workflow_features(name), expected)
+
+    def test_qc_is_arm64_never_x64(self):
+        # Regression: QC boards are ARM64; the workflow name carries no ARM64
+        # token, so a naive Windows->x64 default mislabelled them. That in turn
+        # produced a bogus 'host_pattern: x64-only' divergence axis.
+        for name in ("Windows Vulkan QC Clang", "Windows D3D12 QC DXC",
+                     "Windows QC Clang Lavapipe"):
+            with self.subTest(name=name):
+                feats = mf.workflow_features(name)
+                self.assertIn("ARM64", feats, name)
+                self.assertNotIn("x64", feats, name)
+                self.assertNotIn("AVX512", feats, name)
+                self.assertEqual(mf.parse_workflow_axes(name)["host"], "ARM64", name)
 
 
 class MatchXpassToIssue(unittest.TestCase):
@@ -667,10 +728,10 @@ class ClassificationLegend(unittest.TestCase):
         "xpass",
         # Upgraded labels from the cross-workflow pivot
         "runtime_driver_suspected_miscompile",
-        "runtime_driver_confirmed",
+        "runtime_driver_suspected_crash",
         "runtime_driver_suspected_unknown",
         "api_backend_suspected_miscompile",
-        "api_backend_confirmed",
+        "api_backend_suspected_crash",
         "api_backend_suspected_unknown",
     }
 
@@ -686,6 +747,24 @@ class ClassificationLegend(unittest.TestCase):
         for label, expl in mf.CLASSIFICATION_LEGEND.items():
             with self.subTest(label=label):
                 self.assertGreater(len(expl), 40, f"legend for {label!r} is suspiciously short")
+
+    def test_no_confirmed_labels(self):
+        # A GPU/API-specific divergence proves the failure is
+        # runtime-environment-specific, not that the driver (rather than the
+        # test's own pipeline I/O spec) is at fault. So no label claims to
+        # "confirm" a driver/backend bug — the pivot only ever upgrades to a
+        # "suspected" label.
+        for label in mf.CLASSIFICATION_LEGEND:
+            self.assertNotIn("confirmed", label,
+                             f"{label!r} overclaims; divergence is suspicion, not proof")
+        for label, expl in mf.CLASSIFICATION_LEGEND.items():
+            if label.endswith("_suspected_crash"):
+                # The crash-mode upgrade must spell out the test-spec caveat.
+                self.assertRegex(
+                    expl.lower(),
+                    r"unconfirmed|test-spec|test-authoring|test itself|pipeline",
+                    f"{label!r} should note the failure may be a test-spec bug",
+                )
 
 
 if __name__ == "__main__":

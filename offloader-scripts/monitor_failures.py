@@ -289,6 +289,18 @@ def extract_failure_blocks(log_text: str) -> list[dict]:
     Returns a list of dicts: {result, suite, test, block}.
     """
     lines = log_text.splitlines()
+
+    # Collect XPASS test keys first. lit counts an unexpected pass as a suite
+    # failure, so the SAME test also emits a `TEST '...' FAILED` banner. Its
+    # canonical result is XPASS, not FAIL — we must not also record it as a
+    # runtime failure, or it shows up twice (once xpass, once runtime_*).
+    xpass_re = re.compile(r"^\s*XPASS:\s+(\S+)\s+::\s+(\S+)")
+    xpass_keys: set[tuple[str, str]] = set()
+    for line in lines:
+        m = xpass_re.match(strip_ts(line))
+        if m:
+            xpass_keys.add((m.group(1), m.group(2)))
+
     blocks: list[dict] = []
     i = 0
     while i < len(lines):
@@ -305,16 +317,16 @@ def extract_failure_blocks(log_text: str) -> list[dict]:
                     break
                 body_lines.append(nxt)
                 i += 1
-            blocks.append({"result": "FAIL", "suite": suite, "test": test, "block": "\n".join(body_lines)})
+            # Skip the FAILED banner emitted for an unexpected pass; the XPASS
+            # entry below is the authoritative record for this test.
+            if (suite, test) not in xpass_keys:
+                blocks.append({"result": "FAIL", "suite": suite, "test": test, "block": "\n".join(body_lines)})
         i += 1
 
     # XPASS blocks come from the summary; the individual test doesn't emit a
     # detailed block. Collect XPASSes from the "Unexpectedly Passed Tests" list.
-    xpass_re = re.compile(r"^\s*XPASS:\s+(\S+)\s+::\s+(\S+)")
-    for line in lines:
-        m = xpass_re.match(strip_ts(line))
-        if m:
-            blocks.append({"result": "XPASS", "suite": m.group(1), "test": m.group(2), "block": ""})
+    for suite, test in sorted(xpass_keys):
+        blocks.append({"result": "XPASS", "suite": suite, "test": test, "block": ""})
     return blocks
 
 
@@ -414,13 +426,21 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
     "runtime_driver_suspected_miscompile":
         "Base label was `runtime_miscompile`, but the SAME shader binary produces the "
         "right result on some other workflows. Every workflow compiles the exact same "
-        "shader from the exact same source, so a value mismatch that only appears on "
-        "some runners is almost certainly a per-vendor driver bug — hence 'driver "
-        "suspected'. See the row's `axes` for the pattern (e.g. gpu_pattern: NVIDIA-only).",
-    "runtime_driver_confirmed":
+        "shader from the exact same source, so a value mismatch that only appears on some "
+        "runners strongly suggests a per-vendor driver/codegen bug — hence 'driver "
+        "suspected'. Not a certainty, though: uninitialized/under-specified test inputs, "
+        "data races, or a tolerance the test sets too tight can also make correct output "
+        "differ across hardware. See the row's `axes` for the pattern (e.g. "
+        "gpu_pattern: NVIDIA-only).",
+    "runtime_driver_suspected_crash":
         "Base label was `runtime_driver_error`. The same test passes on other workflows, "
-        "which confirms the crash is specific to some subset of GPUs/APIs — a real "
-        "driver bug, not a spec issue or harness flake. `axes` tells you which subset.",
+        "so the crash is specific to some subset of GPUs/APIs. That narrows it to a "
+        "runtime-environment-dependent fault, but does NOT confirm a driver defect: a "
+        "malformed pipeline spec in the test itself (wrong resource bindings, buffer "
+        "sizes, root signature, or uninitialized/under-specified inputs) can be tolerated "
+        "by lenient drivers yet rejected or crashed by stricter ones or a validation "
+        "layer. Treat as 'GPU/API-specific crash, root cause unconfirmed' — could be a "
+        "driver bug OR a test-authoring bug. `axes` tells you which subset diverges.",
     "runtime_driver_suspected_unknown":
         "Base label was `runtime_unknown`. The test passes elsewhere, so the failure is "
         "at least *runtime-dependent* — but we couldn't pinpoint driver-crash vs "
@@ -432,11 +452,14 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
         "API/backend layer — e.g. the Vulkan SPIRV codegen path — rather than a "
         "per-vendor driver. Common example: `Texture2D.Sample` fails on all Vulkan "
         "drivers and passes on D3D12.",
-    "api_backend_confirmed":
-        "Base label was `runtime_driver_error`, upgraded on the same API-axis criterion. "
-        "A crash that happens on every driver behind one API but on none behind another "
-        "isn't a per-driver bug — it's the API-backend triggering something drivers "
-        "reject.",
+    "api_backend_suspected_crash":
+        "Base label was `runtime_driver_error`, upgraded on the API-axis criterion (all "
+        "failures share one API, at least one workflow on a different API passes, with no "
+        "per-GPU-vendor alignment). A crash confined to one API backend points at that "
+        "backend's codegen/runtime path rather than a single vendor's driver — but, as "
+        "with `runtime_driver_suspected_crash`, it can equally be the test specifying "
+        "pipeline inputs/outputs in a way only that backend rejects. API-specific crash, "
+        "root cause unconfirmed (backend bug OR test-spec bug).",
     "api_backend_suspected_unknown":
         "Base label was `runtime_unknown`, upgraded via API-axis attribution. The "
         "API/backend correlates but the specific failure mode wasn't parsed from the log.",
@@ -490,6 +513,10 @@ def parse_workflow_axes(name: str) -> dict[str, str]:
         host = "ARM64"
     elif re.search(r"\bmacOS\b", name, re.I):
         host = "macOS"
+    elif gpu == "QC":
+        # Qualcomm boards (Snapdragon X Plus) are ARM64-only; the display name
+        # doesn't carry an ARM64 token, but the host always is (RUNNER_ARCH=ARM64).
+        host = "ARM64"
     elif re.search(r"\bWindows\b", name, re.I):
         host = "x64"
     else:
@@ -793,7 +820,7 @@ _BUILDER_FEATURES: dict[tuple[str, str], set[str]] = {
     ("Intel",    "x64"):   {"Intel-Gen-Current"},
     ("Warp",     "x64"):   set(),
     ("NVIDIA",   "x64"):   set(),
-    ("QC",       "x64"):   set(),
+    # QC (Snapdragon) is ARM64-only — there is no (QC, x64) configuration.
     ("Warp",     "ARM64"): set(),
     ("Lavapipe", "ARM64"): set(),
     ("QC",       "ARM64"): set(),
@@ -1246,20 +1273,24 @@ def main() -> None:
                 axes = attribute_divergence(fails_on, passes_on)
                 t["axes"] = axes
                 # If failures line up cleanly on the API axis (e.g. all Vulkan
-                # fail, D3D12/Metal pass), that's a backend/API issue rather
-                # than a per-vendor driver bug.
+                # fail, D3D12/Metal pass), that points at a backend/API layer
+                # rather than a per-vendor driver. Note: a GPU/API-specific
+                # failure is not proof of a driver/backend defect — the test
+                # itself may specify pipeline inputs/outputs in a way only some
+                # runtimes reject — so these upgrades stay 'suspected', never
+                # 'confirmed'.
                 if "api_pattern" in axes and "gpu_pattern" not in axes:
                     if t["classification"] == "runtime_miscompile":
                         t["classification"] = "api_backend_suspected_miscompile"
                     elif t["classification"] == "runtime_driver_error":
-                        t["classification"] = "api_backend_confirmed"
+                        t["classification"] = "api_backend_suspected_crash"
                     elif t["classification"] == "runtime_unknown":
                         t["classification"] = "api_backend_suspected_unknown"
                 else:
                     if t["classification"] == "runtime_miscompile":
                         t["classification"] = "runtime_driver_suspected_miscompile"
                     elif t["classification"] == "runtime_driver_error":
-                        t["classification"] = "runtime_driver_confirmed"
+                        t["classification"] = "runtime_driver_suspected_crash"
                     elif t["classification"] == "runtime_unknown":
                         t["classification"] = "runtime_driver_suspected_unknown"
                 if key not in seen_div:
@@ -1323,9 +1354,12 @@ def main() -> None:
     md.append("")
 
     if divergences:
-        md += ["## Cross-workflow divergences (likely driver / API-backend bugs)", "",
+        md += ["## Cross-workflow divergences (GPU/API-specific failures)", "",
                "Tests that fail on some workflows but pass on others. Same shader binary is",
-               "produced on all backends, so divergence usually points at the runtime.",
+               "produced on all backends, so divergence points at something",
+               "runtime-environment-specific — a driver/backend bug, or a test that specifies",
+               "pipeline inputs/outputs in a way only some runtimes reject. Labels stay",
+               "'suspected'; none of this alone confirms a driver defect.",
                "The 'axis' column names the axis (api / gpu / compiler) on which the failure",
                "set is homogeneous — e.g. 'api: Vulkan-only' = all failing workflows are",
                "Vulkan, at least one non-Vulkan workflow passes.",
