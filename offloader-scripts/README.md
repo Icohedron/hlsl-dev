@@ -221,10 +221,13 @@ One-time repo setup:
 
 - **Settings > Pages**: source = *GitHub Actions*.
 - **Settings > Secrets and variables > Actions** (recommended): add
-  `OFFLOAD_MONITOR_TOKEN`, a token with public-repo read scope. The monitor
-  downloads run logs from `llvm/offload-test-suite`; the ambient `GITHUB_TOKEN`
-  is scoped to this repo and generally can't read another repo's logs. Without
-  it the job falls back to `GITHUB_TOKEN`.
+  `OFFLOAD_MONITOR_TOKEN`, a token with public-repo read scope. A fine-grained
+  token with **"Public repositories (read-only)"** access is sufficient (it can
+  read `llvm/offload-test-suite`'s run logs); a classic token with the
+  `public_repo` scope works too. The monitor downloads run logs from
+  `llvm/offload-test-suite`; the ambient `GITHUB_TOKEN` is scoped to this repo
+  and can't read another repo's logs. Without the secret the job falls back to
+  `GITHUB_TOKEN` (reports will lack failure detail).
 
 ---
 
