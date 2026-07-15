@@ -1106,6 +1106,14 @@ class HtmlReport(unittest.TestCase):
         for dim in ("api", "gpu", "compiler", "host", "variant"):
             self.assertIn(f"<span class=k>{dim}</span>", h)
 
+    def test_fails_passes_as_named_pills(self):
+        h = self._report()
+        # divergence fails-on / passes-on render as count badge + full-name pills,
+        # not a slash-compacted comma list.
+        self.assertIn("<span class=wfcount>", h)
+        self.assertIn("<span class=wf>Windows Vulkan AMD Clang</span>", h)
+        self.assertNotIn("AMD/Vulkan/Clang", h)  # no compact slash-slug in HTML
+
     def test_toolbar_has_title_timestamp_filter_and_toggle(self):
         h = self._report()
         self.assertIn("<div id=toolbar>", h)

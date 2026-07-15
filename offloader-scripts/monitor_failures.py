@@ -1651,6 +1651,11 @@ td.note{max-width:44ch;color:var(--muted);font-size:12px}
 .ax-compiler{border-color:var(--ax-compiler)} .ax-compiler .v{color:var(--ax-compiler)}
 .ax-host{border-color:var(--ax-host)} .ax-host .v{color:var(--ax-host)}
 .ax-variant{border-color:var(--ax-variant)} .ax-variant .v{color:var(--ax-variant)}
+.wfcount{display:inline-block;min-width:1.2em;padding:0 5px;margin-right:5px;border-radius:2em;
+  font-size:11px;font-weight:700;text-align:center;background:var(--th-bg);border:1px solid var(--border)}
+.wf{display:inline-block;padding:0 6px;margin:1px 3px 1px 0;border-radius:5px;
+  font-size:11px;
+  background:var(--th-bg);border:1px solid var(--border);white-space:nowrap}
 details{margin:.3rem 0}summary{cursor:pointer;font-weight:600}
 #toolbar{position:fixed;top:0;left:0;right:0;z-index:6;display:flex;align-items:center;
   gap:12px;padding:7px 14px;background:var(--th-bg);border-bottom:1px solid var(--border);
@@ -1746,6 +1751,15 @@ def _html_axis_legend() -> str:
     )
 
 
+def _html_wf_list(names: list[str]) -> str:
+    """Render workflow names as individual pills (full names), count-badged, so
+    the members of a fails-on / passes-on set are visually separate and clear."""
+    if not names:
+        return '<span class="muted">\u2014</span>'
+    pills = "".join(f'<span class=wf>{html.escape(n)}</span>' for n in names)
+    return f'<span class=wfcount>{len(names)}</span>{pills}'
+
+
 def _html_chip(label: str) -> str:
     if not label:
         return ""
@@ -1776,8 +1790,7 @@ def _html_note(t: dict) -> str:
     if t.get("note"):
         bits.append(html.escape(t["note"]))
     if t.get("passes_on"):
-        bits.append('<span class="muted">passes on '
-                    + html.escape(_compact_wf_list(t["passes_on"])) + "</span>")
+        bits.append('<span class="muted">passes on</span> ' + _html_wf_list(t["passes_on"]))
     return "<br>".join(bits) or '<span class="muted">\u2014</span>'
 
 
@@ -1870,8 +1883,8 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
                 f'<tr class=f><td class=test>{esc(d["test"])}</td>'
                 f"<td>{_html_chip(d['classification'])}</td>"
                 f"<td>{_html_axis_chips(d.get('axes') or {})}</td>"
-                f'<td class=note>{esc(_compact_wf_list(d["fails_on"]))}</td>'
-                f'<td class=note>{esc(_compact_wf_list(d["passes_on"]))}</td></tr>')
+                f'<td class=note>{_html_wf_list(d["fails_on"])}</td>'
+                f'<td class=note>{_html_wf_list(d["passes_on"])}</td></tr>')
         h.append("</tbody></table>")
 
     # Per-workflow failure detail (collapsible), with a shared filter box.
