@@ -713,9 +713,12 @@ class RunnerTable(unittest.TestCase):
     """
     def test_runners_json_loads(self):
         self.assertTrue(mf._RUNNER_CPU_FEATURES, "no runners loaded")
-        # Every runner appears in both cpu and gpu maps.
-        self.assertEqual(set(mf._RUNNER_CPU_FEATURES), set(mf._RUNNER_GPU_FEATURES))
         self.assertIn("HLSLPC-AMD01", mf._RUNNER_CPU_FEATURES)
+        # gpu features are keyed per (machine, device); each device's machine is
+        # a known runner.
+        self.assertTrue(mf._RUNNER_GPU_FEATURES)
+        for (host, _gpu) in mf._RUNNER_GPU_FEATURES:
+            self.assertIn(host, mf._RUNNER_CPU_FEATURES)
 
     def test_builder_hosts_map_axes_to_machines(self):
         self.assertEqual(mf._BUILDER_HOSTS[("AMD", "x64")], "HLSLPC-AMD01")
@@ -723,16 +726,17 @@ class RunnerTable(unittest.TestCase):
         self.assertEqual(mf._BUILDER_HOSTS[("Warp", "ARM64")], "HLSLPC-QC01")
         self.assertEqual(mf._BUILDER_HOSTS[("Metal", "macOS")], "HLSLPC-APPLE01")
 
-    def test_host_hw_features_cpu_always_gpu_conditional(self):
-        # Intel builder: CPU has no AVX512; GPU adds Intel-Gen-Current.
-        self.assertEqual(mf._host_hw_features("HLSLPC-INTEL01", software_device=False),
+    def test_per_gpu_features(self):
+        # Each device on a machine carries its own features: the Intel Arc adds
+        # Intel-Gen-Current, WARP on the same box adds nothing.
+        self.assertEqual(mf._host_hw_features("HLSLPC-INTEL01", "Intel"),
                          {"Intel-Gen-Current"})
-        # A software renderer on the same box does NOT get the GPU feature.
-        self.assertEqual(mf._host_hw_features("HLSLPC-INTEL01", software_device=True),
-                         set())
-        # AMD builder CPU feature applies to software renderers too.
-        self.assertEqual(mf._host_hw_features("HLSLPC-AMD01", software_device=True),
-                         {"AVX512"})
+        self.assertEqual(mf._host_hw_features("HLSLPC-INTEL01", "Warp"), set())
+        # CPU features apply to every device, including software renderers.
+        self.assertEqual(mf._host_hw_features("HLSLPC-AMD01", "Lavapipe"), {"AVX512"})
+        self.assertEqual(mf._host_hw_features("HLSLPC-AMD01", "AMD"), {"AVX512"})
+        # Apple GPU device feature.
+        self.assertEqual(mf._host_hw_features("HLSLPC-APPLE01", "Metal"), {"AppleM4"})
 
     def test_warp_does_not_inherit_host_gpu_feature(self):
         # WARP x64 runs on the Intel builder but must NOT get Intel-Gen-Current
@@ -747,6 +751,24 @@ class RunnerTable(unittest.TestCase):
     def test_load_runner_table_tolerates_missing_file(self):
         cpu, gpu, hosts = mf._load_runner_table(pathlib.Path("/no/such/runners.json"))
         self.assertEqual((cpu, gpu, hosts), ({}, {}, {}))
+
+    def test_host_arch_inferred_from_cpu(self):
+        self.assertEqual(mf._infer_host_arch("AMD Ryzen 7 9700X", None), "x64")
+        self.assertEqual(mf._infer_host_arch("Intel Core i5-14400F", None), "x64")
+        self.assertEqual(mf._infer_host_arch("Qualcomm Snapdragon X Plus (ARM64)", None), "ARM64")
+        self.assertEqual(mf._infer_host_arch("Apple M4 Pro", None), "macOS")
+        # explicit host wins over inference
+        self.assertEqual(mf._infer_host_arch("Some Unrecognised CPU", "ARM64"), "ARM64")
+        # unclassifiable CPU defaults to x64
+        self.assertEqual(mf._infer_host_arch("Some Unrecognised CPU", None), "x64")
+
+    def test_gpus_paired_with_inferred_arch(self):
+        # A machine's `gpus` are paired with its CPU-derived arch (host not
+        # repeated per device): QC is ARM64, so all its devices map at ARM64.
+        self.assertEqual(mf._BUILDER_HOSTS[("QC", "ARM64")], "HLSLPC-QC01")
+        self.assertEqual(mf._BUILDER_HOSTS[("Lavapipe", "ARM64")], "HLSLPC-QC01")
+        self.assertEqual(mf._BUILDER_HOSTS[("Lavapipe", "x64")], "HLSLPC-AMD01")
+        self.assertNotIn(("QC", "x64"), mf._BUILDER_HOSTS)  # no x64 QC config
 
 
 class MatchXpassWithRunner(unittest.TestCase):

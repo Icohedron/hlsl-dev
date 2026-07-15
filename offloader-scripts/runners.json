@@ -9,54 +9,66 @@
     "",
     "TO ADD OR UPDATE A RUNNER: add/edit an entry under \"runners\", keyed by the",
     "machine's `Runner name:` (as it appears in the workflow log). For each:",
-    "  cpu / gpu     - human description (documentation only, not parsed).",
+    "  cpu / gpu     - human description. `cpu` also determines the host arch:",
+    "                  Apple* -> macOS, Snapdragon/ARM64/aarch64/Ampere -> ARM64,",
+    "                  otherwise x64. Override with an explicit \"host\" field if",
+    "                  the CPU string can't be classified.",
     "  cpu_features  - lit features from the CPU (e.g. AVX512). These apply to",
-    "                  every job on the machine, including software renderers",
-    "                  (WARP / Lavapipe).",
-    "  gpu_features  - lit features from the machine's own GPU (e.g.",
-    "                  Intel-Gen-Current, AppleM4). These apply ONLY when the",
-    "                  device under test is that physical GPU -- a WARP/Lavapipe",
-    "                  run on the same box does NOT get them.",
-    "  builds        - the [gpu, host] workflow-axis pairs that run on this",
-    "                  machine (gpu one of AMD/NVIDIA/Intel/QC/Warp/Lavapipe/Metal;",
-    "                  host one of x64/ARM64/macOS). Used to map a workflow to its",
-    "                  runner when the log's runner name isn't available yet."
+    "                  every device tested on the machine.",
+    "  gpus          - map of each device (gpu-axis) token this machine tests to",
+    "                  ITS OWN lit features. A machine tests its physical GPU plus",
+    "                  any software renderers scheduled on it (Warp / Lavapipe),",
+    "                  and each has distinct features: the discrete GPU may add",
+    "                  Intel-Gen-Current / AppleM4, while Warp / Lavapipe add none.",
+    "                  Token is one of AMD/NVIDIA/Intel/QC/Warp/Lavapipe/Metal.",
+    "                  The host arch comes from the CPU, so it isn't repeated here.",
+    "                  Used to resolve a workflow to its runner (and the device's",
+    "                  features) when the log's runner name isn't available yet."
   ],
   "runners": {
     "HLSLPC-AMD01": {
       "cpu": "AMD Ryzen 7 9700X (Zen 5, has AVX-512)",
       "gpu": "AMD Radeon RX 9070",
       "cpu_features": ["AVX512"],
-      "gpu_features": [],
-      "builds": [["AMD", "x64"], ["Lavapipe", "x64"]]
+      "gpus": {
+        "AMD": [],
+        "Lavapipe": []
+      }
     },
     "HLSLPC-INTEL01": {
       "cpu": "AMD Ryzen Threadripper 3970X (Zen 2, no AVX-512)",
       "gpu": "Intel Arc Pro B50 (Xe HPG => Intel Gen11-14/Xe)",
       "cpu_features": [],
-      "gpu_features": ["Intel-Gen-Current"],
-      "builds": [["Intel", "x64"], ["Warp", "x64"]]
+      "gpus": {
+        "Intel": ["Intel-Gen-Current"],
+        "Warp": []
+      }
     },
     "HLSLPC-NVIDIA01": {
       "cpu": "Intel Core i5-14400F (Raptor Lake refresh; consumer AVX-512 fused off)",
       "gpu": "NVIDIA GeForce RTX 5070",
       "cpu_features": [],
-      "gpu_features": [],
-      "builds": [["NVIDIA", "x64"]]
+      "gpus": {
+        "NVIDIA": []
+      }
     },
     "HLSLPC-QC01": {
       "cpu": "Qualcomm Snapdragon X Plus X1P-64-100 (ARM64)",
       "gpu": "Qualcomm Adreno X1-85",
       "cpu_features": [],
-      "gpu_features": [],
-      "builds": [["QC", "ARM64"], ["Warp", "ARM64"], ["Lavapipe", "ARM64"]]
+      "gpus": {
+        "QC": [],
+        "Warp": [],
+        "Lavapipe": []
+      }
     },
     "HLSLPC-APPLE01": {
       "cpu": "Apple M4 Pro",
       "gpu": "Apple M4 Pro",
       "cpu_features": [],
-      "gpu_features": ["AppleM4"],
-      "builds": [["Metal", "macOS"]]
+      "gpus": {
+        "Metal": ["AppleM4"]
+      }
     }
   }
 }

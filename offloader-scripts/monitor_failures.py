@@ -1031,13 +1031,12 @@ def workflow_features(name: str, runner_name: str | None = None) -> set[str]:
         feats.add(ax["host"])  # x64 / ARM64 also appear as arch features
     # Hardware features, keyed on the physical runner (HLSLPC-*). Prefer the
     # actual test runner from the log; otherwise resolve the workflow's axes to
-    # the machine that runs them. WARP / Lavapipe are software renderers, so the
-    # host's own GPU features don't apply to them.
-    software_device = ax["gpu"] in ("Warp", "Lavapipe")
+    # the machine that runs them. The device (gpu axis) selects that device's own
+    # features — e.g. WARP / Lavapipe on a box carry none of its discrete GPU's.
     host = runner_name if runner_name in _RUNNER_CPU_FEATURES else \
         _BUILDER_HOSTS.get((ax["gpu"], ax["host"]))
     if host:
-        feats |= _host_hw_features(host, software_device)
+        feats |= _host_hw_features(host, ax["gpu"])
     return feats
 
 
@@ -1055,10 +1054,34 @@ def workflow_features(name: str, runner_name: str | None = None) -> set[str]:
 _RUNNERS_FILE = pathlib.Path(__file__).with_name("runners.json")
 
 
+def _infer_host_arch(cpu: str, explicit: str | None) -> str:
+    """
+    The workflow `host` axis for a machine. Explicit wins; otherwise inferred
+    from the CPU description: Apple Silicon -> macOS, Arm parts -> ARM64, else
+    x64. (The host arch is a property of the machine's CPU, so runners.json
+    doesn't repeat it per device.)
+    """
+    if explicit:
+        return explicit
+    c = (cpu or "").lower()
+    if "apple" in c:
+        return "macOS"
+    if any(t in c for t in ("snapdragon", "arm64", "aarch64", "ampere")):
+        return "ARM64"
+    return "x64"
+
+
 def _load_runner_table(path: pathlib.Path):
-    """Parse runners.json into (cpu_features, gpu_features, builder_hosts)."""
+    """Parse runners.json into (cpu_features, gpu_features, builder_hosts).
+
+    cpu_features is keyed by machine (HLSLPC-*); gpu_features is keyed by
+    (machine, gpu-token) so each device on a machine — its physical GPU and any
+    software renderer — carries its own features. builder_hosts maps a workflow's
+    (gpu, host) axes to the machine that runs it, pairing each machine's `gpus`
+    with its CPU-inferred host arch.
+    """
     cpu: dict[str, set[str]] = {}
-    gpu: dict[str, set[str]] = {}
+    gpu: dict[tuple[str, str], set[str]] = {}
     builder_hosts: dict[tuple[str, str], str] = {}
     try:
         data = json.loads(path.read_text())
@@ -1068,25 +1091,28 @@ def _load_runner_table(path: pathlib.Path):
         return cpu, gpu, builder_hosts
     for host, spec in (data.get("runners") or {}).items():
         cpu[host] = set(spec.get("cpu_features") or [])
-        gpu[host] = set(spec.get("gpu_features") or [])
-        for pair in spec.get("builds") or []:
-            if len(pair) == 2:
-                builder_hosts[(pair[0], pair[1])] = host
+        arch = _infer_host_arch(spec.get("cpu", ""), spec.get("host"))
+        gpus = spec.get("gpus") or {}
+        # Accept a bare list (features unknown -> none) as well as the map form.
+        if isinstance(gpus, list):
+            gpus = {g: [] for g in gpus}
+        for g, gfeats in gpus.items():
+            gpu[(host, g)] = set(gfeats or [])
+            builder_hosts[(g, arch)] = host
     return cpu, gpu, builder_hosts
 
 
 _RUNNER_CPU_FEATURES, _RUNNER_GPU_FEATURES, _BUILDER_HOSTS = _load_runner_table(_RUNNERS_FILE)
 
 
-def _host_hw_features(host: str, software_device: bool) -> set[str]:
+def _host_hw_features(host: str, gpu: str) -> set[str]:
     """
-    Hardware lit features for a job on `host`. CPU features always apply; the
-    machine's GPU features apply only when the device under test is that GPU
-    (i.e. not a WARP / Lavapipe software renderer).
+    Hardware lit features for testing device `gpu` on machine `host`: the
+    machine's CPU features plus that specific device's own GPU features (so a
+    WARP / Lavapipe run gets the CPU features but not the discrete GPU's).
     """
     feats = set(_RUNNER_CPU_FEATURES.get(host, set()))
-    if not software_device:
-        feats |= _RUNNER_GPU_FEATURES.get(host, set())
+    feats |= _RUNNER_GPU_FEATURES.get((host, gpu), set())
     return feats
 
 
