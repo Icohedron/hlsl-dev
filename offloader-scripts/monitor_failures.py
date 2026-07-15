@@ -2300,6 +2300,7 @@ details{margin:.3rem 0}summary{cursor:pointer;font-weight:600}
 #toolbar .title{font-weight:700;font-size:15px;white-space:nowrap}
 #toolbar .sub{color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #toolbar .spacer{flex:1 1 auto}
+#toolbar .home{font-size:13px;white-space:nowrap}
 #filter{padding:5px 9px;width:210px;font-size:13px;
   border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg)}
 .count{color:var(--muted);font-weight:400;font-size:12px}

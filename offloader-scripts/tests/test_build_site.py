@@ -67,6 +67,33 @@ class CopyNewReportsTest(unittest.TestCase):
             site_reports.mkdir()
             self.assertEqual(bs.copy_new_reports(reports, site_reports), 0)
 
+    def test_summary_html_gets_home_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            reports = tmp / "reports"
+            d = _write_report(reports, "2026-07-15T01-26-47Z", [{"conclusion": "success"}])
+            # Realistic toolbar so the link lands in the fixed top bar.
+            (d / "summary.html").write_text(
+                "<!doctype html><html><body><div id=toolbar>"
+                "<span class=title>offload-test-suite report</span>"
+                "<span class=spacer></span>"
+                '<button id=themeBtn>Dark</button></div></body></html>'
+            )
+            site_reports = tmp / "site" / "reports"
+            site_reports.mkdir(parents=True)
+            bs.copy_new_reports(reports, site_reports)
+            out = (site_reports / "2026-07-15T01-26-47Z" / "summary.html").read_text()
+            self.assertIn('href="../../index.html"', out)
+            # Injected before the spacer, i.e. on the left of the toolbar.
+            self.assertLess(out.index("../../index.html"), out.index("class=spacer"))
+
+    def test_home_link_injection_is_idempotent_and_has_fallback(self):
+        # No toolbar -> falls back to inserting right after <body>.
+        got = bs.inject_home_link("<html><body>hi</body></html>")
+        self.assertIn('href="../../index.html"', got)
+        # Re-running must not add a second link.
+        self.assertEqual(bs.inject_home_link(got), got)
+
 
 class PruneOldTest(unittest.TestCase):
     def test_removes_only_older_than_cutoff(self):
