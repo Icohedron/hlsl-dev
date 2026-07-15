@@ -2358,7 +2358,7 @@ def main() -> None:
                 row.update(classify_run(log_text, gh, otss_root, issue_cache, wf["name"]))
         summary.append(row)
 
-    # ---- cross-GPU pivot: refine runtime_miscompile / runtime_driver_error ----
+    # ---- cross-workflow pivot: build the test failure summary ----
     # A test's failure MODE (miscompile / crash / unknown) can differ per
     # workflow — e.g. a driver crash on one GPU but a value mismatch on others.
     # Only the axis-derived *prefix* (runtime_driver_suspected / ...) is shared.
@@ -2393,7 +2393,12 @@ def main() -> None:
                 if same_compiler_passes(per_wf, comp):
                     t["classification"] = f"{cls}_env_suspected"
                 continue
-            if passes_on and fails_on and t.get("classification", "").startswith("runtime_"):
+            # Include in the test failure summary any test that fails on some
+            # workflows and passes on others: runtime failures (which may be
+            # upgraded to a suspected layer below) and xpasses (a stale XFAIL —
+            # the test passed where it was annotated to fail). xpass is never in
+            # _RUNTIME_UPGRADE_SUFFIX, so the upgrade logic leaves it as `xpass`.
+            if passes_on and fails_on and (cls.startswith("runtime_") or cls == "xpass"):
                 axes = attribute_divergence(fails_on, passes_on)
                 t["axes"] = axes
                 # Attribute the suspected layer from the tightest axis:
@@ -2524,7 +2529,9 @@ def main() -> None:
     if divergences:
         md += ["## Test failure summary", "",
                "Tests that fail on some workflows but pass on others, one row per",
-               "(test, classification). The same test source runs everywhere, so the",
+               "(test, classification) — including **xpass** (a test annotated XFAIL that",
+               "passed, i.e. a stale XFAIL for the workflows it 'fails on'). The same",
+               "test source runs everywhere, so the",
                "split points at something configuration-specific: a per-vendor driver",
                "bug, an API/backend bug, a compiler (DXC vs clang) codegen",
                "difference, or a test that specifies pipeline inputs/outputs in a way",

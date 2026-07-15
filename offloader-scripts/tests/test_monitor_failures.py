@@ -1569,9 +1569,10 @@ _LOG_B = """\
 Runner name: 'HLSLPC-AMD01'
 Syncing repository: llvm/offload-test-suite
 HEAD is now at abc1234ef offload commit
-Testing: 2 tests
-PASS: OffloadTest-d3d12 :: Feature/Foo/bar.test (1 of 2)
-PASS: OffloadTest-d3d12 :: Feature/Foo/keep.test (2 of 2)
+Testing: 3 tests
+PASS: OffloadTest-d3d12 :: Feature/Foo/bar.test (1 of 3)
+PASS: OffloadTest-d3d12 :: Feature/Foo/keep.test (2 of 3)
+PASS: OffloadTest-d3d12 :: Feature/StructuredBuffer/inc_counter_array.test (3 of 3)
 """
 
 _LOG_C = """\
@@ -1658,6 +1659,14 @@ class MainSmoke(unittest.TestCase):
             self.assertTrue(a_tests["Feature/Foo/bar.test"]["classification"].endswith("_suspected_miscompile"))
             divs = json.loads((out_dir / "divergences.json").read_text())
             self.assertTrue(any(d["test"] == "Feature/Foo/bar.test" for d in divs))
+            # An XPASS that passes on another workflow is included in the summary,
+            # keeping the `xpass` classification (never upgraded to a fault layer).
+            inc = next((d for d in divs
+                        if d["test"] == "Feature/StructuredBuffer/inc_counter_array.test"), None)
+            self.assertIsNotNone(inc, "xpass divergence missing from test failure summary")
+            self.assertEqual(inc["classifications"], ["xpass"])
+            self.assertEqual(inc["fails_on"], ["Windows Vulkan AMD Clang"])
+            self.assertEqual(inc["passes_on"], ["Windows D3D12 AMD DXC"])
 
             # Markdown structure: collapsible sections, short issue link, no suite prefix.
             md = (out_dir / "summary.md").read_text()
