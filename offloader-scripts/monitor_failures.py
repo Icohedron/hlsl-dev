@@ -456,153 +456,141 @@ def has_test_stage_output(log_text: str) -> bool:
 
 
 CLASSIFICATION_LEGEND: dict[str, str] = {
-    # Build-stage failures (job never entered lit).
+    # Failures detected from a single workflow's log, described in plain terms.
     "build_failure":
-        "Job failed before running any tests (cmake/compile/link/ninja/msbuild error). "
-        "`detail` says which subtree the error was in: clang_llvm | dxc | other | unknown.",
-
-    # Test-stage failures — base categories (no cross-workflow data used).
+        "The job failed before any test ran — the build itself broke (a CMake / "
+        "compile / link / ninja / MSBuild error). The `detail` column names which "
+        "source tree the error came from: clang_llvm, dxc, other (infra/setup), or "
+        "unknown.",
     "shader_compile_dxc":
-        "The `dxc` invocation in the failing test's block exited non-zero (`.exe` on "
-        "Windows; no suffix on macOS/Linux) — DXC couldn't compile the shader. Not the "
-        "runtime's fault.",
+        "Each test first compiles its shader. Here the DXC compiler (`dxc`) exited "
+        "with an error, so the shader never built. A compiler problem, not a GPU or "
+        "runtime one.",
     "shader_compile_clang":
-        "The clang shader-compile invocation (the `clang-dxc` binary, or plain "
-        "`clang`; `.exe` on Windows, no suffix on macOS/Linux) in the failing test's "
-        "block exited non-zero — clang couldn't compile the shader. Not the runtime's "
-        "fault.",
+        "Each test first compiles its shader. Here the clang-based compiler "
+        "(`clang-dxc`, or plain `clang`) exited with an error, so the shader never "
+        "built. A compiler problem, not a GPU or runtime one.",
     "runtime_driver_error":
-        "Shader compiled OK, but a later step (typically the `offloader` / `gpu-exec` "
-        "tool) crashed with "
-        "an NT status like 0xC0000005, hit a device-lost / TDR / access-violation "
-        "marker, or otherwise reported the driver had gone away.",
+        "The shader compiled fine, but running it crashed the GPU or driver — an "
+        "access violation, a device-lost / TDR (driver reset), or a similar hard "
+        "failure reported by the `offloader` execution tool. The run did not finish "
+        "cleanly.",
     "runtime_pipeline_error":
-        "Shader compiled OK, but the runtime rejected pipeline-state creation "
-        "(D3D12 `Failed to create PSO.`, Vulkan `Failed to create compute/graphics "
-        "pipeline.`). The offloader reported a clean non-zero error rather than "
-        "crashing, and nothing ever executed. Usually a backend/driver rejection of "
-        "the compiled shader OR a malformed pipeline spec in the test itself "
-        "(root signature / bindings). Distinct from runtime_driver_error (crash) and "
-        "runtime_miscompile (ran, wrong result).",
+        "The shader compiled fine, but the graphics runtime refused to create the "
+        "pipeline for it (D3D12 `Failed to create PSO`, Vulkan `Failed to create "
+        "pipeline`) — a clean error, no crash, and nothing ever executed. Usually the "
+        "driver/backend rejecting the shader, or a malformed pipeline setup in the "
+        "test itself (root signature / bindings).",
     "runtime_miscompile":
-        "Shader compiled OK, the pipeline ran to completion, but output values or "
-        "images didn't match the golden reference (the offloader's `Test failed` / "
-        "`Comparison Rule` / Expected-vs-Got buffer dump, a FileCheck failure, verify "
-        "failed, or an 'expected X actual Y' diff). Points at wrong codegen or wrong runtime "
-        "execution.",
+        "The shader compiled and ran to completion, but produced the WRONG answer: "
+        "the output buffer or image didn't match the test's expected 'golden' "
+        "reference (the offloader's `Test failed` / Expected-vs-Got dump, a FileCheck "
+        "mismatch, or an 'expected X actual Y' diff). Points at incorrect code "
+        "generation or incorrect execution.",
     "runtime_unknown":
-        "Shader compiled OK, a later step exited non-zero, but no driver-crash or "
-        "value-mismatch signal was found in the log. Fell through both classifiers.",
+        "The shader compiled and then something failed while running it, but the log "
+        "didn't clearly show whether it crashed or produced a wrong result. Needs a "
+        "look at the log.",
     "xpass":
-        "Test was marked XFAIL but passed. Report also links the specific XFAIL "
-        "clause's GitHub issue(s) (chosen by evaluating the clause's lit feature "
-        "expression against the actual test-runner's feature set — see the row's "
+        "The test is marked XFAIL (known / expected to fail) yet it actually PASSED — "
+        "the annotation is now stale for the workflows it 'fails on'. The report also "
+        "links the GitHub issue(s) named on the matching XFAIL line (see the row's "
         "`linked_issue`, `linked_issues`, and `xfail_match`).",
 
-    # Upgraded labels — applied by the cross-workflow pivot after the pass
-    # matrix reveals the same test passes on at least one other workflow.
+    # 'Suspected' labels: the same test passes on some workflows and fails on
+    # others, and since every workflow runs the identical test from identical
+    # source, WHERE it fails points at the likely culprit. Always a suspicion,
+    # never proof. The row's `axes` column shows the failing/passing split.
     "runtime_driver_suspected_miscompile":
-        "Base label was `runtime_miscompile`, but the SAME shader binary produces the "
-        "right result on some other workflows. Every workflow compiles the exact same "
-        "shader from the exact same source, so a value mismatch that only appears on some "
-        "runners strongly suggests a per-vendor driver/codegen bug — hence 'driver "
-        "suspected'. Not a certainty, though: uninitialized/under-specified test inputs, "
-        "data races, or a tolerance the test sets too tight can also make correct output "
-        "differ across hardware. See the row's `axes` for the pattern (e.g. "
-        "gpu_pattern: NVIDIA-only).",
+        "A wrong result (miscompile) that appears on only some GPUs while the very "
+        "same compiled shader gives the right answer on others. Every workflow builds "
+        "the identical shader from identical source, so a mismatch confined to certain "
+        "hardware most likely means a per-vendor GPU driver / codegen bug (hence "
+        "'driver suspected'). Not certain: uninitialized or under-specified test "
+        "inputs, data races, or too-tight tolerances can also differ across hardware. "
+        "The `axes` column shows the pattern (e.g. only NVIDIA fails).",
     "runtime_driver_suspected_crash":
-        "Base label was `runtime_driver_error`. The same test passes on other workflows, "
-        "so the crash is specific to some subset of GPUs/APIs. That narrows it to a "
-        "runtime-environment-dependent fault, but does NOT confirm a driver defect: a "
-        "malformed pipeline spec in the test itself (wrong resource bindings, buffer "
-        "sizes, root signature, or uninitialized/under-specified inputs) can be tolerated "
-        "by lenient drivers yet rejected or crashed by stricter ones or a validation "
-        "layer. Treat as 'GPU/API-specific crash, root cause unconfirmed' — could be a "
-        "driver bug OR a test-authoring bug. `axes` tells you which subset diverges.",
+        "A run-time crash (access violation / device-lost / TDR) that happens on only "
+        "some GPUs or APIs while the same test passes on others — so it's specific to a "
+        "subset of hardware. This does NOT prove a driver bug: a test that specifies "
+        "its pipeline inputs/outputs badly (wrong bindings, buffer sizes, root "
+        "signature, or uninitialized inputs) can be tolerated by lenient drivers yet "
+        "crash stricter ones or a validation layer. Treat as 'GPU/API-specific crash, "
+        "cause unconfirmed' — driver bug or test-authoring bug. `axes` shows which "
+        "subset diverges.",
     "runtime_driver_suspected_unknown":
-        "Base label was `runtime_unknown`. The test passes elsewhere, so the failure is "
-        "at least *runtime-dependent* — but we couldn't pinpoint driver-crash vs "
-        "miscompile from the log. Manual inspection needed; `axes` narrows the search.",
+        "A run-time failure that happens on only some workflows — so it depends on the "
+        "GPU / API / environment — but the log didn't show whether it crashed or gave "
+        "a wrong result. At least it's environment-specific; needs manual inspection. "
+        "`axes` narrows down where it diverges.",
     "gpu_api_driver_suspected_miscompile":
-        "Base label was `runtime_miscompile`. The failing set is confined to a single "
-        "(GPU vendor, API) pair, AND that same GPU passes the test on a DIFFERENT API "
-        "while that same API passes on a DIFFERENT GPU. A vendor's Vulkan and D3D12 "
-        "drivers are separate implementations, so a wrong result confined to e.g. "
-        "NVIDIA-Vulkan — with NVIDIA-D3D12 and AMD-Vulkan both correct — points at that "
-        "vendor's driver for that ONE API, not the vendor broadly or the API broadly. "
-        "Tighter than runtime_driver_suspected; the two passing peers rule out the whole "
-        "vendor driver and the whole backend. Still 'suspected' (test tolerance / "
-        "under-specified inputs can also diverge). `axes` shows gpu_pattern + api_pattern.",
+        "A wrong result confined to ONE GPU-vendor + API combination — e.g. NVIDIA on "
+        "Vulkan — where that same GPU is correct on the other API (NVIDIA on D3D12) AND "
+        "that same API is correct on other GPUs (AMD on Vulkan). A vendor's Vulkan and "
+        "D3D12 drivers are separate pieces of software, so this points squarely at that "
+        "vendor's driver for that ONE API, not the vendor or the API as a whole. Still "
+        "'suspected' — a too-tight or under-specified test can also single out one "
+        "combination. `axes` shows the GPU and API.",
     "gpu_api_driver_suspected_crash":
-        "Base label was `runtime_driver_error`, attributed to a single (GPU vendor, API) "
-        "pair on the same evidence as gpu_api_driver_suspected_miscompile: the same GPU "
-        "passes on another API and the same API passes on another GPU, so the crash is "
-        "specific to that vendor's driver for that one API (e.g. NVIDIA's Vulkan driver) "
-        "rather than the vendor or backend as a whole. Root cause unconfirmed — could be "
-        "that driver OR a test-spec issue only it rejects.",
+        "A run-time crash confined to ONE GPU-vendor + API combination (e.g. NVIDIA on "
+        "Vulkan), while that GPU is fine on the other API and that API is fine on other "
+        "GPUs. A vendor's per-API driver (its separate Vulkan vs D3D12 implementation) "
+        "is the tightest suspect. Cause unconfirmed, though — it could instead be a test "
+        "whose pipeline setup only that one combination rejects.",
     "gpu_api_driver_suspected_unknown":
-        "Base label was `runtime_unknown`, attributed to a single (GPU vendor, API) pair "
-        "(same GPU passes on another API, same API passes on another GPU). The per-API "
-        "vendor driver correlates but the specific failure mode wasn't parsed from the log.",
+        "A run-time failure confined to ONE GPU-vendor + API combination (that GPU "
+        "passes on the other API; that API passes on other GPUs), but the log didn't "
+        "reveal whether it crashed or gave a wrong result. Points at that vendor's "
+        "driver for that one API; exact failure mode unclear.",
     "api_backend_suspected_miscompile":
-        "Base label was `runtime_miscompile`, and the failing set aligns cleanly on the "
-        "**API axis** (all failures share one API, at least one workflow on a different "
-        "API passes) *without* aligning on any GPU vendor. That points at the "
-        "API/backend layer — e.g. the Vulkan SPIRV codegen path — rather than a "
-        "per-vendor driver. Typical shape: a test that fails on every Vulkan driver "
-        "but passes on D3D12.",
+        "A wrong result that appears on every workflow using one graphics API (e.g. all "
+        "Vulkan) and not on the others (e.g. D3D12), with no single GPU vendor in "
+        "common. That points at the API / backend layer — for Vulkan, the SPIR-V code "
+        "path — rather than one vendor's driver. Typical shape: a test that fails on "
+        "every Vulkan driver but passes on D3D12.",
     "api_backend_suspected_crash":
-        "Base label was `runtime_driver_error`, upgraded on the API-axis criterion (all "
-        "failures share one API, at least one workflow on a different API passes, with no "
-        "per-GPU-vendor alignment). A crash confined to one API backend points at that "
-        "backend's codegen/runtime path rather than a single vendor's driver — but, as "
-        "with `runtime_driver_suspected_crash`, it can equally be the test specifying "
-        "pipeline inputs/outputs in a way only that backend rejects. API-specific crash, "
-        "root cause unconfirmed (backend bug OR test-spec bug).",
+        "A run-time crash confined to one graphics API (e.g. all Vulkan), with no "
+        "single GPU vendor in common — pointing at that API's backend / runtime path "
+        "rather than one vendor's driver. As with the other crash labels the cause is "
+        "unconfirmed: it can equally be a test that sets up its pipeline in a way only "
+        "that backend rejects. API-specific crash, backend bug or test-spec bug.",
     "api_backend_suspected_unknown":
-        "Base label was `runtime_unknown`, upgraded via API-axis attribution. The "
-        "API/backend correlates but the specific failure mode wasn't parsed from the log.",
-    "api_backend_suspected_unknown":
-        "Base label was `runtime_unknown`, upgraded via API-axis attribution. The "
-        "API/backend correlates but the specific failure mode wasn't parsed from the log.",
+        "A run-time failure confined to one graphics API (no single GPU vendor in "
+        "common), so the API / backend layer is implicated — but the log didn't show "
+        "whether it crashed or produced a wrong result.",
     "compiler_suspected_miscompile":
-        "Base label was `runtime_miscompile`, upgraded on the **compiler axis**: every "
-        "workflow using one compiler (clang OR dxc) failed this test, NO workflow "
-        "using that compiler passed it, and at least one workflow using the OTHER "
-        "compiler passed — with no per-GPU or per-API alignment. Every workflow runs "
-        "the exact same test from the exact same source, so wrong output confined to "
-        "one compiler (while the other compiler is correct) is high-confidence evidence "
-        "of that compiler's frontend/codegen (e.g. a clang vs DXC DXIL difference) "
-        "rather than a driver or backend — if a driver/backend were at fault the same "
-        "compiler would fail there too, but here it passes on the other compiler. Still "
-        "'suspected': an under-specified test/golden could in principle only accept one "
-        "compiler's output. See `axes` (e.g. compiler_pattern: clang-only).",
+        "A wrong result that shows up on every workflow using one compiler (clang OR "
+        "dxc) and never when that compiler passes, while the OTHER compiler gets it "
+        "right, with no GPU- or API-specific pattern. Since all workflows run the same "
+        "test from the same source, wrong output tied to one compiler (with the other "
+        "correct) is strong evidence of that compiler's code generation — e.g. a "
+        "clang-vs-DXC DXIL difference — not a driver or backend, which would fail on "
+        "both compilers. Still 'suspected': an under-specified test / golden could in "
+        "principle accept only one compiler's output. `axes` shows which compiler.",
     "compiler_suspected_crash":
-        "Base label was `runtime_driver_error`, upgraded on the compiler axis (all "
-        "failures use one compiler, no workflow on that compiler passes, at least one "
-        "workflow on the other compiler passes, no per-GPU or per-API alignment). A "
-        "crash confined to shaders from one compiler points at that compiler emitting "
-        "something the runtime rejects — but it can equally be a test-spec issue only "
-        "that compiler's output surfaces. Compiler-specific crash, root cause "
-        "unconfirmed (compiler bug OR test-spec bug).",
+        "A run-time crash tied to shaders from one compiler (clang OR dxc): every "
+        "workflow using that compiler crashes, none pass, and the other compiler is "
+        "fine, with no GPU / API pattern. Suggests that compiler emits something the "
+        "runtime rejects — though it can equally be a test-spec issue that only that "
+        "compiler's output exposes. Compiler-specific crash, cause unconfirmed "
+        "(compiler bug or test-spec bug).",
     "compiler_suspected_unknown":
-        "Base label was `runtime_unknown`, upgraded via compiler-axis attribution (all "
-        "failures on one compiler, none of that compiler's workflows pass, the other "
-        "compiler passes). The compiler correlates but the specific failure mode wasn't "
-        "parsed from the log.",
-    # Shader-compile de-blame: the compiler-stage failure label is kept ONLY when
-    # no workflow using the same compiler passed the test (see the pivot). If a
-    # same-compiler peer compiled it, the compiler is exonerated and we downgrade.
+        "A run-time failure tied to one compiler (every workflow using it fails, none "
+        "pass, the other compiler passes), but the log didn't show whether it crashed "
+        "or gave a wrong result. The compiler correlates; exact failure mode unclear.",
+
+    # De-blamed compiler failures: the shader didn't build here, but a sibling
+    # workflow using the SAME compiler built the identical test fine.
     "shader_compile_dxc_env_suspected":
-        "`dxc` failed to compile the shader here, but a peer workflow using dxc compiled "
-        "the same test successfully — so dxc itself is not at fault. Suspect a "
-        "per-workflow toolchain build/version, environment, or flags difference rather "
-        "than a DXC bug.",
+        "DXC failed to compile the shader here, but another workflow that also uses DXC "
+        "compiled the same test successfully — so DXC itself probably isn't at fault. "
+        "More likely a per-workflow toolchain version, environment, or build-flag "
+        "difference than a DXC bug.",
     "shader_compile_clang_env_suspected":
-        "`clang` failed to compile the shader here, but a peer workflow using "
-        "clang compiled the same test successfully — so clang itself is not at "
-        "fault. Suspect a per-workflow toolchain build/version, environment, or flags "
-        "difference rather than a clang bug.",
+        "The clang compiler failed to compile the shader here, but another workflow "
+        "that also uses clang compiled the same test successfully — so clang itself "
+        "probably isn't at fault. More likely a per-workflow toolchain version, "
+        "environment, or build-flag difference than a clang bug.",
 }
 
 
