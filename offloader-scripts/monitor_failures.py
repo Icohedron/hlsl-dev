@@ -2170,7 +2170,7 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
         h.append("<h2>Test failure summary "
                  f'<span class=count>({n_rows} test/classification rows · '
                  'fails on some workflows, passes on others)</span></h2>')
-        h.append("<table><thead><tr><th>test</th><th>classification</th><th>axis</th>"
+        h.append("<table><thead><tr><th>test</th><th>classification</th><th>failure axis</th>"
                  "<th>fails on</th><th>passes on</th></tr></thead><tbody>")
         for d in divergences:
             axes = d.get("axes") or {}
@@ -2473,7 +2473,7 @@ def main() -> None:
                "split points at something configuration-specific: a per-vendor driver",
                "bug, an API/backend bug, a compiler (DXC vs clang) codegen",
                "difference, or a test that specifies pipeline inputs/outputs in a way",
-               "only some configurations reject. The **axis** column names the axis on",
+               "only some configurations reject. The **failure axis** column names the axis on",
                "which the failing set is homogeneous (e.g. `api: Vulkan-only` = every",
                "failing workflow is Vulkan); the **passes on** column groups the passing",
                "workflows by that same axis so the contrast is explicit. On gpu/api the",
@@ -2484,7 +2484,7 @@ def main() -> None:
                "compiler passes — which is the high-confidence case that it's the compiler",
                "and not the backend/driver.",
                "",
-               "| test | classification | axis | fails on | passes on |",
+               "| test | classification | failure axis | fails on | passes on |",
                "|---|---|---|---|---|"]
         for d in divergences:
             axes = d.get("axes") or {}
