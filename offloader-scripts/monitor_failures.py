@@ -1037,11 +1037,12 @@ def group_passes_by_axes(passes_on: list[str], axes: dict
 
 def test_failure_rows(entry: dict) -> list[dict]:
     """Split one cross-workflow failure entry into per-(test, classification)
-    display rows. Failing workflows are grouped by their assigned
-    classification; the aggregate axis and passing set are shared by every row
-    of the test (the axis is attributed over the whole failing set, which is
-    more meaningful than re-deriving it from a one-workflow subset). Returns
-    rows as {classification, fails_on} sorted by classification.
+    display rows. Failing workflows are grouped by their assigned classification,
+    and each row gets its OWN failure axis, attributed over just that row's
+    failing workflows — so a row with a single failure has no axes (an axis
+    needs >= 2 failures alike). The passing set is shared by every row of the
+    test. Returns rows as {classification, fails_on, axes} sorted by
+    classification.
     """
     by_cls: dict[str, list[str]] = {}
     for w, cls in (entry.get("fail_classifications") or {}).items():
@@ -1049,7 +1050,11 @@ def test_failure_rows(entry: dict) -> list[dict]:
     if not by_cls:  # defensive: fall back to the aggregate view
         for c in entry.get("classifications") or ["unknown"]:
             by_cls.setdefault(c, list(entry.get("fails_on") or []))
-    return [{"classification": c, "fails_on": sorted(ws)} for c, ws in sorted(by_cls.items())]
+    rows = []
+    for c, ws in sorted(by_cls.items()):
+        ws = sorted(ws)
+        rows.append({"classification": c, "fails_on": ws, "axes": failure_axes(ws)})
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -2314,16 +2319,17 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
         h.append("<table><thead><tr><th>test</th><th>classification</th><th>failure axis</th>"
                  "<th>fails on</th><th>passes on</th></tr></thead><tbody>")
         for d in divergences:
-            axes = d.get("axes") or {}
-            axis_cell = _html_axis_chips(axes)
-            passes_cell = _html_pass_groups(d.get("passes_on") or [], axes, run_urls=run_urls)
+            passes_on = d.get("passes_on") or []
             for row in test_failure_rows(d):
+                # Per-row failure axis: attributed over just this classification's
+                # failing workflows, so a single-failure row shows no axes.
+                row_axes = row["axes"]
                 h.append(
                     f'<tr class=f><td class=test>{esc(d["test"])}</td>'
                     f'<td>{_html_chip(row["classification"])}</td>'
-                    f"<td>{axis_cell}</td>"
+                    f"<td>{_html_axis_chips(row_axes)}</td>"
                     f'<td class=note>{_html_wf_list(row["fails_on"], run_urls=run_urls)}</td>'
-                    f'<td class=note>{passes_cell}</td></tr>')
+                    f'<td class=note>{_html_pass_groups(passes_on, row_axes, run_urls=run_urls)}</td></tr>')
         h.append("</tbody></table>")
 
     # Per-workflow failure detail (collapsible), with a shared filter box.
@@ -2641,11 +2647,12 @@ def main() -> None:
                "| test | classification | failure axis | fails on | passes on |",
                "|---|---|---|---|---|"]
         for d in divergences:
-            axes = d.get("axes") or {}
-            axis_bits = [f"{k.replace('_pattern','')}: {v}" for k, v in axes.items()]
-            axis_str = "; ".join(axis_bits) or "-"
-            passes_str = _md_pass_groups(d.get("passes_on") or [], axes)
+            passes_on = d.get("passes_on") or []
             for row in test_failure_rows(d):
+                row_axes = row["axes"]  # per-row: no axes for a single-failure row
+                axis_str = "; ".join(f"{k.replace('_pattern','')}: {v}"
+                                     for k, v in row_axes.items()) or "-"
+                passes_str = _md_pass_groups(passes_on, row_axes)
                 md.append(f"| `{d['test']}` | `{row['classification']}` | {axis_str} | "
                           f"{_md_wf_list(row['fails_on'])} | {passes_str} |")
         md.append("")

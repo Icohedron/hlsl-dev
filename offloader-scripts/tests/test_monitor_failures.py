@@ -1436,9 +1436,11 @@ class HtmlReport(unittest.TestCase):
                                      "runtime_driver_suspected_miscompile"],
                  "fail_classifications": {
                      "Windows Lavapipe AMD DXC": "runtime_driver_suspected_crash",
-                     "Windows Vulkan AMD Clang": "runtime_driver_suspected_miscompile"},
+                     "Windows Vulkan AMD Clang": "runtime_driver_suspected_miscompile",
+                     "Windows Vulkan NVIDIA Clang": "runtime_driver_suspected_miscompile"},
                  "axes": {"api_pattern": "Vulkan-only"},
-                 "fails_on": ["Windows Lavapipe AMD DXC", "Windows Vulkan AMD Clang"],
+                 "fails_on": ["Windows Lavapipe AMD DXC", "Windows Vulkan AMD Clang",
+                              "Windows Vulkan NVIDIA Clang"],
                  "passes_on": ["Windows D3D12 Warp DXC"]}]
         return mf.render_html_report("2026-07-14T00-00-00Z", summary, divs, Counter({"xpass": 1}))
 
@@ -1514,6 +1516,20 @@ class HtmlReport(unittest.TestCase):
         self.assertIn('<a class=wf href="https://x/1" target=_blank>Windows Vulkan AMD Clang</a>', h)
         self.assertIn("<span class=wf>Windows Lavapipe AMD DXC</span>", h)  # not in summary -> plain
         self.assertNotIn("<span class=wfmode>", h)
+
+    def test_single_failure_row_has_no_failure_axis(self):
+        # The failure axis is per-row: the crash row (1 failing workflow) shows no
+        # axis, while the miscompile row (2 Vulkan clang failures) shows axes.
+        summary = self._report().split("Test failure summary", 1)[1].split(
+            "Failures by workflow", 1)[0]
+        rows = [r for r in summary.split("<tr class=f>") if "td class=test" in r]
+        crash = next(r for r in rows if "runtime_driver_suspected_crash" in r)
+        misc = next(r for r in rows if "runtime_driver_suspected_miscompile" in r)
+        # crash row: single failure -> empty axis cell (the em-dash placeholder)
+        self.assertNotIn('class="axis', crash)
+        self.assertIn("\u2014", crash)
+        # miscompile row: 2 failures, both Vulkan clang -> axis chips present
+        self.assertIn('class="axis ax-api"', misc)
 
     def test_test_failure_summary_groups_passes_by_axis(self):
         # The failing set is api:Vulkan-only, so the passing side is grouped by
