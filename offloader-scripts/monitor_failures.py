@@ -1574,12 +1574,15 @@ def divergence_suspect_prefix(axes: dict) -> str:
 
 
 def _fmt_commits(commits: dict) -> str:
-    """Compact `llvm <sha> · dxc <sha>` for the summary table (empty if unknown)."""
+    """Compact `llvm <sha> · dxc <sha> · offload <sha>` for the summary table
+    (each part omitted if that repo's commit is unknown)."""
     bits = []
     if commits.get("llvm-project"):
         bits.append(f"llvm `{commits['llvm-project'][:9]}`")
     if commits.get("directxshadercompiler"):
         bits.append(f"dxc `{commits['directxshadercompiler'][:9]}`")
+    if commits.get("offload-test-suite"):
+        bits.append(f"offload `{commits['offload-test-suite'][:9]}`")
     return " · ".join(bits)
 
 
@@ -1732,7 +1735,7 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
     # Per-workflow summary table.
     h.append("<h2>Workflows</h2>")
     h.append("<table><thead><tr><th>workflow</th><th>conclusion</th><th>category</th>"
-             "<th>detail</th><th># fails</th><th>build (llvm / dxc)</th><th>run</th></tr></thead><tbody>")
+             "<th>detail</th><th># fails</th><th>tested commits (llvm / dxc / offload)</th><th>run</th></tr></thead><tbody>")
     for r in summary:
         concl = r.get("conclusion") or r.get("status") or ""
         ccls = "ok" if concl == "success" else "bad" if concl == "failure" else "muted"
@@ -1988,7 +1991,7 @@ def main() -> None:
                 md.append(f"| `{d}` (×{n}) | {expl} |")
         md += ["", "</details>", ""]
 
-    md += ["| workflow | conclusion | category | detail | # test failures | build (llvm / dxc) | run |",
+    md += ["| workflow | conclusion | category | detail | # test failures | tested commits (llvm / dxc / offload) | run |",
            "|---|---|---|---|---|---|---|"]
     for r in summary:
         cat = r.get("category") or ""

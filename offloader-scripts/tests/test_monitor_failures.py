@@ -1119,6 +1119,23 @@ class ColumnLegends(unittest.TestCase):
             self.assertIn(detail, mf.DETAIL_LEGEND)
 
 
+class FmtCommits(unittest.TestCase):
+    def test_includes_all_three_repos(self):
+        out = mf._fmt_commits({
+            "llvm-project": "f60650c77abc",
+            "directxshadercompiler": "dc3e6c48ef",
+            "offload-test-suite": "abc1234def",
+        })
+        self.assertEqual(out, "llvm `f60650c77` \u00b7 dxc `dc3e6c48e` \u00b7 offload `abc1234de`")
+
+    def test_offload_alone(self):
+        self.assertEqual(mf._fmt_commits({"offload-test-suite": "abc1234def"}),
+                         "offload `abc1234de`")
+
+    def test_empty(self):
+        self.assertEqual(mf._fmt_commits({}), "")
+
+
 # ---------------------------------------------------------------------------
 # End-to-end smoke test: drive main() with the network boundary mocked so the
 # full report-generation path runs — workflow loop, classification, the
@@ -1241,6 +1258,10 @@ class MainSmoke(unittest.TestCase):
 
             # Markdown structure: collapsible sections, short issue link, no suite prefix.
             md = (out_dir / "summary.md").read_text()
+            # Renamed commits column + offload-test-suite sha present (log A
+            # syncs offload-test-suite at abc1234ef).
+            self.assertIn("tested commits (llvm / dxc / offload)", md)
+            self.assertIn("offload `abc1234ef`", md)
             self.assertIn("<details", md)
             self.assertIn("## Failures by workflow", md)
             # Each per-workflow section links its run (workflow A's run is /1).
