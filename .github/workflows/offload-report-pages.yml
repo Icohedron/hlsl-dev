@@ -30,7 +30,11 @@ name: offload-report-pages
 
 on:
   schedule:
-    - cron: "0 * * * *"   # every hour, on the hour (UTC)
+    # Run at :23 rather than :00. The top of the hour is by far the most
+    # congested slot on GitHub's scheduler, and during high load on-the-hour
+    # scheduled runs are commonly delayed or dropped entirely; an off-peak minute
+    # is GitHub's recommended mitigation for reliable hourly schedules.
+    - cron: "23 * * * *"   # hourly, at 23 min past the hour (UTC)
   workflow_dispatch: {}    # allow manual runs
 
 # The official Pages deployment needs pages:write + id-token:write. No branch
