@@ -1740,8 +1740,7 @@ td.note{max-width:44ch;color:var(--muted);font-size:12px}
 .ax-compiler{border-color:var(--ax-compiler)} .ax-compiler .v{color:var(--ax-compiler)}
 .ax-host{border-color:var(--ax-host)} .ax-host .v{color:var(--ax-host)}
 .ax-variant{border-color:var(--ax-variant)} .ax-variant .v{color:var(--ax-variant)}
-.wfcount{display:inline-block;min-width:1.2em;padding:0 5px;margin-right:5px;border-radius:2em;
-  font-size:11px;font-weight:700;text-align:center;background:var(--th-bg);border:1px solid var(--border)}
+.wfcount{color:var(--muted);font-size:11px;font-weight:700;margin-right:6px}
 .wf{display:inline-block;padding:0 6px;margin:1px 3px 1px 0;border-radius:5px;
   font-size:11px;
   background:var(--th-bg);border:1px solid var(--border);white-space:nowrap}
@@ -1846,7 +1845,7 @@ def _html_wf_list(names: list[str]) -> str:
     if not names:
         return '<span class="muted">\u2014</span>'
     pills = "".join(f'<span class=wf>{html.escape(n)}</span>' for n in names)
-    return f'<span class=wfcount>{len(names)}</span>{pills}'
+    return f'<span class=wfcount>{len(names)}\u00d7</span>{pills}'
 
 
 def _html_chip(label: str) -> str:
