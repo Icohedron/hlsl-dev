@@ -549,8 +549,8 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
         "**API axis** (all failures share one API, at least one workflow on a different "
         "API passes) *without* aligning on any GPU vendor. That points at the "
         "API/backend layer — e.g. the Vulkan SPIRV codegen path — rather than a "
-        "per-vendor driver. Common example: `Texture2D.Sample` fails on all Vulkan "
-        "drivers and passes on D3D12.",
+        "per-vendor driver. Typical shape: a test that fails on every Vulkan driver "
+        "but passes on D3D12.",
     "api_backend_suspected_crash":
         "Base label was `runtime_driver_error`, upgraded on the API-axis criterion (all "
         "failures share one API, at least one workflow on a different API passes, with no "
