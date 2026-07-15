@@ -992,14 +992,15 @@ def workflow_features(name: str, runner_name: str | None = None) -> set[str]:
       1. Name-token features — API / compiler / GPU / host, derivable from
          the display string alone.
       2. Runner-hardware features — CPU/GPU-model-derived (AVX512,
-         Intel-Gen-*, AppleM<N>). When `runner_name` is provided (parsed
-         from the workflow log's `Runner name:` line, which reveals the
-         *actual* physical machine the test job ran on), we key on that
-         hostname via `_RUNNER_FEATURES`. This is authoritative because it
-         reflects reality even when the test runner differs from the build
-         runner in SplitBuild workflows. When `runner_name` is None (e.g.
-         we haven't fetched the log yet), we fall back to a static guess
-         keyed on the workflow's (gpu, host) axes.
+         Intel-Gen-*, AppleM<N>), read from the runners.json table keyed on
+         the physical machine (HLSLPC-*). When `runner_name` is provided
+         (parsed from the workflow log's `Runner name:` line, the *actual*
+         machine the test job ran on) we key on it directly; this is
+         authoritative even when the test runner differs from the build runner
+         in SplitBuild workflows. When `runner_name` is None (e.g. we haven't
+         fetched the log yet) we resolve the workflow's (gpu, host) axes to the
+         machine that runs them via `_BUILDER_HOSTS`. Software renderers
+         (WARP / Lavapipe) get the host's CPU features but not its GPU ones.
     """
     ax = parse_workflow_axes(name)
     feats: set[str] = set()
@@ -1028,60 +1029,65 @@ def workflow_features(name: str, runner_name: str | None = None) -> set[str]:
     elif ax["host"] in ("x64", "ARM64"):
         feats.add("Windows")
         feats.add(ax["host"])  # x64 / ARM64 also appear as arch features
-    # Hardware features — from the actual test runner if we have it, else
-    # from a static (gpu, host) guess. The `_RUNNER_FEATURES` path is the
-    # source of truth; `_BUILDER_FEATURES` exists only for calls that don't
-    # have a log yet (e.g. divergence-attribution helpers that just want
-    # a rough feature set from the display name).
-    if runner_name and runner_name in _RUNNER_FEATURES:
-        feats |= _RUNNER_FEATURES[runner_name]
-    else:
-        feats |= _BUILDER_FEATURES.get((ax["gpu"], ax["host"]), set())
+    # Hardware features, keyed on the physical runner (HLSLPC-*). Prefer the
+    # actual test runner from the log; otherwise resolve the workflow's axes to
+    # the machine that runs them. WARP / Lavapipe are software renderers, so the
+    # host's own GPU features don't apply to them.
+    software_device = ax["gpu"] in ("Warp", "Lavapipe")
+    host = runner_name if runner_name in _RUNNER_CPU_FEATURES else \
+        _BUILDER_HOSTS.get((ax["gpu"], ax["host"]))
+    if host:
+        feats |= _host_hw_features(host, software_device)
     return feats
 
 
-# Actual test-runner hostnames -> CPU/GPU-derived lit features.
-# Sourced from `Runner name:` lines in workflow logs, cross-referenced with
-# offload-test-suite/docs/CI.md. This is the source of truth for XFAIL
-# evaluation; the (gpu, host) fallback below is used only when we don't
-# have a log yet.
-_RUNNER_FEATURES: dict[str, set[str]] = {
-    # AMD builder: Ryzen 7 9700X (Zen 5, has AVX-512), Radeon RX 9070
-    "HLSLPC-AMD01":    {"AVX512"},
-    # Intel builder: Threadripper 3970X (Zen 2, no AVX-512), Arc Pro B50
-    # (Xe HPG => Intel Gen11-14/Xe => Intel-Gen-Current)
-    "HLSLPC-INTEL01":  {"Intel-Gen-Current"},
-    # NVIDIA builder: i5-14400F (Raptor Lake refresh; consumer Intel disabled
-    # AVX-512 from 12th gen on), RTX 5070 — no extra features
-    "HLSLPC-NVIDIA01": set(),
-    # QC builder: Snapdragon X Plus (ARM), Adreno X1-85 — no extra features
-    "HLSLPC-QC01":     set(),
-    # macOS builder: Apple M4 Pro
-    "HLSLPC-APPLE01":  {"AppleM4"},
-}
+# Hardware-derived lit features live in an external, human-editable data file
+# (runners.json) so adding a runner or updating hardware needs no code change.
+# Features belong to physical machines (HLSLPC-*), never to GPU/API axes:
+#   _RUNNER_CPU_FEATURES[host]  - apply to every job on the machine (incl. WARP/
+#                                 Lavapipe software renderers).
+#   _RUNNER_GPU_FEATURES[host]  - apply only when the device under test is the
+#                                 machine's own GPU (excluded for software
+#                                 renderers).
+#   _BUILDER_HOSTS[(gpu, host)] - which machine a workflow's axes run on, used
+#                                 to pick the host when a log's runner name
+#                                 isn't available yet.
+_RUNNERS_FILE = pathlib.Path(__file__).with_name("runners.json")
 
 
-# Fallback (gpu, host) -> features table for calls that don't yet have a log.
-# Same information as `_RUNNER_FEATURES` but keyed on the workflow's
-# name-derived axes. This is a coincidence-based static mapping: today the
-# `Windows AMD *` workflows all test on HLSLPC-AMD01, so keying on gpu=AMD
-# reaches the same feature set. If a workflow ever tests on a different
-# machine than its GPU vendor suggests, `_RUNNER_FEATURES` (used by the
-# main classifier path) is still correct because it inspects the log.
-_BUILDER_FEATURES: dict[tuple[str, str], set[str]] = {
-    ("AMD",      "x64"):   {"AVX512"},
-    ("Intel",    "x64"):   {"Intel-Gen-Current"},
-    ("Warp",     "x64"):   set(),
-    ("NVIDIA",   "x64"):   set(),
-    # Lavapipe-x64 (llvmpipe software Vulkan) runs on the AMD builder
-    # (HLSLPC-AMD01, Ryzen 7 9700X) so it inherits that host's AVX512.
-    ("Lavapipe", "x64"):   {"AVX512"},
-    # QC (Snapdragon) is ARM64-only — there is no (QC, x64) configuration.
-    ("Warp",     "ARM64"): set(),
-    ("Lavapipe", "ARM64"): set(),
-    ("QC",       "ARM64"): set(),
-    ("Metal",    "macOS"): {"AppleM4"},
-}
+def _load_runner_table(path: pathlib.Path):
+    """Parse runners.json into (cpu_features, gpu_features, builder_hosts)."""
+    cpu: dict[str, set[str]] = {}
+    gpu: dict[str, set[str]] = {}
+    builder_hosts: dict[tuple[str, str], str] = {}
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        print(f"warning: could not load {path.name} ({e}); "
+              "hardware feature inference disabled", file=sys.stderr)
+        return cpu, gpu, builder_hosts
+    for host, spec in (data.get("runners") or {}).items():
+        cpu[host] = set(spec.get("cpu_features") or [])
+        gpu[host] = set(spec.get("gpu_features") or [])
+        for pair in spec.get("builds") or []:
+            if len(pair) == 2:
+                builder_hosts[(pair[0], pair[1])] = host
+    return cpu, gpu, builder_hosts
+
+
+_RUNNER_CPU_FEATURES, _RUNNER_GPU_FEATURES, _BUILDER_HOSTS = _load_runner_table(_RUNNERS_FILE)
+
+
+def _host_hw_features(host: str, software_device: bool) -> set[str]:
+    """
+    Hardware lit features for a job on `host`. CPU features always apply; the
+    machine's GPU features apply only when the device under test is that GPU
+    (i.e. not a WARP / Lavapipe software renderer).
+    """
+    feats = set(_RUNNER_CPU_FEATURES.get(host, set()))
+    if not software_device:
+        feats |= _RUNNER_GPU_FEATURES.get(host, set())
+    return feats
 
 
 # Runner-name parser. GitHub Actions prints `Runner name: 'HLSLPC-AMD01'`

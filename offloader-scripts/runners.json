@@ -1,0 +1,62 @@
+{
+  "_comment": [
+    "CI builder hardware -> lit feature table for offload-test-suite.",
+    "",
+    "This is the single source of truth for the hardware-derived lit features",
+    "(AVX512, Intel-Gen-Current, AppleM<N>, ...) that monitor_failures.py uses to",
+    "evaluate XFAIL clauses when classifying XPASSes. Keep it in sync with",
+    "offload-test-suite/docs/CI.md.",
+    "",
+    "TO ADD OR UPDATE A RUNNER: add/edit an entry under \"runners\", keyed by the",
+    "machine's `Runner name:` (as it appears in the workflow log). For each:",
+    "  cpu / gpu     - human description (documentation only, not parsed).",
+    "  cpu_features  - lit features from the CPU (e.g. AVX512). These apply to",
+    "                  every job on the machine, including software renderers",
+    "                  (WARP / Lavapipe).",
+    "  gpu_features  - lit features from the machine's own GPU (e.g.",
+    "                  Intel-Gen-Current, AppleM4). These apply ONLY when the",
+    "                  device under test is that physical GPU -- a WARP/Lavapipe",
+    "                  run on the same box does NOT get them.",
+    "  builds        - the [gpu, host] workflow-axis pairs that run on this",
+    "                  machine (gpu one of AMD/NVIDIA/Intel/QC/Warp/Lavapipe/Metal;",
+    "                  host one of x64/ARM64/macOS). Used to map a workflow to its",
+    "                  runner when the log's runner name isn't available yet."
+  ],
+  "runners": {
+    "HLSLPC-AMD01": {
+      "cpu": "AMD Ryzen 7 9700X (Zen 5, has AVX-512)",
+      "gpu": "AMD Radeon RX 9070",
+      "cpu_features": ["AVX512"],
+      "gpu_features": [],
+      "builds": [["AMD", "x64"], ["Lavapipe", "x64"]]
+    },
+    "HLSLPC-INTEL01": {
+      "cpu": "AMD Ryzen Threadripper 3970X (Zen 2, no AVX-512)",
+      "gpu": "Intel Arc Pro B50 (Xe HPG => Intel Gen11-14/Xe)",
+      "cpu_features": [],
+      "gpu_features": ["Intel-Gen-Current"],
+      "builds": [["Intel", "x64"], ["Warp", "x64"]]
+    },
+    "HLSLPC-NVIDIA01": {
+      "cpu": "Intel Core i5-14400F (Raptor Lake refresh; consumer AVX-512 fused off)",
+      "gpu": "NVIDIA GeForce RTX 5070",
+      "cpu_features": [],
+      "gpu_features": [],
+      "builds": [["NVIDIA", "x64"]]
+    },
+    "HLSLPC-QC01": {
+      "cpu": "Qualcomm Snapdragon X Plus X1P-64-100 (ARM64)",
+      "gpu": "Qualcomm Adreno X1-85",
+      "cpu_features": [],
+      "gpu_features": [],
+      "builds": [["QC", "ARM64"], ["Warp", "ARM64"], ["Lavapipe", "ARM64"]]
+    },
+    "HLSLPC-APPLE01": {
+      "cpu": "Apple M4 Pro",
+      "gpu": "Apple M4 Pro",
+      "cpu_features": [],
+      "gpu_features": ["AppleM4"],
+      "builds": [["Metal", "macOS"]]
+    }
+  }
+}

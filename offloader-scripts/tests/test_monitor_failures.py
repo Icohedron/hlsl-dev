@@ -678,8 +678,8 @@ class ExtractRunnerNames(unittest.TestCase):
 
 class WorkflowFeaturesFromRunner(unittest.TestCase):
     """
-    When a runner name is provided, hardware features come from _RUNNER_FEATURES
-    keyed on the hostname — not from the (gpu, host) guess. This matters for
+    When a runner name is provided, hardware features come from the runners.json
+    table keyed on the hostname — not from the (gpu, host) guess. This matters for
     SplitBuild workflows where the test job runs on a different machine than
     the workflow name suggests.
     """
@@ -692,7 +692,8 @@ class WorkflowFeaturesFromRunner(unittest.TestCase):
         self.assertNotIn("Intel-Gen-Current", f)
 
     def test_unknown_runner_falls_back_to_static_guess(self):
-        # If we somehow don't recognise the runner, fall back to _BUILDER_FEATURES.
+        # If we somehow don't recognise the runner, fall back to the (gpu, host)
+        # -> builder-host mapping (_BUILDER_HOSTS).
         f = mf.workflow_features("Windows D3D12 AMD DXC", runner_name="HLSLPC-NEW42")
         self.assertIn("AVX512", f)  # static (gpu=AMD, host=x64) still yields AVX512
 
@@ -702,6 +703,50 @@ class WorkflowFeaturesFromRunner(unittest.TestCase):
         # static guess (which would say AVX512).
         f = mf.workflow_features("Windows D3D12 AMD DXC", runner_name="HLSLPC-NVIDIA01")
         self.assertNotIn("AVX512", f)
+
+
+class RunnerTable(unittest.TestCase):
+    """
+    The hardware feature table is loaded from the human-editable runners.json,
+    keyed on physical machines (HLSLPC-*), and software renderers (WARP/Lavapipe)
+    inherit a host's CPU features but not its GPU features.
+    """
+    def test_runners_json_loads(self):
+        self.assertTrue(mf._RUNNER_CPU_FEATURES, "no runners loaded")
+        # Every runner appears in both cpu and gpu maps.
+        self.assertEqual(set(mf._RUNNER_CPU_FEATURES), set(mf._RUNNER_GPU_FEATURES))
+        self.assertIn("HLSLPC-AMD01", mf._RUNNER_CPU_FEATURES)
+
+    def test_builder_hosts_map_axes_to_machines(self):
+        self.assertEqual(mf._BUILDER_HOSTS[("AMD", "x64")], "HLSLPC-AMD01")
+        self.assertEqual(mf._BUILDER_HOSTS[("Warp", "x64")], "HLSLPC-INTEL01")
+        self.assertEqual(mf._BUILDER_HOSTS[("Warp", "ARM64")], "HLSLPC-QC01")
+        self.assertEqual(mf._BUILDER_HOSTS[("Metal", "macOS")], "HLSLPC-APPLE01")
+
+    def test_host_hw_features_cpu_always_gpu_conditional(self):
+        # Intel builder: CPU has no AVX512; GPU adds Intel-Gen-Current.
+        self.assertEqual(mf._host_hw_features("HLSLPC-INTEL01", software_device=False),
+                         {"Intel-Gen-Current"})
+        # A software renderer on the same box does NOT get the GPU feature.
+        self.assertEqual(mf._host_hw_features("HLSLPC-INTEL01", software_device=True),
+                         set())
+        # AMD builder CPU feature applies to software renderers too.
+        self.assertEqual(mf._host_hw_features("HLSLPC-AMD01", software_device=True),
+                         {"AVX512"})
+
+    def test_warp_does_not_inherit_host_gpu_feature(self):
+        # WARP x64 runs on the Intel builder but must NOT get Intel-Gen-Current
+        # (the device under test is WARP, not the Arc GPU). Regression guard for
+        # the old (gpu, host) -> features table that couldn't express this.
+        for rn in (None, "HLSLPC-INTEL01"):
+            with self.subTest(runner_name=rn):
+                feats = mf.workflow_features("Windows D3D12 Warp DXC", runner_name=rn)
+                self.assertNotIn("Intel-Gen-Current", feats)
+                self.assertNotIn("AVX512", feats)
+
+    def test_load_runner_table_tolerates_missing_file(self):
+        cpu, gpu, hosts = mf._load_runner_table(pathlib.Path("/no/such/runners.json"))
+        self.assertEqual((cpu, gpu, hosts), ({}, {}, {}))
 
 
 class MatchXpassWithRunner(unittest.TestCase):
