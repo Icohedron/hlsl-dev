@@ -472,7 +472,8 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
         "built. A compiler problem, not a GPU or runtime one.",
     "runtime_driver_error":
         "The shader compiled fine, but running it crashed the GPU or driver — an "
-        "access violation, a device-lost / TDR (driver reset), or a similar hard "
+        "access violation, a driver reset (the GPU hung and was restarted), a device "
+        "lost, or a similar hard "
         "failure reported by the `offloader` execution tool. The run did not finish "
         "cleanly.",
     "runtime_pipeline_error":
@@ -510,7 +511,7 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
         "inputs, data races, or too-tight tolerances can also differ across hardware. "
         "The `axes` column shows the pattern (e.g. only NVIDIA fails).",
     "runtime_driver_suspected_crash":
-        "A run-time crash (access violation / device-lost / TDR) that happens on only "
+        "A run-time crash (access violation / device lost / hung GPU restarted) that happens on only "
         "some GPUs or APIs while the same test passes on others — so it's specific to a "
         "subset of hardware. This does NOT prove a driver bug: a test that specifies "
         "its pipeline inputs/outputs badly (wrong bindings, buffer sizes, root "
