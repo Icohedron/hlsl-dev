@@ -471,9 +471,14 @@ def _slug(*parts: str) -> str:
 
 def triage_bisect(ctx: "Ctx", workflow: str, category: str | None, detail: str | None,
                   suite: str, test: str, classification: str | None,
-                  rng: "Range | None" = None) -> tuple[str, dict]:
+                  rng: "Range | None" = None,
+                  workflows: list[str] | None = None) -> tuple[str, dict]:
     repo = repo_for_failure(category, detail, classification)
     kind = classification or category or "failure"
+    # All workflows that hit this same failure. They build identical commits, so
+    # it is one regression — but the agent must see every one to reason about it.
+    affected = sorted(set(workflows or [workflow]))
+    wf_list = ", ".join(affected)
     if category == "build_failure":
         if rng is None:
             rng = ctx.history.bound_build(repo, workflow)
@@ -488,10 +493,10 @@ def triage_bisect(ctx: "Ctx", workflow: str, category: str | None, detail: str |
     meta: dict[str, Any] = {"strategy": "bisect", "repo": repo.slug if repo else None,
                             "good_sha": rng.good_sha, "bad_sha": rng.bad_sha,
                             "good_report": rng.good_ts, "bad_report": rng.bad_ts,
-                            "compare_url": rng.compare_url}
+                            "compare_url": rng.compare_url, "workflows": affected}
 
     md = [f"# Triage (bisect): {signature}", "",
-          f"- **Workflow:** {workflow}",
+          f"- **Failing workflows ({len(affected)}):** {wf_list}",
           f"- **Kind:** `{kind}`",
           f"- **Owning repo:** {repo.slug if repo else 'unknown'}", ""]
 
@@ -533,7 +538,7 @@ def triage_bisect(ctx: "Ctx", workflow: str, category: str | None, detail: str |
     # range; without a last-passing report there is no known-good commit to
     # bisect against, so skip it entirely rather than request a range-less bisect.
     if rng.good_sha:
-        bisect_prompt = _bisect_prompt(kind, workflow, signature, repo, rng, commits, block)
+        bisect_prompt = _bisect_prompt(kind, wf_list, signature, repo, rng, commits, block)
         md += _agent_section(ctx, bisect_prompt,
                              cwd=ctx.repo_root(repo) if repo and rng.bounded else None,
                              heading="Suspected first-faulting commit")
@@ -545,19 +550,19 @@ def triage_bisect(ctx: "Ctx", workflow: str, category: str | None, detail: str |
     meta["bisect_requested"] = bool(rng.good_sha)
 
     # Agent step 2 — always reproduce the failure and determine a root cause.
-    repro_prompt = _repro_prompt(kind, workflow, signature, category, detail, repo, rng, block)
+    repro_prompt = _repro_prompt(kind, wf_list, signature, category, detail, repo, rng, block)
     md += _agent_section(ctx, repro_prompt, cwd=WORKSPACE,
                          heading="Reproduction and root cause")
     return "\n".join(md), meta
 
 
-def _bisect_prompt(kind, workflow, signature, repo, rng: Range,
+def _bisect_prompt(kind, workflows, signature, repo, rng: Range,
                    commits, block) -> str:
     listing = "\n".join(f"{s} {t}" for s, t in commits[:80]) or "(range not resolvable locally)"
     return (
         "You are triaging a compiler regression by reading commit diffs. Do NOT "
         "build, run tests, or run the offload test suite.\n\n"
-        f"Failure: {signature}\nKind: {kind}\nWorkflow: {workflow}\n"
+        f"Failure: {signature}\nKind: {kind}\nFailing workflows: {workflows}\n"
         f"Repo: {repo.slug if repo else 'unknown'}\n"
         f"Last-good commit: {rng.good_sha}\nFirst-bad commit: {rng.bad_sha}\n\n"
         "Candidate commits in range (newest first, `git show <sha>` to inspect):\n"
@@ -571,7 +576,7 @@ def _bisect_prompt(kind, workflow, signature, repo, rng: Range,
     )
 
 
-def _repro_prompt(kind, workflow, signature, category, detail, repo,
+def _repro_prompt(kind, workflows, signature, category, detail, repo,
                   rng: Range, block) -> str:
     """Ask the agent to reproduce the failure locally and pin the root cause.
 
@@ -611,7 +616,7 @@ def _repro_prompt(kind, workflow, signature, category, detail, repo,
         f"You are triaging a {what} failure. Reproduce it locally and determine the ROOT "
         "CAUSE. You MAY build the compiler and re-run the failing compilation. Do NOT run "
         "the offload test suite or any GPU workload.\n\n"
-        f"Failure: {signature}\nKind: {kind}\nWorkflow: {workflow}\n"
+        f"Failure: {signature}\nKind: {kind}\nFailing workflows: {workflows}\n"
         f"Repo: {repo.slug if repo else 'unknown'}\n"
         f"Failing (bad) commit: {rng.bad_sha or 'unknown'}\n"
         f"Last-good commit: {rng.good_sha or '(none in available history)'}\n\n"
@@ -630,12 +635,20 @@ def _repro_prompt(kind, workflow, signature, category, detail, repo,
 
 
 def triage_evidence(ctx: "Ctx", workflow: str, suite: str, test: str,
-                    classification: str, div: dict | None) -> tuple[str, dict]:
+                    classification: str, div: dict | None,
+                    workflows: list[str] | None = None) -> tuple[str, dict]:
     is_api = classification.startswith("api_backend")
     layer = "API/backend" if is_api else "per-vendor driver"
-    fails_on = (div or {}).get("fails_on") or [workflow]
+    # The exact set of workflows that failed THIS way (this classification), so
+    # the pass/fail split the agent reasons over is precise. passes_on comes from
+    # the whole-test divergence; axes are recomputed over this failing set.
+    if workflows:
+        fails_on = sorted(set(workflows))
+        axes = mf.failure_axes(fails_on)
+    else:
+        fails_on = (div or {}).get("fails_on") or [workflow]
+        axes = (div or {}).get("axes") or {}
     passes_on = (div or {}).get("passes_on") or []
-    axes = (div or {}).get("axes") or {}
     block = full_failure_block(ctx.target, workflow, suite, test)
 
     meta = {"strategy": "evidence", "layer": layer,
@@ -674,10 +687,18 @@ def triage_evidence(ctx: "Ctx", workflow: str, suite: str, test: str,
 
 
 def triage_miscompile(ctx: "Ctx", workflow: str, suite: str, test: str,
-                      classification: str, div: dict | None) -> tuple[str, dict]:
-    fails_on = (div or {}).get("fails_on") or [workflow]
+                      classification: str, div: dict | None,
+                      workflows: list[str] | None = None) -> tuple[str, dict]:
+    # The exact set of workflows that miscompiled THIS way, so the agent sees
+    # every affected configuration (a miscompile can fail on all workflows, in
+    # which case there is no divergence entry to fall back on).
+    if workflows:
+        fails_on = sorted(set(workflows))
+        axes = mf.failure_axes(fails_on)
+    else:
+        fails_on = (div or {}).get("fails_on") or [workflow]
+        axes = (div or {}).get("axes") or {}
     passes_on = (div or {}).get("passes_on") or []
-    axes = (div or {}).get("axes") or {}
     block = full_failure_block(ctx.target, workflow, suite, test)
 
     meta: dict[str, Any] = {"strategy": "dxil", "fails_on": fails_on,
@@ -896,20 +917,23 @@ def triage_report(report_dir: pathlib.Path, args) -> dict:
         wf = u["workflow"]
         suite, test, cls = u["suite"], u["test"], u["cls"]
         div = ctx.divergences.get((suite, test))
+        affected = [wf] + u["shared"]   # every workflow that hit this failure
         for shared_wf in u["shared"]:
             print(f"  [dedup   ] {shared_wf} shares {u['label']} "
                   f"({u['strategy']})", file=sys.stderr)
         if u["kind"] == "build":
-            res = triage_bisect(ctx, wf, u["category"], u["detail"], "", "", None)
+            res = triage_bisect(ctx, wf, u["category"], u["detail"], "", "", None,
+                                workflows=affected)
             slug = _slug("build", wf)
         elif u["kind"] == "shader":
-            res = triage_bisect(ctx, wf, u["category"], u["detail"], suite, test, cls)
+            res = triage_bisect(ctx, wf, u["category"], u["detail"], suite, test, cls,
+                                workflows=affected)
             slug = _slug(wf, suite, test)
         elif u["kind"] == "miscompile":
-            res = triage_miscompile(ctx, wf, suite, test, cls, div)
+            res = triage_miscompile(ctx, wf, suite, test, cls, div, workflows=affected)
             slug = _slug(wf, suite, test)
         else:  # evidence
-            res = triage_evidence(ctx, wf, suite, test, cls, div)
+            res = triage_evidence(ctx, wf, suite, test, cls, div, workflows=affected)
             slug = _slug(wf, suite, test)
         _emit(ctx, items, u["strategy"], wf, res, slug, shared=u["shared"])
         deduped += len(u["shared"])

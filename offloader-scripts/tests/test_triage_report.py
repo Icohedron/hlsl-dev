@@ -312,5 +312,73 @@ class PlanTriageUnits(unittest.TestCase):
         self.assertEqual([u["kind"] for u in units], ["build", "shader"])
 
 
+# ---------------------------------------------------------------------------
+# Every affected workflow is visible to the agent (not just the representative)
+# ---------------------------------------------------------------------------
+
+class _FakeSnapNoLog:
+    """Snapshot stand-in whose logs are unavailable (block extraction -> None)."""
+    def _log(self, workflow):
+        return None
+
+
+class _FakeHistory:
+    """Returns an unbounded range so triage_bisect skips git entirely."""
+    def bound_build(self, repo, wf):
+        return tr.Range(repo, None, "badsha", None, "t1")
+
+    def bound_test(self, repo, wf, suite, test):
+        return tr.Range(repo, None, "badsha", None, "t1")
+
+
+def _offline_ctx(divergences=None):
+    tmp = pathlib.Path(tr.WORKSPACE)  # any real dir; find_test_file just misses
+    return tr.Ctx(
+        history=_FakeHistory(), target=_FakeSnapNoLog(), triage_dir=tmp,
+        otss_root=tmp, llvm_root=tmp, dxc_root=tmp, dxc_bin=None,
+        agent=tr.Agent(False, None, 1),   # disabled -> the prompt is emitted verbatim
+        allow_fetch=False, divergences=divergences or {},
+    )
+
+
+class WorkflowVisibility(unittest.TestCase):
+    def test_bisect_lists_all_workflows(self):
+        md, meta = tr.triage_bisect(
+            _offline_ctx(), "WF-A", "test_failure", None, "S", "t",
+            "shader_compile_clang", workflows=["WF-A", "WF-B", "WF-C"])
+        self.assertEqual(meta["workflows"], ["WF-A", "WF-B", "WF-C"])
+        # Header + the (agent-disabled) prompt both name every workflow.
+        for wf in ("WF-A", "WF-B", "WF-C"):
+            self.assertIn(wf, md)
+        self.assertIn("Failing workflows (3)", md)
+
+    def test_build_bisect_lists_all_workflows(self):
+        md, meta = tr.triage_bisect(
+            _offline_ctx(), "WF-A", "build_failure", "clang_llvm", "", "", None,
+            workflows=["WF-A", "WF-B"])
+        self.assertEqual(meta["workflows"], ["WF-A", "WF-B"])
+        self.assertIn("WF-B", md)
+
+    def test_evidence_uses_per_classification_failing_set(self):
+        div = {"passes_on": ["P1"], "fails_on": ["WF-A"], "axes": {}}
+        md, meta = tr.triage_evidence(
+            _offline_ctx(), "WF-A", "S", "t", "runtime_driver_suspected_crash",
+            div, workflows=["WF-A", "WF-B", "WF-C"])
+        # fails_on reflects ALL workflows for this classification, not just the div union.
+        self.assertEqual(meta["fails_on"], ["WF-A", "WF-B", "WF-C"])
+        for wf in ("WF-A", "WF-B", "WF-C"):
+            self.assertIn(wf, md)
+
+    def test_miscompile_lists_all_even_without_divergence(self):
+        # A miscompile that fails on every workflow has NO divergence entry; the
+        # agent must still see all affected workflows (regression: previously
+        # only the single representative was passed).
+        md, meta = tr.triage_miscompile(
+            _offline_ctx(), "WF-A", "S", "t", "runtime_miscompile", None,
+            workflows=["WF-A", "WF-B"])
+        self.assertEqual(meta["fails_on"], ["WF-A", "WF-B"])
+        self.assertIn("WF-B", md)
+
+
 if __name__ == "__main__":
     unittest.main()
