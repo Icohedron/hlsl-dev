@@ -799,6 +799,23 @@ def _axis_value(ax: dict, axis: str) -> str:
     return _host_axis_value(ax) if axis == "host" else ax[axis]
 
 
+def _shared_fail_value(fail_axes: list[dict], axis: str) -> str | None:
+    """The single value every failing workflow shares on `axis`, or None if they
+    differ (so the axis describes no common pattern).
+
+    'unknown' (unparseable) is always dropped; for the variant axis 'none' (no
+    variant applied) is dropped too, so an all-GBV failing set still reads as one
+    value. A bare 'none' result — e.g. the host axis on non-WARP workflows, where
+    the runner arch is n/a — is treated as no shared value.
+    """
+    drop = {"unknown", "none"} if axis == "variant" else {"unknown"}
+    values = {_axis_value(x, axis) for x in fail_axes} - drop
+    if len(values) != 1:
+        return None
+    val = next(iter(values))
+    return None if val == "none" else val
+
+
 def compact_workflow(name: str) -> str:
     """
     Short, unambiguous slug for a workflow display name, for dense table cells.
@@ -919,19 +936,12 @@ def failure_axes(fails_on: list[str]) -> dict:
     """
     if len(fails_on) < 2:
         return {}
-    fa = [parse_workflow_axes(w) for w in fails_on]
+    fail_axes = [parse_workflow_axes(w) for w in fails_on]
     out: dict[str, str] = {}
     for axis in ("api", "gpu", "compiler", "host", "variant"):
-        drop = {"unknown", "none"} if axis == "variant" else {"unknown"}
-        fvals = {_axis_value(x, axis) for x in fa} - drop
-        if len(fvals) != 1:
-            continue
-        val = next(iter(fvals))
-        if val == "none":
-            # host n/a (non-WARP): the failures don't share a host arch, so no
-            # host axis (a mixed WARP + non-WARP set is len!=1 and also skipped).
-            continue
-        out[f"{axis}_pattern"] = f"{val}-only"
+        val = _shared_fail_value(fail_axes, axis)
+        if val is not None:
+            out[f"{axis}_pattern"] = f"{val}-only"
     return out
 
 def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
@@ -976,30 +986,22 @@ def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
     """
     if len(fails_on) < 2:
         return {}
-    fa = [parse_workflow_axes(w) for w in fails_on]
-    pa = [parse_workflow_axes(w) for w in passes_on]
-    # 'unknown' means we couldn't parse the axis — never pattern-worthy on
-    # either side. 'none' means "no variant applied" — it's not a real value
-    # to build a pattern from (we don't want "none-only") but it IS a valid
-    # passing state that establishes the pattern (e.g. failers all have
-    # variant=GBV, passers all have variant=none -> GBV-only).
+    fail_axes = [parse_workflow_axes(w) for w in fails_on]
+    pass_axes = [parse_workflow_axes(w) for w in passes_on]
     out: dict[str, str] = {}
     for axis in ("api", "gpu", "compiler", "host", "variant"):
-        # host is a divergence axis only for WARP (see _host_axis_value); for
-        # variant 'none' is a real base state kept in the passers so it can
-        # establish a pattern (failers all GBV, passers none -> GBV-only).
-        drop_from_fails = {"unknown", "none"} if axis == "variant" else {"unknown"}
-        fvals = {_axis_value(x, axis) for x in fa} - drop_from_fails
-        pvals = {_axis_value(x, axis) for x in pa} - {"unknown"}
-        if len(fvals) != 1 or not (pvals - fvals):
+        val = _shared_fail_value(fail_axes, axis)
+        if val is None:
             continue
-        val = next(iter(fvals))
-        if val == "none":
+        # Blame needs contrast: at least one passing workflow on a *different*
+        # value of this axis (so the axis actually separates fail from pass).
+        pvals = {_axis_value(x, axis) for x in pass_axes} - {"unknown"}
+        if not (pvals - {val}):
             continue
-        # Compiler-only: require a clean partition — the failing compiler must
-        # not also appear among the passers (see docstring). Any passing
-        # workflow of that compiler means the compiler isn't the differentiator.
-        if axis == "compiler" and (fvals & pvals):
+        # Compiler is held to a clean partition: if any workflow using the failing
+        # compiler also passes, the compiler isn't the differentiator (a
+        # driver/backend fault would let the same compiler pass elsewhere).
+        if axis == "compiler" and val in pvals:
             continue
         out[f"{axis}_pattern"] = f"{val}-only"
 
@@ -1015,9 +1017,9 @@ def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
     # This is strictly stronger than the gpu/api contrasts above, so it only ever
     # sharpens the blame, never loosens it.
     if "gpu_pattern" in out and "api_pattern" in out:
-        g, a = fa[0]["gpu"], fa[0]["api"]  # all fails share these (patterns fired)
-        same_gpu_other_api = any(p["gpu"] == g and p["api"] != a for p in pa)
-        same_api_other_gpu = any(p["api"] == a and p["gpu"] != g for p in pa)
+        g, a = fail_axes[0]["gpu"], fail_axes[0]["api"]  # all fails share these
+        same_gpu_other_api = any(p["gpu"] == g and p["api"] != a for p in pass_axes)
+        same_api_other_gpu = any(p["api"] == a and p["gpu"] != g for p in pass_axes)
         if same_gpu_other_api and same_api_other_gpu:
             out["gpu_api_pattern"] = f"{g}+{a}-only"
     return out
