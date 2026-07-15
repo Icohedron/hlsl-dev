@@ -12,6 +12,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import urllib.error
 import unittest
 import unittest.mock
 
@@ -1230,6 +1231,68 @@ class ReadTestFileForRun(unittest.TestCase):
             text, rel, src = mf.read_test_file_for_run(FIX, "OffloadTest-vk", "nope.test", "abc")
         self.assertIsNone(text)
         self.assertIsNone(rel)
+
+    def test_uses_github_api_when_commit_not_local(self):
+        # The run's commit isn't in the local clone (rebased/squashed on merge,
+        # or a stale/shallow checkout). The contents API resolves it, so we get
+        # the exact-revision content with the sha as source — no git fetch, no
+        # 'worktree' fallback (which would flag the clauses as possibly stale).
+        api_gh = unittest.mock.Mock()
+        api_gh.get_file_at_ref.return_value = "API CONTENT"
+        with unittest.mock.patch.object(mf, "find_test_file",
+                                        return_value=pathlib.Path(FIX) / "lit_status_lines.txt"), \
+             unittest.mock.patch.object(mf, "_git_resolves", return_value=False), \
+             unittest.mock.patch.object(mf, "_GIT_FETCH_MODE", "unshallow"), \
+             unittest.mock.patch.object(mf, "git_commit_available",
+                                        side_effect=AssertionError("must not fetch git")):
+            text, rel, src = mf.read_test_file_for_run(
+                FIX, "OffloadTest-vk", "lit_status_lines.txt", "b69c970611", gh=api_gh)
+        self.assertEqual(text, "API CONTENT")
+        self.assertEqual(src, "b69c970611"[:9])
+        api_gh.get_file_at_ref.assert_called_once()
+
+    def test_api_skipped_when_fetch_disabled(self):
+        # --no-git-fetch means fully offline: don't hit the API either.
+        api_gh = unittest.mock.Mock()
+        api_gh.get_file_at_ref.return_value = "API CONTENT"
+        with unittest.mock.patch.object(mf, "find_test_file",
+                                        return_value=pathlib.Path(FIX) / "lit_status_lines.txt"), \
+             unittest.mock.patch.object(mf, "_git_resolves", return_value=False), \
+             unittest.mock.patch.object(mf, "_GIT_FETCH_MODE", "off"), \
+             unittest.mock.patch.object(mf, "git_commit_available", return_value=False):
+            text, rel, src = mf.read_test_file_for_run(
+                FIX, "OffloadTest-vk", "lit_status_lines.txt", "abc1234567", gh=api_gh)
+        api_gh.get_file_at_ref.assert_not_called()
+        self.assertEqual(src, "worktree")
+
+
+class GhContentsApi(unittest.TestCase):
+    def _gh_returning(self, payload_bytes):
+        gh = mf.GH("tok")
+        cm = unittest.mock.MagicMock()
+        cm.__enter__.return_value.read.return_value = payload_bytes
+        return gh, cm
+
+    def test_decodes_base64_content(self):
+        import base64
+        body = json.dumps({"encoding": "base64",
+                           "content": base64.b64encode(b"hello shader").decode()}).encode()
+        gh, cm = self._gh_returning(body)
+        with unittest.mock.patch("urllib.request.urlopen", return_value=cm):
+            out = gh.get_file_at_ref("llvm/offload-test-suite", "test/a b/c.test", "b69c9706")
+        self.assertEqual(out, "hello shader")
+
+    def test_non_base64_payload_returns_none(self):
+        # e.g. a directory listing (a JSON array) or a too-large file.
+        gh, cm = self._gh_returning(b"[]")
+        with unittest.mock.patch("urllib.request.urlopen", return_value=cm):
+            self.assertIsNone(gh.get_file_at_ref("r", "p", "ref"))
+
+    def test_http_error_returns_none(self):
+        gh = mf.GH("tok")
+        err = urllib.error.HTTPError("u", 404, "nf", None, None)
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=err):
+            self.assertIsNone(gh.get_file_at_ref("r", "p", "deadbeef"))
 
 
 class GitFetchMode(unittest.TestCase):

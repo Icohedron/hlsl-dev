@@ -30,6 +30,7 @@ Auth: reads a token from $GH_TOKEN or $GITHUB_TOKEN.
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import datetime as dt
 import gzip
@@ -101,6 +102,28 @@ class GH:
         req = self._req(url)
         with urllib.request.urlopen(req) as r:
             return r.read()
+
+    def get_file_at_ref(self, repo: str, gitpath: str, ref: str) -> str | None:
+        """Text of `gitpath` in `repo` at `ref` (branch / tag / commit sha, full
+        or abbreviated) via the contents API, or None if it can't be fetched.
+
+        Unlike `git fetch`, this resolves ANY commit the server still has —
+        including a run's commit that was later rebased/squashed on merge and so
+        is no longer reachable from a branch (which `git fetch <sha>` rejects).
+        """
+        path = urllib.parse.quote(gitpath)
+        url = f"{API}/repos/{repo}/contents/{path}?ref={urllib.parse.quote(ref)}"
+        try:
+            with urllib.request.urlopen(self._req(url)) as r:
+                data = json.loads(r.read())
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+        if not isinstance(data, dict) or data.get("encoding") != "base64":
+            return None  # a directory, too-large file (>1MB), or unexpected shape
+        try:
+            return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+        except (KeyError, ValueError):
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -1594,23 +1617,47 @@ def git_show_file(repo_root: pathlib.Path, commit: str, gitpath: str) -> str | N
 
 
 def read_test_file_for_run(
-    otss_root: pathlib.Path, suite: str, relpath: str, commit: str | None
+    otss_root: pathlib.Path, suite: str, relpath: str, commit: str | None,
+    gh: GH | None = None, repo: str = REPO,
 ) -> tuple[str | None, str | None, str | None]:
     """
     Return (text, rel_path, source) for a test file, preferring its content at the
     CI run's offload-test-suite `commit` so XFAIL clauses match what actually ran.
-    `source` is the short commit sha when the git blob was used, or 'worktree'
-    when we fell back to the checked-out file (its clauses may be newer/older than
-    the run). Locates the on-disk path first to derive the repo-relative git path.
+    `source` is the short commit sha when the exact-revision content was used, or
+    'worktree' when we fell back to the checked-out file (its clauses may be
+    newer/older than the run). Locates the on-disk path first to derive the
+    repo-relative git path.
+
+    Retrieval order for the pinned commit:
+      1. local git blob, if the commit is already present (no network);
+      2. the GitHub contents API at that commit — resolves ANY commit the server
+         still has, including run commits later rebased/squashed on merge that a
+         `git fetch <sha>` can't pull (this is the usual reason the old
+         git-only path fell back to the working tree);
+      3. a deep git fetch/unshallow as a last resort (e.g. no token / offline);
+      4. the working tree.
     """
     p = find_test_file(otss_root, suite, relpath)
     if p is None:
         return None, None, None
     rel = p.relative_to(otss_root)
-    if commit and git_commit_available(otss_root, commit):
-        text = git_show_file(otss_root, commit, rel.as_posix())
-        if text is not None:
-            return text, str(rel), commit[:9]
+    gitpath = rel.as_posix()
+    if commit:
+        # 1) already in local history — cheap, no fetch.
+        if _git_resolves(otss_root, commit):
+            text = git_show_file(otss_root, commit, gitpath)
+            if text is not None:
+                return text, str(rel), commit[:9]
+        # 2) GitHub API at the exact commit (skip when fetching is disabled).
+        if gh is not None and _GIT_FETCH_MODE != "off":
+            text = gh.get_file_at_ref(repo, gitpath, commit)
+            if text is not None:
+                return text, str(rel), commit[:9]
+        # 3) last resort: deep-fetch/unshallow local git, then read the blob.
+        if git_commit_available(otss_root, commit):
+            text = git_show_file(otss_root, commit, gitpath)
+            if text is not None:
+                return text, str(rel), commit[:9]
     try:
         return p.read_text(errors="replace"), str(rel), "worktree"
     except OSError:
@@ -1719,7 +1766,7 @@ def classify_run(log_text: str, gh: GH, otss_root: pathlib.Path, issue_cache: di
         entry = {"result": b["result"], "suite": b["suite"], "test": b["test"]}
         if b["result"] == "XPASS":
             text, test_rel, src = read_test_file_for_run(
-                otss_root, b["suite"], b["test"], otss_commit
+                otss_root, b["suite"], b["test"], otss_commit, gh=gh
             )
             if not text:
                 entry["classification"] = "xpass"
@@ -2222,19 +2269,23 @@ def main() -> None:
     ap.add_argument("--no-pass-matrix", action="store_true",
                     help="don't download logs for successful runs (skips cross-GPU divergence analysis)")
     ap.add_argument("--no-unshallow", action="store_true",
-                    help="don't unshallow to obtain a run's offload-test-suite commit; only try a "
-                         "targeted by-sha fetch. Note: logs record abbreviated SHAs, which a shallow "
-                         "clone usually can't resolve, so XFAIL matching may fall back to the working "
-                         "tree (possibly-stale clauses)")
+                    help="skip the git deep-fetch/unshallow fallback when resolving a run's "
+                         "offload-test-suite commit. The GitHub contents API is tried first "
+                         "and resolves virtually all commits, so this rarely changes anything; "
+                         "without it, a commit missing locally and unreadable via the API falls "
+                         "back to the working tree (possibly-stale clauses)")
     ap.add_argument("--no-git-fetch", action="store_true",
-                    help="never fetch commits; read XFAIL test files from the working tree as-is")
+                    help="fully offline: don't fetch commits AND don't query the GitHub "
+                         "contents API; read XFAIL test files from the working tree as-is")
     args = ap.parse_args()
 
-    # Default: unshallow when needed. Run logs only carry abbreviated commit
-    # SHAs (`HEAD is now at <short>`), which git can't fetch by ref on a shallow
-    # clone; fetching full history is the only reliable way to resolve them, so
-    # XFAIL clauses are read from the exact tested revision. It's a one-time cost
-    # per repo (subsequent commits resolve locally).
+    # Default: resolve a run's exact offload-test-suite revision so XFAIL clauses
+    # match what actually ran. Retrieval prefers the GitHub contents API at the
+    # commit (works even for run commits later rebased/squashed on merge, which a
+    # `git fetch <sha>` can't pull); local git is used when the commit is already
+    # present, and a one-time unshallow is the last resort. Run logs carry only
+    # abbreviated SHAs, which git can't fetch by ref on a shallow clone — the API
+    # sidesteps that entirely.
     set_git_fetch_mode("off" if args.no_git_fetch else "targeted" if args.no_unshallow else "unshallow")
 
     otss_root = pathlib.Path(args.otss_root).resolve()

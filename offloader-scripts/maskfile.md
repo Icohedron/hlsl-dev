@@ -21,11 +21,14 @@ Requires a GitHub token exported as `$GH_TOKEN` or `$GITHUB_TOKEN`. Only
 public-repo read scope is needed.
 
 To read each XFAIL test file at the exact revision a run tested, the monitor
-fetches the `offload-test-suite` commit the run built. Run logs record only
-abbreviated SHAs, which a shallow clone can't fetch by ref, so by default the
-monitor unshallows `offload-test-suite` on first need (a one-time full fetch;
-later runs resolve locally). Pass `--no-unshallow` to only attempt a targeted
-fetch, or `--no-git-fetch` to read the working tree as-is.
+retrieves the `offload-test-suite` commit the run built. It first uses the
+GitHub **contents API** at that commit — which resolves any commit the server
+still has, including run commits later rebased/squashed on merge that a local
+`git fetch <sha>` can't pull. Local git is used first when the commit is already
+present (no network), and a `git` deep-fetch/unshallow is a last resort (e.g.
+offline / no token). Pass `--no-unshallow` to skip the unshallow fallback, or
+`--no-git-fetch` to stay fully offline (no API, no fetch) and read the working
+tree as-is.
 
 **OPTIONS**
 * mode: Optional. One of:
