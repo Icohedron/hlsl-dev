@@ -1306,6 +1306,21 @@ def find_test_file(repo_root: pathlib.Path, suite: str, relpath: str) -> pathlib
 
 # (repo_root, commit) -> bool: is the commit object present locally?
 _GIT_COMMIT_AVAILABLE: dict[tuple[str, str], bool] = {}
+# Repos we've already deep-fetched / unshallowed this run (do it at most once).
+_GIT_DEEPENED: set[str] = set()
+
+# How hard read_test_file_for_run may work to obtain a run's commit:
+#   "targeted"  - best-effort `git fetch --depth 1 origin <sha>` (default)
+#   "unshallow" - also unshallow / full-fetch the repo when the sha is still
+#                 missing, so the exact tested revision is always available
+#   "off"       - never fetch; read whatever the working tree has
+_GIT_FETCH_MODE = "targeted"
+
+
+def set_git_fetch_mode(mode: str) -> None:
+    """Set the module-wide fetch policy ('off' | 'targeted' | 'unshallow')."""
+    global _GIT_FETCH_MODE
+    _GIT_FETCH_MODE = mode
 
 
 def _git(repo_root: pathlib.Path, *args: str, timeout: int = 60):
@@ -1319,24 +1334,64 @@ def _git(repo_root: pathlib.Path, *args: str, timeout: int = 60):
         return None
 
 
+def _git_resolves(repo_root: pathlib.Path, commit: str) -> bool:
+    r = _git(repo_root, "cat-file", "-e", f"{commit}^{{commit}}")
+    return r is not None and r.returncode == 0
+
+
+def _git_is_shallow(repo_root: pathlib.Path) -> bool:
+    r = _git(repo_root, "rev-parse", "--is-shallow-repository")
+    return r is not None and r.returncode == 0 and r.stdout.decode().strip() == "true"
+
+
+def _git_deepen(repo_root: pathlib.Path) -> None:
+    """
+    Fetch full history once per repo: `--unshallow` for a shallow clone, else a
+    plain fetch to pull commits not yet present. Cached so it runs at most once.
+    """
+    key = str(repo_root)
+    if key in _GIT_DEEPENED:
+        return
+    _GIT_DEEPENED.add(key)
+    if _git_is_shallow(repo_root):
+        print(f"  unshallowing {repo_root.name} to obtain tested commits\u2026", file=sys.stderr)
+        _git(repo_root, "fetch", "--quiet", "--unshallow", "--tags", timeout=900)
+    else:
+        print(f"  fetching {repo_root.name} history\u2026", file=sys.stderr)
+        _git(repo_root, "fetch", "--quiet", "--tags", timeout=900)
+
+
 def git_commit_available(repo_root: pathlib.Path, commit: str) -> bool:
     """
-    True if `commit` is a resolvable commit object in repo_root. If it's missing
-    (shallow clone), make one best-effort attempt to fetch just that commit
-    (works against servers that allow fetch-by-sha; harmless otherwise). Cached.
+    True if `commit` is a resolvable commit object in repo_root. When it's
+    missing, the fetch policy (set_git_fetch_mode) decides how hard to try:
+    a targeted by-sha fetch, and — in 'unshallow' mode — a full unshallow/fetch
+    of the repo. Results are cached per (repo, commit).
     """
     key = (str(repo_root), commit)
     if key in _GIT_COMMIT_AVAILABLE:
         return _GIT_COMMIT_AVAILABLE[key]
-    r = _git(repo_root, "cat-file", "-e", f"{commit}^{{commit}}")
-    ok = r is not None and r.returncode == 0
-    if not ok:
-        fr = _git(repo_root, "fetch", "--quiet", "--depth", "1", "origin", commit, timeout=120)
-        if fr is not None and fr.returncode == 0:
-            r2 = _git(repo_root, "cat-file", "-e", f"{commit}^{{commit}}")
-            ok = r2 is not None and r2.returncode == 0
-    _GIT_COMMIT_AVAILABLE[key] = ok
-    return ok
+
+    def _finish(ok: bool) -> bool:
+        _GIT_COMMIT_AVAILABLE[key] = ok
+        return ok
+
+    if _git_resolves(repo_root, commit):
+        return _finish(True)
+    if _GIT_FETCH_MODE == "off":
+        return _finish(False)
+
+    # Targeted by-sha fetch (works where the server allows it; cheap).
+    _git(repo_root, "fetch", "--quiet", "--depth", "1", "origin", commit, timeout=120)
+    if _git_resolves(repo_root, commit):
+        return _finish(True)
+
+    # Last resort: pull full history, then re-check.
+    if _GIT_FETCH_MODE == "unshallow":
+        _git_deepen(repo_root)
+        if _git_resolves(repo_root, commit):
+            return _finish(True)
+    return _finish(False)
 
 
 def git_show_file(repo_root: pathlib.Path, commit: str, gitpath: str) -> str | None:
@@ -1919,7 +1974,15 @@ def main() -> None:
     ap.add_argument("--skip-logs", action="store_true", help="don't download logs, only list run statuses")
     ap.add_argument("--no-pass-matrix", action="store_true",
                     help="don't download logs for successful runs (skips cross-GPU divergence analysis)")
+    ap.add_argument("--unshallow", action="store_true",
+                    help="if a run's offload-test-suite commit isn't present locally, unshallow / "
+                         "full-fetch the repo to obtain it, so XFAIL clauses match the tested "
+                         "revision exactly (slower first run)")
+    ap.add_argument("--no-git-fetch", action="store_true",
+                    help="never fetch commits; read XFAIL test files from the working tree as-is")
     args = ap.parse_args()
+
+    set_git_fetch_mode("off" if args.no_git_fetch else "unshallow" if args.unshallow else "targeted")
 
     otss_root = pathlib.Path(args.otss_root).resolve()
     if not otss_root.exists():

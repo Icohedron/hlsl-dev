@@ -1034,6 +1034,70 @@ class ReadTestFileForRun(unittest.TestCase):
         self.assertIsNone(rel)
 
 
+class GitFetchMode(unittest.TestCase):
+    def setUp(self):
+        mf._GIT_COMMIT_AVAILABLE.clear()
+        mf._GIT_DEEPENED.clear()
+        self._mode = mf._GIT_FETCH_MODE
+
+    def tearDown(self):
+        mf.set_git_fetch_mode(self._mode)
+        mf._GIT_COMMIT_AVAILABLE.clear()
+        mf._GIT_DEEPENED.clear()
+
+    def test_off_mode_never_fetches(self):
+        mf.set_git_fetch_mode("off")
+        with unittest.mock.patch.object(mf, "_git_resolves", return_value=False), \
+             unittest.mock.patch.object(mf, "_git") as g, \
+             unittest.mock.patch.object(mf, "_git_deepen") as deep:
+            self.assertFalse(mf.git_commit_available(pathlib.Path("/x"), "sha1"))
+        g.assert_not_called()
+        deep.assert_not_called()
+
+    def test_targeted_fetch_recovers_commit(self):
+        mf.set_git_fetch_mode("targeted")
+        with unittest.mock.patch.object(mf, "_git_resolves", side_effect=[False, True]), \
+             unittest.mock.patch.object(mf, "_git") as g, \
+             unittest.mock.patch.object(mf, "_git_deepen") as deep:
+            self.assertTrue(mf.git_commit_available(pathlib.Path("/x"), "sha2"))
+        g.assert_called_once()          # one targeted fetch
+        deep.assert_not_called()         # never unshallowed in targeted mode
+
+    def test_targeted_does_not_unshallow(self):
+        mf.set_git_fetch_mode("targeted")
+        with unittest.mock.patch.object(mf, "_git_resolves", return_value=False), \
+             unittest.mock.patch.object(mf, "_git"), \
+             unittest.mock.patch.object(mf, "_git_deepen") as deep:
+            self.assertFalse(mf.git_commit_available(pathlib.Path("/x"), "sha3"))
+        deep.assert_not_called()
+
+    def test_unshallow_used_as_last_resort(self):
+        mf.set_git_fetch_mode("unshallow")
+        # resolves: initial False, after targeted False, after deepen True
+        with unittest.mock.patch.object(mf, "_git_resolves", side_effect=[False, False, True]), \
+             unittest.mock.patch.object(mf, "_git"), \
+             unittest.mock.patch.object(mf, "_git_deepen") as deep:
+            self.assertTrue(mf.git_commit_available(pathlib.Path("/x"), "sha4"))
+        deep.assert_called_once()
+
+    def test_result_is_cached(self):
+        mf.set_git_fetch_mode("targeted")
+        with unittest.mock.patch.object(mf, "_git_resolves", return_value=True) as res:
+            self.assertTrue(mf.git_commit_available(pathlib.Path("/x"), "sha5"))
+            self.assertTrue(mf.git_commit_available(pathlib.Path("/x"), "sha5"))
+        self.assertEqual(res.call_count, 1)  # second call served from cache
+
+    def test_deepen_unshallows_only_shallow_repos(self):
+        # _git_deepen picks --unshallow for a shallow repo, plain fetch otherwise,
+        # and runs at most once per repo.
+        with unittest.mock.patch.object(mf, "_git_is_shallow", return_value=True), \
+             unittest.mock.patch.object(mf, "_git") as g:
+            mf._git_deepen(pathlib.Path("/x"))
+            mf._git_deepen(pathlib.Path("/x"))  # cached: no second fetch
+        self.assertEqual(g.call_count, 1)
+        self.assertIn("--unshallow", g.call_args[0])
+
+
 class HtmlReport(unittest.TestCase):
     def _report(self):
         from collections import Counter
