@@ -1936,12 +1936,13 @@ def _html_issue_badges(t: dict) -> str:
 
 
 def _html_note(t: dict) -> str:
-    bits = []
+    # Only the XFAIL/diagnostic note here. The cross-workflow "passes on" list is
+    # intentionally omitted from the per-workflow failure table (it's low-signal
+    # and wide); the Cross-workflow divergences section carries it where it's the
+    # actual point.
     if t.get("note"):
-        bits.append(html.escape(t["note"]))
-    if t.get("passes_on"):
-        bits.append('<span class="muted">passes on</span> ' + _html_wf_list(t["passes_on"]))
-    return "<br>".join(bits) or '<span class="muted">\u2014</span>'
+        return html.escape(t["note"])
+    return '<span class="muted">\u2014</span>'
 
 
 def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict],
@@ -2362,8 +2363,8 @@ def main() -> None:
                 # Escape pipes so an XFAIL expr like `AMD || NVIDIA` in the note
                 # can't break the markdown table cell.
                 ncell.append(t["note"].replace("|", "\\|"))
-            if t.get("passes_on"):
-                ncell.append(f"passes on {_md_wf_list(t['passes_on'])}")
+            # "passes on" is intentionally omitted here (low-signal, wide); the
+            # Cross-workflow divergences section carries it where it matters.
             notes = "<br>".join(ncell) or "—"
             md.append(f"| {t['result']} | `{t['test']}` | "
                       f"{t.get('classification','')} | {issues} | {notes} |")
