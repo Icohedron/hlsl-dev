@@ -203,15 +203,17 @@ def sorted_report_names(site_reports: pathlib.Path) -> list[str]:
 
 
 def write_latest_redirect(site_dir: pathlib.Path, reports: list[str]) -> None:
-    """Write a permanent `latest/` page redirecting to the newest report.
+    """Write a permanent `latest/` page that shows the newest report.
 
-    `<site>/latest/` is a stable URL that always forwards to the freshest
-    `summary.html`. It's a plain `<meta refresh>` (no JavaScript): the newest
-    timestamp is baked in at build time, which is fine because a new report
-    only appears on the site when this script re-runs anyway. When no reports
-    are retained the page shows a short placeholder instead.
+    `<site>/latest/` is a stable URL that always presents the freshest
+    `summary.html`. It embeds the report in a full-page `<iframe>` rather than
+    redirecting to it, so the address bar stays at `/latest/`: a bookmark of
+    this URL keeps working, and a refresh reloads `/latest/` (picking up a
+    newer report after the site is rebuilt) instead of pinning to whichever
+    report happened to be newest the first time it was visited. No JavaScript.
 
-    `reports` must be newest-first.
+    `reports` must be newest-first. With no reports retained the page shows a
+    short placeholder instead.
     """
     latest_dir = site_dir / "latest"
     latest_dir.mkdir(parents=True, exist_ok=True)
@@ -220,11 +222,15 @@ def write_latest_redirect(site_dir: pathlib.Path, reports: list[str]) -> None:
         target = html.escape(f"../reports/{newest}/summary.html")
         page = (
             "<!doctype html><html lang=en><head><meta charset=utf-8>"
-            f'<meta http-equiv=refresh content="0; url={target}">'
-            f'<link rel=canonical href="{target}">'
+            '<meta name=viewport content="width=device-width,initial-scale=1">'
             "<title>latest offload-test-suite report</title>"
-            f'</head><body><p>Redirecting to the <a href="{target}">latest '
-            "report</a>&hellip;</p></body></html>"
+            "<style>html,body{height:100%;margin:0}"
+            "iframe{border:0;width:100%;height:100%;display:block}</style>"
+            "</head><body>"
+            f'<iframe src="{target}" title="latest offload-test-suite report">'
+            f'Your browser cannot display frames; open the <a href="{target}">'
+            "latest report</a> directly.</iframe>"
+            "</body></html>"
         )
     else:
         page = (
