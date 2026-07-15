@@ -1,0 +1,135 @@
+# Hourly monitor of the llvm/offload-test-suite scheduled workflows that
+# regenerates the HTML reports and publishes them to GitHub Pages.
+#
+# The site accumulates one report per run under `reports/<UTC-timestamp>/`,
+# fronted by an auto-generated landing page (index.html). Reports older than
+# 30 days are pruned. The accumulated site is carried between runs via
+# actions/cache and deployed with the official GitHub Pages pipeline.
+#
+# Persistence note: the cache is keyed uniquely per run (a cache entry is
+# immutable and its save is skipped on an exact-key hit), with a `restore-keys`
+# prefix that pulls the newest previous snapshot. The cache is best-effort
+# storage — entries unused for 7 days are evicted, so a long pause resets the
+# accumulated history (it re-accumulates from the next run onward).
+#
+# ONE-TIME SETUP (repo Settings):
+#   * Settings > Pages > "Build and deployment" > Source: "GitHub Actions".
+#   * (Recommended) Settings > Secrets and variables > Actions: add a secret
+#     `OFFLOAD_MONITOR_TOKEN` — a token with public-repo read scope (classic
+#     `public_repo`, or a fine-grained token with Actions: read on public repos).
+#     The monitor downloads workflow-run logs from llvm/offload-test-suite; the
+#     ambient GITHUB_TOKEN is scoped to THIS repo and generally cannot read
+#     another repo's logs. Without the secret the job falls back to GITHUB_TOKEN.
+
+name: offload-report-pages
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # every hour, on the hour (UTC)
+  workflow_dispatch: {}    # allow manual runs
+
+# The official Pages deployment needs pages:write + id-token:write. No branch
+# push, so contents stays read-only.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two hourly runs publish at once; overlapping runs would restore the
+# same cached site and save divergent snapshots (a lost update). Let an in-flight
+# run finish.
+concurrency:
+  group: offload-report-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout tooling
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Full clone (small repo) so the monitor can resolve the exact
+      # offload-test-suite commit each run tested from local history, without a
+      # network unshallow. Placed at the repo root where the monitor expects it
+      # (../offload-test-suite relative to offloader-scripts/).
+      - name: Clone offload-test-suite
+        run: git clone --quiet https://github.com/llvm/offload-test-suite.git offload-test-suite
+
+      - name: Generate report
+        working-directory: offloader-scripts
+        env:
+          # Prefer a public-repo-read PAT so cross-repo log downloads succeed.
+          GH_TOKEN: ${{ secrets.OFFLOAD_MONITOR_TOKEN || github.token }}
+        # Don't fail the whole job on a transient monitor error — we still want
+        # to republish the existing (carried-forward) reports and landing page.
+        continue-on-error: true
+        run: python3 monitor_failures.py
+
+      # Restore the accumulated site from the newest previous cache entry. The
+      # run-scoped `key` is intentionally always a miss (forcing a fresh save
+      # below); `restore-keys` prefix-matches and returns the most recent
+      # offload-site-* snapshot.
+      - name: Restore accumulated site
+        uses: actions/cache/restore@v4
+        with:
+          path: _site
+          key: offload-site-${{ github.run_id }}
+          restore-keys: |
+            offload-site-
+
+      # Build into the offload-test-report/ subdir so the site serves at
+      # <pages-root>/offload-test-report/. index.html uses relative links, so the
+      # subpath needs no code change. The cache preserves this whole subtree.
+      - name: Build site (add new report, prune >30d, rebuild landing page)
+        run: |
+          python3 offloader-scripts/build_site.py \
+            --reports-dir offloader-scripts/reports \
+            --site-dir _site/offload-test-report \
+            --max-age-days 30
+
+      # Save the rebuilt site under the unique per-run key so the next run's
+      # restore-keys prefix picks it up.
+      - name: Save accumulated site
+        uses: actions/cache/save@v4
+        with:
+          path: _site
+          key: offload-site-${{ github.run_id }}
+
+      # Disable Jekyll for the whole published site (root .nojekyll) and forward
+      # the bare project-pages root to the report subpath for convenience.
+      - name: Add Pages root (redirect + .nojekyll)
+        run: |
+          touch _site/.nojekyll
+          cat > _site/index.html <<'HTML'
+          <!doctype html><html lang=en><head><meta charset=utf-8>
+          <title>offload-test-suite reports</title>
+          <meta http-equiv="refresh" content="0; url=./offload-test-report/">
+          <link rel="canonical" href="./offload-test-report/"></head>
+          <body><a href="./offload-test-report/">offload-test-suite reports</a></body></html>
+          HTML
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

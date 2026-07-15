@@ -77,6 +77,7 @@ For each active workflow it fetches the latest scheduled run; if the run isn't
 | `summary.json` | machine-readable per-workflow rows, including `commits` (built llvm/dxc/offload SHAs) and per-test `classification` |
 | `summary.md` | human summary table (with a **build (llvm / dxc)** column) + cross-workflow divergence pivot |
 | `summary.csv` | flat per-test rows |
+| `summary.html` | self-contained rich view (colour-coded chips, issue badges, live filter, dark mode) — for local viewing or GitHub Pages |
 | `divergences.json` | tests that fail on some workflows but pass on others |
 | `legend.json` | explanation of every classification label |
 | `logs/<workflow>.log.gz` | raw combined log (gzipped) |
@@ -178,6 +179,49 @@ python3 -m unittest discover -s tests -v
 checked-in log excerpts under `tests/fixtures/`; `tests/test_triage_report.py`
 covers the triager's deterministic logic (commit extraction, repo dispatch,
 split-file / RUN-line parsing, commit-range bounding).
+`tests/test_build_site.py` covers the site builder (copy/prune/health/render).
+
+---
+
+## Publishing to GitHub Pages — `build_site.py` + CI
+
+`build_site.py` assembles an accumulated site directory that GitHub Pages can
+serve. It copies each report's `summary.html` (plus JSON/CSV/MD siblings, minus
+the bulky `logs/`) into `<site>/reports/<timestamp>/`, prunes reports older than
+30 days, and regenerates `<site>/index.html` — a landing page listing every
+retained report newest-first with an at-a-glance red/green health column.
+
+```bash
+mask site        # -> _site/index.html + _site/reports/<ts>/summary.html
+# or:
+python3 build_site.py --reports-dir reports --site-dir _site --max-age-days 30
+```
+
+`.github/workflows/offload-report-pages.yml` runs this **every hour**: it clones
+`offload-test-suite`, runs `monitor_failures.py`, restores the previously
+published site from `actions/cache`, folds in the new report, prunes, saves the
+rebuilt site back to the cache, and deploys it with the official GitHub Pages
+pipeline (`upload-pages-artifact` + `deploy-pages`).
+
+The site is built into an `offload-test-report/` subdirectory of the artifact,
+so it serves at `https://<owner>.github.io/<repo>/offload-test-report/` (e.g.
+<https://icohedron.github.io/hlsl-dev/offload-test-report/>); the bare
+project-pages root redirects there.
+
+The cache is keyed uniquely per run with a `restore-keys` prefix that pulls the
+newest previous snapshot (a cache entry is immutable, so a static key would
+never update). It's best-effort storage: entries unused for 7 days are evicted,
+so a long pause resets the accumulated history — it re-accumulates from the next
+run onward.
+
+One-time repo setup:
+
+- **Settings > Pages**: source = *GitHub Actions*.
+- **Settings > Secrets and variables > Actions** (recommended): add
+  `OFFLOAD_MONITOR_TOKEN`, a token with public-repo read scope. The monitor
+  downloads run logs from `llvm/offload-test-suite`; the ambient `GITHUB_TOKEN`
+  is scoped to this repo and generally can't read another repo's logs. Without
+  it the job falls back to `GITHUB_TOKEN`.
 
 ---
 

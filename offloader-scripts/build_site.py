@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""Assemble the GitHub Pages site for the offload-test-suite monitor.
+
+`monitor_failures.py` writes one self-contained `summary.html` per run into
+`reports/<UTC-timestamp>/`. This script maintains an accumulated *site*
+directory that GitHub Pages serves:
+
+  * copies each freshly generated report into `<site>/reports/<timestamp>/`
+    (the self-contained HTML/JSON/CSV/MD — the bulky `logs/` dir is skipped),
+  * prunes report directories older than `--max-age-days` (default 30),
+  * regenerates `<site>/index.html`, a landing page listing every retained
+    report newest-first with a red/green health glance.
+
+Stdlib-only, offline. Intended to run in CI after `monitor_failures.py`, but
+also usable locally:
+
+    python3 build_site.py --reports-dir reports --site-dir _site
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import html
+import json
+import pathlib
+import re
+import shutil
+import sys
+
+# report directory name, e.g. 2026-07-15T01-26-47Z
+TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z$")
+TS_FMT = "%Y-%m-%dT%H-%M-%SZ"
+
+# Files worth publishing from each report dir. The self-contained summary.html
+# is the star; the machine-readable siblings are cheap and handy. The `logs/`
+# subdir (gzipped raw CI logs) is intentionally excluded to keep the site small.
+PUBLISH_FILES = (
+    "summary.html",
+    "summary.json",
+    "summary.csv",
+    "summary.md",
+    "divergences.json",
+    "legend.json",
+)
+
+_CSS = """
+:root{
+  --bg:#fff; --fg:#1f2328; --border:#d0d7de; --th-bg:#f6f8fa; --row-alt:#f9fafb;
+  --link:#0969da; --muted:#656d76; --danger:#cf222e; --success:#1a7f37; --warn:#bf8700;
+}
+:root[data-theme="dark"]{
+  --bg:#0d1117; --fg:#e6edf3; --border:#30363d; --th-bg:#161b22; --row-alt:#161b22;
+  --link:#4493f8; --muted:#8b949e; --danger:#ff7b72; --success:#3fb950; --warn:#d29922;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  margin:0 1.5rem 2rem;padding-top:3.4rem;color:var(--fg);background:var(--bg);line-height:1.45}
+h1{font-size:1.5rem;border-bottom:1px solid var(--border);padding-bottom:.3rem}
+a{color:var(--link);text-decoration:none} a:hover{text-decoration:underline}
+.meta{color:var(--muted);font-size:13px;margin:.2rem 0 1rem}
+table{border-collapse:collapse;width:100%;margin:.5rem 0 1rem;font-size:14px}
+th,td{border:1px solid var(--border);padding:7px 10px;text-align:left;vertical-align:middle}
+th{background:var(--th-bg);position:sticky;top:46px;z-index:1}
+tbody tr:nth-child(even){background:var(--row-alt)}
+td.ts{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap}
+.dot{display:inline-block;width:.7em;height:.7em;border-radius:50%;margin-right:6px;vertical-align:baseline}
+.dot-ok{background:var(--success)} .dot-bad{background:var(--danger)} .dot-warn{background:var(--warn)}
+.ok{color:var(--success);font-weight:600}.bad{color:var(--danger);font-weight:600}.muted{color:var(--muted)}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+#toolbar{position:fixed;top:0;left:0;right:0;z-index:6;display:flex;align-items:center;
+  gap:12px;padding:7px 14px;background:var(--th-bg);border-bottom:1px solid var(--border);
+  box-shadow:0 1px 5px rgba(0,0,0,.12)}
+#toolbar .title{font-weight:700;font-size:15px;white-space:nowrap}
+#toolbar .spacer{flex:1 1 auto}
+#themeBtn{padding:5px 11px;font-size:13px;white-space:nowrap;
+  border:1px solid var(--border);border-radius:6px;background:var(--th-bg);color:var(--fg);cursor:pointer}
+"""
+
+_THEME_INIT = (
+    "<script>(function(){try{var t=localStorage.getItem('otss-theme');"
+    "if(!t)t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)')"
+    ".matches)?'dark':'light';"
+    "document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>"
+)
+
+_JS = """
+function _syncThemeBtn(){
+  var t=document.documentElement.getAttribute('data-theme')||'light';
+  var b=document.getElementById('themeBtn');
+  if(b)b.textContent=(t==='dark')?'☀️ Light':'🌙 Dark';}
+function toggleTheme(){
+  var c=(document.documentElement.getAttribute('data-theme')==='dark')?'light':'dark';
+  document.documentElement.setAttribute('data-theme',c);
+  try{localStorage.setItem('otss-theme',c);}catch(e){}
+  _syncThemeBtn();}
+_syncThemeBtn();
+"""
+
+
+def parse_ts(name: str) -> dt.datetime | None:
+    if not TS_RE.match(name):
+        return None
+    try:
+        return dt.datetime.strptime(name, TS_FMT).replace(tzinfo=dt.UTC)
+    except ValueError:
+        return None
+
+
+def copy_new_reports(reports_dir: pathlib.Path, site_reports: pathlib.Path) -> int:
+    """Copy each report in reports_dir into the site (minus logs). Returns count."""
+    if not reports_dir.exists():
+        return 0
+    copied = 0
+    for src in sorted(reports_dir.iterdir()):
+        if not src.is_dir() or parse_ts(src.name) is None:
+            continue
+        dst = site_reports / src.name
+        dst.mkdir(parents=True, exist_ok=True)
+        for fname in PUBLISH_FILES:
+            f = src / fname
+            if f.is_file():
+                shutil.copy2(f, dst / fname)
+        copied += 1
+    return copied
+
+
+def prune_old(site_reports: pathlib.Path, max_age_days: int) -> list[str]:
+    """Remove report dirs older than max_age_days. Returns removed names."""
+    if not site_reports.exists():
+        return []
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=max_age_days)
+    removed = []
+    for d in site_reports.iterdir():
+        ts = parse_ts(d.name) if d.is_dir() else None
+        if ts is not None and ts < cutoff:
+            shutil.rmtree(d, ignore_errors=True)
+            removed.append(d.name)
+    return removed
+
+
+def report_health(report_dir: pathlib.Path) -> dict:
+    """Summarise a report from its summary.json. Missing/broken -> unknown."""
+    info = {"workflows": 0, "failing": 0, "tests": 0, "incomplete": 0, "ok": False}
+    sj = report_dir / "summary.json"
+    if not sj.is_file():
+        return info
+    try:
+        rows = json.loads(sj.read_text())
+    except (json.JSONDecodeError, OSError):
+        return info
+    info["ok"] = True
+    for r in rows:
+        info["workflows"] += 1
+        concl = r.get("conclusion") or r.get("status") or ""
+        if concl == "failure":
+            info["failing"] += 1
+        elif concl != "success":
+            info["incomplete"] += 1
+        info["tests"] += len(r.get("tests") or [])
+    return info
+
+
+def render_index(site_reports: pathlib.Path, repo: str) -> str:
+    esc = html.escape
+    reports = []
+    if site_reports.exists():
+        for d in site_reports.iterdir():
+            ts = parse_ts(d.name) if d.is_dir() else None
+            if ts is not None:
+                reports.append((ts, d))
+    reports.sort(key=lambda x: x[0], reverse=True)
+
+    generated = dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    h: list[str] = [
+        "<!doctype html><html lang=en><head><meta charset=utf-8>",
+        '<meta name=viewport content="width=device-width,initial-scale=1">',
+        "<title>offload-test-suite reports</title>",
+        _THEME_INIT,
+        f"<style>{_CSS}</style>",
+        "</head><body>",
+        '<div id=toolbar><span class=title>offload-test-suite reports</span>'
+        '<span class=spacer></span>'
+        '<button id=themeBtn onclick="toggleTheme()">Dark</button></div>',
+        "<h1>offload-test-suite scheduled-workflow reports</h1>",
+        f'<div class=meta>Monitoring <a href="https://github.com/{esc(repo)}" '
+        f'target=_blank>{esc(repo)}</a> &middot; {len(reports)} report(s) retained '
+        f'&middot; page generated {esc(generated)}</div>',
+    ]
+
+    if not reports:
+        h.append('<p class=muted>No reports yet.</p>')
+    else:
+        h.append("<table><thead><tr><th>report (UTC)</th><th>health</th>"
+                 "<th class=num>workflows</th><th class=num>failing</th>"
+                 "<th class=num>failing tests</th></tr></thead><tbody>")
+        for ts, d in reports:
+            info = report_health(d)
+            when = ts.strftime("%Y-%m-%d %H:%M:%S")
+            link = f"reports/{esc(d.name)}/summary.html"
+            if not info["ok"]:
+                dot, label = "dot-warn", '<span class=muted>unknown</span>'
+            elif info["failing"] or info["incomplete"]:
+                dot = "dot-bad"
+                label = f'<span class=bad>{info["failing"]} failing</span>'
+                if info["incomplete"]:
+                    label += f' <span class=muted>+{info["incomplete"]} incomplete</span>'
+            else:
+                dot, label = "dot-ok", '<span class=ok>all green</span>'
+            h.append(
+                f'<tr><td class=ts><span class="dot {dot}"></span>'
+                f'<a href="{link}">{esc(when)}</a></td>'
+                f"<td>{label}</td>"
+                f'<td class=num>{info["workflows"] or ""}</td>'
+                f'<td class=num>{info["failing"] or ""}</td>'
+                f'<td class=num>{info["tests"] or ""}</td></tr>')
+        h.append("</tbody></table>")
+
+    h.append(f"<script>{_JS}</script>")
+    h.append("</body></html>")
+    return "\n".join(h)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    here = pathlib.Path(__file__).resolve().parent
+    ap.add_argument("--reports-dir", default=str(here / "reports"),
+                    help="freshly generated reports to fold in (default: ./reports)")
+    ap.add_argument("--site-dir", default=str(here / "_site"),
+                    help="accumulated site directory to publish (default: ./_site)")
+    ap.add_argument("--max-age-days", type=int, default=30,
+                    help="discard reports older than this many days (default: 30)")
+    ap.add_argument("--repo", default="llvm/offload-test-suite",
+                    help="monitored repo, shown on the landing page")
+    args = ap.parse_args()
+
+    reports_dir = pathlib.Path(args.reports_dir).resolve()
+    site_dir = pathlib.Path(args.site_dir).resolve()
+    site_reports = site_dir / "reports"
+    site_reports.mkdir(parents=True, exist_ok=True)
+
+    copied = copy_new_reports(reports_dir, site_reports)
+    removed = prune_old(site_reports, args.max_age_days)
+
+    # Disable Jekyll so nothing is filtered (e.g. dot/underscore paths).
+    (site_dir / ".nojekyll").write_text("")
+    (site_dir / "index.html").write_text(render_index(site_reports, args.repo))
+
+    retained = sum(1 for d in site_reports.iterdir()
+                   if d.is_dir() and parse_ts(d.name) is not None)
+    print(f"[build_site] copied {copied} new, pruned {len(removed)} old, "
+          f"{retained} report(s) retained -> {site_dir}", file=sys.stderr)
+    if removed:
+        print(f"[build_site] pruned: {', '.join(sorted(removed))}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

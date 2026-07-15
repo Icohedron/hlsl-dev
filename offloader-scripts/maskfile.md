@@ -69,3 +69,17 @@ Run after `mask monitor` on the freshly written report; the more history under
 ```bash
 python3 triage_report.py "$report" ${TRIAGE_ARGS:-}
 ```
+
+## site
+Assembles the GitHub Pages site from `reports/` into `_site/`: copies each
+report's self-contained HTML (and JSON/CSV/MD siblings, minus the bulky
+`logs/`), prunes reports older than 30 days, and regenerates `_site/index.html`
+— a landing page listing every retained report newest-first. Offline; no token
+needed. This mirrors what the hourly `.github/workflows/offload-report-pages.yml`
+runs in CI; run `mask monitor` first to have a fresh report to fold in.
+
+Open `_site/index.html` locally to preview.
+
+```bash
+python3 build_site.py --reports-dir reports --site-dir _site --max-age-days 30
+```
