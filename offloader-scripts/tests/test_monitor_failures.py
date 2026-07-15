@@ -151,6 +151,36 @@ class AttributeDivergence(unittest.TestCase):
         self.assertNotIn("variant_pattern", a)
 
 
+class FailureAxes(unittest.TestCase):
+    def test_descriptive_reports_all_homogeneous_axes(self):
+        # 3 fails, all Vulkan + all clang (mixed gpu/host). The descriptive
+        # failure axis reports both similarities — even compiler, which is NOT
+        # blamed (clang passes elsewhere): axis = similarity, not blame.
+        a = mf.failure_axes([
+            "Windows Vulkan AMD Clang", "Windows Vulkan NVIDIA Clang",
+            "Windows Vulkan QC Clang"])
+        self.assertEqual(a, {"api_pattern": "Vulkan-only", "compiler_pattern": "clang-only"})
+
+    def test_no_contrast_needed(self):
+        # api is reported from the failing set alone, with no passers argument
+        # and no non-Vulkan peer required.
+        a = mf.failure_axes(["Windows Vulkan AMD DXC", "Windows Vulkan NVIDIA DXC"])
+        self.assertEqual(a.get("api_pattern"), "Vulkan-only")
+
+    def test_heterogeneous_axis_omitted(self):
+        # Disjoint on every dimension (api, gpu, compiler, host) -> no shared axis.
+        a = mf.failure_axes(["Windows Vulkan AMD Clang", "Windows ARM64 D3D12 Warp DXC"])
+        self.assertEqual(a, {})
+
+    def test_shared_host_is_reported(self):
+        # Both x64 (different api/gpu/compiler) -> host is the one shared axis.
+        a = mf.failure_axes(["Windows Vulkan AMD Clang", "Windows D3D12 NVIDIA DXC"])
+        self.assertEqual(a, {"host_pattern": "x64-only"})
+
+    def test_single_fail_no_axes(self):
+        self.assertEqual(mf.failure_axes(["Windows Vulkan QC DXC"]), {})
+
+
 class SameCompilerPasses(unittest.TestCase):
     def test_true_when_same_compiler_passed(self):
         per_wf = {"Windows Vulkan NVIDIA Clang": "FAIL",
@@ -1450,8 +1480,8 @@ class HtmlReport(unittest.TestCase):
 
     def test_axes_legend_paragraph_present(self):
         h = self._report()
-        self.assertIn("<b>Axes.</b>", h)
-        self.assertIn("non-Vulkan workflow passes", h)
+        self.assertIn("<b>Failure axes.</b>", h)
+        self.assertIn("does not assign blame", h)
         # the value key lists every dimension
         for dim in ("api", "gpu", "compiler", "host", "variant"):
             self.assertIn(f"<span class=k>{dim}</span>", h)

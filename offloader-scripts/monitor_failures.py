@@ -860,10 +860,40 @@ def _issue_emoji(state: str | None, state_reason: str | None = None) -> str:
     return "\u26AA"                  # white circle: unknown / unfetched
 
 
+def failure_axes(fails_on: list[str]) -> dict:
+    """Descriptive 'failure axis' for the report: the axes on which the *failing*
+    workflows are all alike — each dimension (api / gpu / compiler / host /
+    variant) whose failing set is a single value.
+
+    This only points out what the failures have in common; it does NOT assign
+    blame. Blame is the classification's job, decided by the stricter
+    contrast/clean-partition rules in `attribute_divergence` +
+    `divergence_suspect_prefix` — e.g. a test failing only on clang shows
+    `compiler: clang-only` here even when clang is *not* blamed (because it
+    passes elsewhere), and shows `api: Vulkan-only` even when no non-Vulkan peer
+    exists to contrast against.
+
+    A single failing workflow is trivially uniform on every axis, so ≥ 2
+    failures are required (otherwise a lone failure would tag every dimension).
+    """
+    if len(fails_on) < 2:
+        return {}
+    fa = [parse_workflow_axes(w) for w in fails_on]
+    out: dict[str, str] = {}
+    for axis in ("api", "gpu", "compiler", "host", "variant"):
+        drop = {"unknown", "none"} if axis == "variant" else {"unknown"}
+        fvals = {x[axis] for x in fa} - drop
+        if len(fvals) == 1:
+            out[f"{axis}_pattern"] = f"{next(iter(fvals))}-only"
+    return out
+
 def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
     """
-    Given the workflow-name lists, figure out whether the failure pattern
-    lines up cleanly with one axis (api / gpu / compiler / host / variant).
+    Blame attribution (distinct from the descriptive `failure_axes`): decide
+    which axes cleanly explain the divergence well enough to assign suspicion.
+    The result feeds `divergence_suspect_prefix` to pick the suspected layer, so
+    it applies the stricter contrast/clean-partition rules — it is NOT what the
+    report shows as the 'failure axis'.
 
     Returns dict with any of {api_pattern, gpu_pattern, compiler_pattern,
     host_pattern, variant_pattern}, each value being e.g. 'Vulkan-only' /
@@ -2073,12 +2103,15 @@ def _html_axis_chips(axes: dict) -> str:
 def _html_axis_legend() -> str:
     chips = "".join(_html_axis_chip(dim, vals) for dim, vals in _AXIS_VALUES)
     return (
-        '<p class=muted><b>Axes.</b> Each test failure summary row is tagged with the axis '
-        "(dimension) on which its failing set is homogeneous while at least one "
-        "workflow on a different value passes. The dimensions and their values:</p>"
+        '<p class=muted><b>Failure axes.</b> Each row is tagged with the axes '
+        "(dimensions) on which the failing workflows are all alike — what the "
+        "failures have in common. This is descriptive only; it does not assign "
+        "blame (that's the classification). So a row can show <code>compiler: "
+        "clang-only</code> while still not being blamed on clang (e.g. clang "
+        "passes on other workflows). The dimensions and their values:</p>"
         f"<p>{chips}</p>"
         "<p class=muted>e.g. <code>api: Vulkan-only</code> means every failing "
-        "workflow is Vulkan and at least one non-Vulkan workflow passes.</p>"
+        "workflow is Vulkan.</p>"
     )
 
 
@@ -2424,26 +2457,25 @@ def main() -> None:
             # the test passed where it was annotated to fail). xpass is never in
             # _RUNTIME_UPGRADE_SUFFIX, so the upgrade logic leaves it as `xpass`.
             if passes_on and fails_on and (cls.startswith("runtime_") or cls == "xpass"):
-                axes = attribute_divergence(fails_on, passes_on)
+                # Descriptive failure axis for the report: what the failing
+                # workflows have in common (does not assign blame).
+                axes = failure_axes(fails_on)
                 t["axes"] = axes
-                # Attribute the suspected layer from the tightest axis:
+                # Blame is decided separately, from the stricter contrast/clean-
+                # partition attribution, and names the suspected layer:
                 #   * gpu-aligned -> per-vendor driver (runtime_driver_suspected)
                 #   * api-aligned -> API/backend layer  (api_backend_suspected)
-                #   * compiler-aligned -> the compiler (compiler_suspected).
-                #     attribute_divergence only emits compiler_pattern on a clean
-                #     partition (every workflow on that compiler failed, none of
-                #     them passed, the OTHER compiler passed), which is the
-                #     high-confidence case: a backend/driver fault would let the
-                #     same compiler pass on another backend, so this points at
-                #     the compiler, not the runtime layer.
+                #   * compiler-aligned -> the compiler (compiler_suspected), only
+                #     on a clean partition (every workflow on that compiler
+                #     failed, none passed, the OTHER compiler passed) — the
+                #     high-confidence case; a backend/driver fault would let the
+                #     same compiler pass on another backend.
                 #   * none of the above -> environment-dependent
                 #     (runtime_driver_suspected)
-                # More specific axes win (gpu before api). A GPU/API-specific
-                # failure is still not proof of a defect in that layer — the
-                # test itself may specify pipeline I/O in a way only some
-                # configurations reject — so upgrades stay 'suspected', never
-                # 'confirmed'.
-                prefix = divergence_suspect_prefix(axes)
+                # So a test can show `compiler: clang-only` as a failure axis yet
+                # not be blamed on clang (it passes elsewhere). Upgrades stay
+                # 'suspected', never 'confirmed'.
+                prefix = divergence_suspect_prefix(attribute_divergence(fails_on, passes_on))
                 suffix = _RUNTIME_UPGRADE_SUFFIX.get(t["classification"])
                 if prefix and suffix:
                     t["classification"] = f"{prefix}_{suffix}"
@@ -2502,10 +2534,10 @@ def main() -> None:
                "Axes: **api** (D3D12 / Vulkan / Metal), "
                "**gpu** (AMD / NVIDIA / Intel / QC / Warp / Lavapipe / Metal), "
                "**compiler** (clang / dxc), **host** (x64 / ARM64 / macOS), "
-               "**variant** (GBV / Preview / none). A divergence row's `axes` "
-               "dict names the axis on which the failing set is homogeneous — "
-               "e.g. `api_pattern: Vulkan-only` means every failing workflow is "
-               "Vulkan and at least one non-Vulkan workflow passes.",
+               "**variant** (GBV / Preview / none). A row's `axes` dict names the axes "
+               "on which the failing workflows are all alike (descriptive — what the "
+               "failures have in common, not blame) — e.g. `api_pattern: Vulkan-only` "
+               "means every failing workflow is Vulkan.",
                "",
                "</details>",
                ""]
@@ -2560,8 +2592,9 @@ def main() -> None:
                "split points at something configuration-specific: a per-vendor driver",
                "bug, an API/backend bug, a compiler (DXC vs clang) codegen",
                "difference, or a test that specifies pipeline inputs/outputs in a way",
-               "only some configurations reject. The **failure axis** column names the axis on",
-               "which the failing set is homogeneous (e.g. `api: Vulkan-only` = every",
+               "only some configurations reject. The **failure axis** column names the axes on",
+               "which the failing workflows are all alike (descriptive — what they have in",
+               "common, not blame; e.g. `api: Vulkan-only` = every",
                "failing workflow is Vulkan). The **passes on** column groups the passing",
                "workflows by their value on the failure axis — or, when several axes align",
                "at once, by the value tuple across all of them — so the contrast is",
