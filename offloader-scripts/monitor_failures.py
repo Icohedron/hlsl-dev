@@ -823,15 +823,15 @@ def parse_workflow_axes(name: str) -> dict[str, str]:
 
 def _host_axis_value(ax: dict) -> str:
     """Host as a *divergence axis* (as opposed to the real runner arch that
-    parse_workflow_axes reports for feature inference). The arch only
-    distinguishes failures for WARP, which ships separate x64 and ARM64 builds;
-    everywhere else it's incidental (Qualcomm boards are ARM64, real GPUs /
-    Lavapipe don't care), so the host axis is n/a ('none'). macOS is kept as the
-    Metal host."""
+    parse_workflow_axes reports for feature inference). The runner CPU
+    architecture only distinguishes failures for WARP, which ships two separate
+    software rasterizers — an x64 build and an ARM64 build. Everywhere else the
+    arch is incidental (Qualcomm boards happen to be ARM64, real GPUs / Lavapipe /
+    macOS-Metal don't care about it), so the host axis is n/a ('none') and only
+    WARP yields a value. A macOS/Metal failure is already captured by the
+    gpu/api = Metal axes, so it needs no separate host axis."""
     if ax.get("gpu") == "Warp":
         return ax.get("host", "unknown")
-    if ax.get("host") == "macOS":
-        return "macOS"
     return "none"
 
 
@@ -2262,7 +2262,7 @@ _AXIS_VALUES = [
     ("api", "D3D12 / Vulkan / Metal"),
     ("gpu", "AMD / NVIDIA / Intel / QC / Warp / Lavapipe / Metal"),
     ("compiler", "clang / dxc"),
-    ("host", "x64 / ARM64 (WARP only) / macOS"),
+    ("host", "x64 / ARM64 (WARP's two builds)"),
     ("variant", "GBV / Preview / none"),
 ]
 
@@ -2738,7 +2738,7 @@ def main() -> None:
         md += ["",
                "Axes: **api** (D3D12 / Vulkan / Metal), "
                "**gpu** (AMD / NVIDIA / Intel / QC / Warp / Lavapipe / Metal), "
-               "**compiler** (clang / dxc), **host** (x64 / ARM64 — WARP only / macOS), "
+               "**compiler** (clang / dxc), **host** (x64 / ARM64 — WARP's two builds), "
                "**variant** (GBV / Preview / none). A row's `axes` dict names the axes "
                "on which the failing workflows are all alike (descriptive — what the "
                "failures have in common, not blame) — e.g. `api_pattern: Vulkan-only` "

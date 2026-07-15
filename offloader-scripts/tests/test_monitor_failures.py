@@ -211,6 +211,11 @@ class FailureAxes(unittest.TestCase):
         # A QC (ARM64 hardware, non-WARP) failure is NOT an ARM64 host axis.
         self.assertNotIn("host_pattern",
                          mf.failure_axes(["Windows Vulkan QC Clang", "Windows Vulkan QC DXC"]))
+        # A macOS/Metal failure is already captured by gpu/api = Metal, so it
+        # gets NO separate host axis (host is a WARP-only distinction).
+        macos = mf.failure_axes(["macOS Metal Clang", "macOS Metal DXC"])
+        self.assertNotIn("host_pattern", macos)
+        self.assertEqual(macos.get("gpu_pattern"), "Metal-only")
 
     def test_single_fail_no_axes(self):
         self.assertEqual(mf.failure_axes(["Windows Vulkan QC DXC"]), {})
