@@ -1,0 +1,27 @@
+2026-07-14T03:11:02.1000000Z FAIL: OffloadTest-clang-mtl :: WaveOps/WaveReadLaneAt.index.test (507 of 522)
+2026-07-14T03:11:02.1000010Z ******************** TEST 'OffloadTest-clang-mtl :: WaveOps/WaveReadLaneAt.index.test' FAILED ********************
+2026-07-14T03:11:02.1000020Z Exit Code: 1
+2026-07-14T03:11:02.1000030Z 
+2026-07-14T03:11:02.1000040Z Command Output (stdout):
+2026-07-14T03:11:02.1000050Z --
+2026-07-14T03:11:02.1000060Z Function: main: error: I8 can only be used as immediate value for intrinsic or as i8* via bitcast by lifetime intrinsics.
+2026-07-14T03:11:02.1000070Z note: at '%switch.gep5 = getelementptr inbounds [3 x i8], [3 x i8]* @switch.table.main, i32 0, i32 %10' in block 'switch.lookup' of function 'main'.
+2026-07-14T03:11:02.1000080Z Function: main: error: I8 can only be used as immediate value for intrinsic or as i8* via bitcast by lifetime intrinsics.
+2026-07-14T03:11:02.1000090Z note: at '%11 = load i8, i8* %switch.gep5, align 1' in block 'switch.lookup' of function 'main'.
+2026-07-14T03:11:02.1000100Z Function: main: error: I8 can only be used as immediate value for intrinsic or as i8* via bitcast by lifetime intrinsics.
+2026-07-14T03:11:02.1000110Z note: at '%12 = zext i8 %11 to i32' in block 'switch.lookup' of function 'main'.
+2026-07-14T03:11:02.1000120Z Validation failed.
+2026-07-14T03:11:02.1000130Z 
+2026-07-14T03:11:02.1000140Z 
+2026-07-14T03:11:02.1000150Z --
+2026-07-14T03:11:02.1000160Z Command Output (stderr):
+2026-07-14T03:11:02.1000170Z --
+2026-07-14T03:11:02.1000180Z /Users/admin/actions-runner/_work/offload-test-suite/offload-test-suite/llvm-project/build/bin/split-file /Users/admin/actions-runner/_work/offload-test-suite/offload-test-suite/OffloadTest/test/WaveOps/WaveReadLaneAt.index.test /Users/admin/actions-runner/_work/offload-test-suite/offload-test-suite/llvm-project/build/tools/OffloadTest/test/clang-mtl/WaveOps/Output/WaveReadLaneAt.index.test.tmp # RUN: at line 119
+2026-07-14T03:11:02.1000190Z + /Users/admin/actions-runner/_work/offload-test-suite/offload-test-suite/llvm-project/build/bin/split-file /Users/admin/actions-runner/_work/offload-test-suite/offload-test-suite/OffloadTest/test/WaveOps/WaveReadLaneAt.index.test /Users/admin/actions-runner/_work/offload-test-suite/offload-test-suite/llvm-project/build/tools/OffloadTest/test/clang-mtl/WaveOps/Output/WaveReadLaneAt.index.test.tmp
+2026-07-14T03:11:02.1000200Z /Users/admin/actions-runner/_work/offload-test-suite/offload-test-suite/llvm-project/build/bin/clang-dxc --dxv-path=/Users/admin/actions-runner/_work/offload-test-suite/offload-test-suite/DXC/build/bin -T cs_6_5 -Fo /Users/admin/actions-runner/_work/offload-test-suite/offload-test-suite/llvm-project/build/tools/OffloadTest/test/clang-mtl/WaveOps/Output/WaveReadLaneAt.index.test.tmp.o /Users/admin/actions-runner/_work/offload-test-suite/offload-test-suite/llvm-project/build/tools/OffloadTest/test/clang-mtl/WaveOps/Output/WaveReadLaneAt.index.test.tmp/source.hlsl # RUN: at line 120
+2026-07-14T03:11:02.1000210Z + /Users/admin/actions-runner/_work/offload-test-suite/offload-test-suite/llvm-project/build/bin/clang-dxc --dxv-path=/Users/admin/actions-runner/_work/offload-test-suite/offload-test-suite/DXC/build/bin -T cs_6_5 -Fo /Users/admin/actions-runner/_work/offload-test-suite/offload-test-suite/llvm-project/build/tools/OffloadTest/test/clang-mtl/WaveOps/Output/WaveReadLaneAt.index.test.tmp.o /Users/admin/actions-runner/_work/offload-test-suite/offload-test-suite/llvm-project/build/tools/OffloadTest/test/clang-mtl/WaveOps/Output/WaveReadLaneAt.index.test.tmp/source.hlsl
+2026-07-14T03:11:02.1000220Z clang-dxc: error: dxv command failed with exit code 1 (use -v to see invocation)
+2026-07-14T03:11:02.1000230Z 
+2026-07-14T03:11:02.1000240Z --
+2026-07-14T03:11:02.1000250Z 
+2026-07-14T03:11:02.1000260Z ********************

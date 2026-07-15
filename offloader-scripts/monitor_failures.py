@@ -252,6 +252,20 @@ def _status_is_failure(status: str) -> bool:
     return status != "0"
 
 
+# External-shell (bash `-x`) lit format used by e.g. the macOS Metal runners.
+# Unlike the internal-shell layout (`# executed command:` / `# | ...`) that
+# `_parse_lit_commands` understands, this format prints a bash trace under
+# "Command Output (stderr):" and the failing tool reports its own error with a
+# `clang-dxc: error:` / `dxc: error:` / `dxv: error:` prefix at line start
+# (`clang-dxc: error: dxv command failed ...` covers a failed DXIL validation).
+# `_parse_lit_commands` returns nothing here, so without this the compile-step
+# failure falls through to classify_runtime and is misblamed on the driver.
+_SHELL_COMPILE_FAIL_RE = re.compile(
+    r"^\s*(clang[-_]?dxc|clang|dxc|dxv)(?:\.exe)?:\s*(?:error|fatal error):",
+    re.I | re.M,
+)
+
+
 def classify_shader_compile(block: str) -> str | None:
     """
     Return 'shader_compile_dxc' or 'shader_compile_clang' iff the dxc /
@@ -259,11 +273,18 @@ def classify_shader_compile(block: str) -> str | None:
     Otherwise None (failure was in a later step: offloader / filecheck / etc.).
     """
     cmds = _parse_lit_commands(block)
-    if not cmds:
-        return None
     for c in cmds:
         if c["kind"] in ("dxc", "clang") and _status_is_failure(c["exit_status"]):
             return f"shader_compile_{c['kind']}"
+    # Fallback for the external-shell format, where `_parse_lit_commands` finds
+    # no `# executed command:` records: detect a compiler-step failure from the
+    # tool's own error prefix. `clang[-_]dxc`/`clang` -> clang; `dxc`/`dxv`
+    # (the DXIL validator, part of the DXC toolchain) -> dxc.
+    m = _SHELL_COMPILE_FAIL_RE.search(block)
+    if m:
+        tool = m.group(1).lower()
+        kind = "clang" if tool.startswith("clang") else "dxc"
+        return f"shader_compile_{kind}"
     return None
 
 # Runtime rejected pipeline/PSO creation. Matches the offloader's messages

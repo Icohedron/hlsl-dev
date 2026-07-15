@@ -398,6 +398,15 @@ class Classifiers(unittest.TestCase):
         b = first_block("runtime_driver_primitive_index.txt", "primitive-index")
         self.assertIsNone(mf.classify_shader_compile(b["block"]))
 
+    def test_shader_compile_external_shell_dxv_validation(self):
+        # macOS Metal (clang-mtl) uses lit's external-shell (bash `-x`) format,
+        # which `_parse_lit_commands` can't parse. clang-dxc failed at DXIL
+        # validation ("dxv command failed" / "Validation failed."); this is a
+        # shader-compile failure and must NOT fall through to the runtime
+        # classifier (previously mislabelled runtime_driver_suspected_unknown).
+        b = first_block("shader_compile_clang_mtl_dxv.txt", "WaveReadLaneAt")
+        self.assertEqual(mf.classify_shader_compile(b["block"]), "shader_compile_clang")
+
     def test_runtime_driver_error_nt_status(self):
         b = first_block("runtime_driver_primitive_index.txt", "primitive-index")
         self.assertEqual(mf.classify_runtime(b["block"]), "runtime_driver_error")
