@@ -212,6 +212,8 @@ def _parse_lit_commands(block: str) -> list[dict]:
                 kind = "offloader"
             elif "filecheck" in low:
                 kind = "filecheck"
+            elif "imgdiff" in low:
+                kind = "imgdiff"
             elif "split-file" in low:
                 kind = "split_file"
             cur = {"cmd": cmd, "stdout": [], "stderr": [], "exit_status": "0", "kind": kind}
@@ -310,6 +312,10 @@ def classify_runtime(block: str) -> str:
         # shader compiled and the pipeline ran to completion, so this is a wrong
         # result (miscompile), not a crash or a pipeline-creation rejection.
         "test failed", "comparison rule",
+        # imgdiff (graphics tests) compares the rendered image against a golden
+        # reference and fails when it differs beyond tolerance: a wrong rendered
+        # result. Its report is unmistakable ("RMS Difference", "above threshold").
+        "rms difference", "above threshold",
     )
 
     # If offloader crashed with an NT status (0xC0000005 etc.) treat as driver
@@ -327,7 +333,11 @@ def classify_runtime(block: str) -> str:
                 return "runtime_pipeline_error"
             if any(re.search(m, payload) for m in miscompile_markers):
                 return "runtime_miscompile"
-        if c["kind"] == "filecheck":
+        # FileCheck (buffer text) and imgdiff (rendered-image comparison against a
+        # golden reference) both fail only when the produced output is wrong — a
+        # miscompile. The shader compiled and the pipeline ran to completion; the
+        # result just didn't match.
+        if c["kind"] in ("filecheck", "imgdiff"):
             return "runtime_miscompile"
 
     # Fallback on whole-block text
@@ -485,8 +495,9 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
     "runtime_miscompile":
         "The shader compiled and ran to completion, but produced the WRONG answer: "
         "the output buffer or image didn't match the test's expected 'golden' "
-        "reference (the offloader's `Test failed` / Expected-vs-Got dump, a FileCheck "
-        "mismatch, or an 'expected X actual Y' diff). Points at incorrect code "
+        "reference (the offloader's `Test failed` / Expected-vs-Got buffer dump, a "
+        "FileCheck mismatch, or — for graphics tests — an imgdiff image comparison that "
+        "exceeded the allowed threshold). Points at incorrect code "
         "generation or incorrect execution.",
     "runtime_unknown":
         "The shader compiled and then something failed while running it, but the log "

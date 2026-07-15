@@ -383,6 +383,9 @@ class LitBlockParsing(unittest.TestCase):
         self.assertEqual(self._kind("/usr/bin/clang-format -i foo.cpp"), "other")
         self.assertEqual(self._kind("/usr/bin/clang++ -c host.cpp"), "other")
 
+    def test_imgdiff_is_its_own_kind(self):
+        self.assertEqual(self._kind("/opt/bin/imgdiff.exe Output.png golden.png"), "imgdiff")
+
 
 class Classifiers(unittest.TestCase):
     def test_shader_compile_positive(self):
@@ -429,6 +432,33 @@ class Classifiers(unittest.TestCase):
             "# | Data:            [ -95, 206, -307 ]\n"
             "# | Got:\n"
             "# | Data:            [ 0, 0, 0 ]\n"
+            "# `-----------------------------\n"
+            "# error: command failed with exit status: 1\n"
+        )
+        self.assertEqual(mf.classify_runtime(block), "runtime_miscompile")
+
+    def test_imgdiff_image_mismatch_is_miscompile(self):
+        # Graphics tests render an image, then imgdiff compares it against a golden
+        # reference and fails when it differs beyond tolerance -> a wrong rendered
+        # result (miscompile). The shader compiled and the pipeline ran to
+        # completion (regression: this used to fall through to runtime_unknown
+        # because no marker matched imgdiff's report).
+        block = (
+            "# RUN: at line 264\n"
+            "offloader.exe -debug-layer pipeline.yaml v.o p.o -r Output -o Output.png\n"
+            "# executed command: offloader.exe\n"
+            "# .---command stdout------------\n"
+            "# | Using Vulkan API\n"
+            "# | Graphics Pipeline created.\n"
+            "# | Cleanup complete.\n"
+            "# `-----------------------------\n"
+            "# RUN: at line 265\n"
+            "imgdiff.exe Output.png golden-images/hlsl/Graphics/SimpleTriangle.png -rules rules.yaml\n"
+            "# executed command: imgdiff.exe Output.png SimpleTriangle.png\n"
+            "# .---command stderr------------\n"
+            "# | RMS Difference: 3.285269e-01\n"
+            "# | Pixels with visible differences: 1024 1.562500e+00%\n"
+            "# | Error: PixelPercent check failed. Difference percent 1.562500e+00 above threshold 2.000000e-01\n"
             "# `-----------------------------\n"
             "# error: command failed with exit status: 1\n"
         )
