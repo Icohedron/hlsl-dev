@@ -729,13 +729,26 @@ def compact_workflow(name: str) -> str:
     return "/".join(parts) or name
 
 
-def _md_wf_list(names: list[str]) -> str:
+def _fail_mode(cls: str) -> str:
+    """Short failure mode from a (possibly upgraded) classification: the
+    miscompile / crash / unknown suffix, else the label itself."""
+    for m in ("miscompile", "crash", "unknown"):
+        if cls.endswith("_" + m):
+            return m
+    return cls
+
+
+def _md_wf_list(names: list[str], annotate: dict[str, str] | None = None) -> str:
     """Comma-join full workflow names, prefixed with the count (markdown cells).
     Full names (not compact slugs) so they're easy to match against the workflow
-    table and the section headers."""
+    table and the section headers. When `annotate` is given, each name is
+    suffixed with its per-workflow value, e.g. `Windows Lavapipe AMD DXC
+    (crash)`."""
     if not names:
         return "-"
-    return f"{len(names)}: " + ", ".join(names)
+    def one(n: str) -> str:
+        return f"{n} ({annotate[n]})" if annotate and n in annotate else n
+    return f"{len(names)}: " + ", ".join(one(n) for n in names)
 
 
 def _truncate(text: str, limit: int = 60) -> str:
@@ -1746,6 +1759,7 @@ td.note{max-width:44ch;color:var(--muted);font-size:12px}
 .ax-host{border-color:var(--ax-host)} .ax-host .v{color:var(--ax-host)}
 .ax-variant{border-color:var(--ax-variant)} .ax-variant .v{color:var(--ax-variant)}
 .wfcount{color:var(--muted);font-size:11px;font-weight:700;margin-right:6px}
+.wfmode{color:var(--muted);font-size:10px;font-style:italic}
 .wf{display:inline-block;padding:0 6px;margin:1px 3px 1px 0;border-radius:5px;
   font-size:11px;
   background:var(--th-bg);border:1px solid var(--border);white-space:nowrap}
@@ -1844,13 +1858,20 @@ def _html_axis_legend() -> str:
     )
 
 
-def _html_wf_list(names: list[str]) -> str:
+def _html_wf_list(names: list[str], annotate: dict[str, str] | None = None) -> str:
     """Render workflow names as individual pills (full names), count-badged, so
-    the members of a fails-on / passes-on set are visually separate and clear."""
+    the members of a fails-on / passes-on set are visually separate and clear.
+    When `annotate` is given, each pill shows its per-workflow value (e.g. the
+    failure mode) as a small muted suffix."""
     if not names:
         return '<span class="muted">\u2014</span>'
-    pills = "".join(f'<span class=wf>{html.escape(n)}</span>' for n in names)
-    return f'<span class=wfcount>{len(names)}\u00d7</span>{pills}'
+    pills = []
+    for n in names:
+        label = html.escape(n)
+        if annotate and n in annotate:
+            label += f' <span class=wfmode>{html.escape(annotate[n])}</span>'
+        pills.append(f'<span class=wf>{label}</span>')
+    return f'<span class=wfcount>{len(names)}\u00d7</span>' + "".join(pills)
 
 
 def _html_chip(label: str) -> str:
@@ -1972,11 +1993,14 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
         h.append("<table><thead><tr><th>test</th><th>classification</th><th>axis</th>"
                  "<th>fails on</th><th>passes on</th></tr></thead><tbody>")
         for d in divergences:
+            cls_chips = "".join(_html_chip(c) for c in (d.get("classifications") or [])) \
+                or '<span class="muted">\u2014</span>'
+            fail_modes = {w: _fail_mode(c) for w, c in (d.get("fail_classifications") or {}).items()}
             h.append(
                 f'<tr class=f><td class=test>{esc(d["test"])}</td>'
-                f"<td>{_html_chip(d['classification'])}</td>"
+                f"<td>{cls_chips}</td>"
                 f"<td>{_html_axis_chips(d.get('axes') or {})}</td>"
-                f'<td class=note>{_html_wf_list(d["fails_on"])}</td>'
+                f'<td class=note>{_html_wf_list(d["fails_on"], fail_modes)}</td>'
                 f'<td class=note>{_html_wf_list(d["passes_on"])}</td></tr>')
         h.append("</tbody></table>")
 
@@ -2099,6 +2123,18 @@ def main() -> None:
         summary.append(row)
 
     # ---- cross-GPU pivot: refine runtime_miscompile / runtime_driver_error ----
+    # A test's failure MODE (miscompile / crash / unknown) can differ per
+    # workflow — e.g. a driver crash on one GPU but a value mismatch on others.
+    # Only the axis-derived *prefix* (runtime_driver_suspected / ...) is shared.
+    # Capture each failing workflow's base classification up front so the
+    # divergence row can report the per-workflow breakdown rather than one
+    # arbitrary label.
+    base_modes: dict[tuple[str, str], dict[str, str]] = defaultdict(dict)
+    for r in summary:
+        for t in r.get("tests") or []:
+            base_modes[normalize_test_key(t["suite"], t["test"])][r["workflow"]] = \
+                t.get("classification", "")
+
     seen_div: set[tuple[str, str]] = set()
     divergences: list[dict] = []
     for r in summary:
@@ -2128,15 +2164,23 @@ def main() -> None:
                 # may specify pipeline inputs/outputs in a way only some
                 # configurations reject — so these upgrades stay 'suspected',
                 # never 'confirmed'.
+                prefix = divergence_suspect_prefix(axes)
                 suffix = _RUNTIME_UPGRADE_SUFFIX.get(t["classification"])
                 if suffix:
-                    prefix = divergence_suspect_prefix(axes)
                     t["classification"] = f"{prefix}_{suffix}"
                 if key not in seen_div:
                     seen_div.add(key)
+                    # Per-workflow upgraded classification. The failure mode
+                    # (suffix) is that workflow's own; the prefix is shared.
+                    fail_cls: dict[str, str] = {}
+                    for w in fails_on:
+                        base = base_modes[key].get(w, "")
+                        sfx = _RUNTIME_UPGRADE_SUFFIX.get(base)
+                        fail_cls[w] = f"{prefix}_{sfx}" if sfx else (base or "unknown")
                     divergences.append({
                         "suite": normalize_suite(t["suite"]), "test": t["test"],
-                        "classification": t["classification"],
+                        "classifications": sorted(set(fail_cls.values())),
+                        "fail_classifications": fail_cls,
                         "axes": axes,
                         "fails_on": fails_on, "passes_on": passes_on,
                     })
@@ -2239,16 +2283,19 @@ def main() -> None:
                "The 'axis' column names the axis (api / gpu / compiler) on which the failure",
                "set is homogeneous — e.g. 'api: Vulkan-only' = all failing workflows are",
                "Vulkan, at least one non-Vulkan workflow passes. "
-               "The 'fails on' / 'passes on' columns list the full workflow names, "
-               "prefixed with the count.",
+               "A test's failure mode can differ per workflow (crash vs miscompile); "
+               "the 'classification' column lists each distinct mode and the 'fails on' "
+               "column annotates every workflow with its own mode.",
                "",
                "| test | classification | axis | fails on | passes on |",
                "|---|---|---|---|---|"]
         for d in divergences:
             axis_bits = [f"{k.replace('_pattern','')}: {v}" for k, v in (d.get("axes") or {}).items()]
             axis_str = "; ".join(axis_bits) or "-"
-            md.append(f"| `{d['test']}` | {d['classification']} | {axis_str} | "
-                      f"{_md_wf_list(d['fails_on'])} | {_md_wf_list(d['passes_on'])} |")
+            cls_str = ", ".join(f"`{c}`" for c in (d.get("classifications") or [])) or "-"
+            fail_modes = {w: _fail_mode(c) for w, c in (d.get("fail_classifications") or {}).items()}
+            md.append(f"| `{d['test']}` | {cls_str} | {axis_str} | "
+                      f"{_md_wf_list(d['fails_on'], fail_modes)} | {_md_wf_list(d['passes_on'])} |")
         md.append("")
 
     tested = [r for r in summary if r.get("tests")]

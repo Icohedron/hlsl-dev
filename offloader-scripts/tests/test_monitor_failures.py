@@ -1007,6 +1007,13 @@ class CompactWorkflow(unittest.TestCase):
         self.assertTrue(mf._truncate("x" * 100, 20).endswith("\u2026"))
         self.assertEqual(len(mf._truncate("x" * 100, 20)), 20)
 
+    def test_fail_mode(self):
+        self.assertEqual(mf._fail_mode("runtime_driver_suspected_crash"), "crash")
+        self.assertEqual(mf._fail_mode("api_backend_suspected_miscompile"), "miscompile")
+        self.assertEqual(mf._fail_mode("compiler_suspected_unknown"), "unknown")
+        # not an upgraded label -> returned as-is
+        self.assertEqual(mf._fail_mode("runtime_pipeline_error"), "runtime_pipeline_error")
+
 
 class IssueRendering(unittest.TestCase):
     T = {
@@ -1189,9 +1196,14 @@ class HtmlReport(unittest.TestCase):
                      "state": "closed", "state_reason": "completed", "title": "AMD bug"}],
                 "passes_on": ["Windows D3D12 Warp DXC"]}]}]
         divs = [{"suite": "OffloadTest", "test": "Feature/StructuredBuffer/inc_counter_array.test",
-                 "classification": "api_backend_suspected_miscompile",
+                 "classifications": ["runtime_driver_suspected_crash",
+                                     "runtime_driver_suspected_miscompile"],
+                 "fail_classifications": {
+                     "Windows Lavapipe AMD DXC": "runtime_driver_suspected_crash",
+                     "Windows Vulkan AMD Clang": "runtime_driver_suspected_miscompile"},
                  "axes": {"api_pattern": "Vulkan-only"},
-                 "fails_on": ["Windows Vulkan AMD Clang"], "passes_on": ["Windows D3D12 Warp DXC"]}]
+                 "fails_on": ["Windows Lavapipe AMD DXC", "Windows Vulkan AMD Clang"],
+                 "passes_on": ["Windows D3D12 Warp DXC"]}]
         return mf.render_html_report("2026-07-14T00-00-00Z", summary, divs, Counter({"xpass": 1}))
 
     def test_well_formed_and_contains_key_content(self):
@@ -1249,8 +1261,18 @@ class HtmlReport(unittest.TestCase):
         # divergence fails-on / passes-on render as count badge + full-name pills,
         # not a slash-compacted comma list.
         self.assertIn("<span class=wfcount>", h)
-        self.assertIn("<span class=wf>Windows Vulkan AMD Clang</span>", h)
-        self.assertNotIn("AMD/Vulkan/Clang", h)  # no compact slash-slug in HTML
+        # passes-on pill is a plain full name; no compact slash-slug in HTML.
+        self.assertIn("<span class=wf>Windows D3D12 Warp DXC</span>", h)
+        self.assertNotIn("AMD/Vulkan/Clang", h)
+
+    def test_divergence_shows_per_workflow_failure_modes(self):
+        # A test that crashes on one workflow but miscompiles on others must show
+        # BOTH classifications and annotate each failing workflow with its mode.
+        h = self._report()
+        self.assertIn("runtime_driver_suspected_crash", h)
+        self.assertIn("runtime_driver_suspected_miscompile", h)
+        self.assertIn("Windows Lavapipe AMD DXC <span class=wfmode>crash</span>", h)
+        self.assertIn("Windows Vulkan AMD Clang <span class=wfmode>miscompile</span>", h)
 
     def test_toolbar_has_title_timestamp_filter_and_toggle(self):
         h = self._report()
