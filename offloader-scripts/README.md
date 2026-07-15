@@ -97,6 +97,16 @@ For each active workflow it fetches the latest scheduled run; if the run isn't
 - `runtime_driver_suspected_*` / `api_backend_suspected_*` — cross-workflow
   divergence upgrades: the same binary passes on some backends and fails on
   others. Labels stay **suspected**; divergence alone is not proof.
+- `compiler_suspected_*` — a runtime failure upgraded to blame the compiler,
+  but only on a **clean compiler split**: every workflow using one compiler
+  (clang-dxc or dxc) fails, none of them pass, and the **other** compiler
+  passes. That's the high-confidence case that it's the compiler, not the
+  backend/driver (a backend fault would let the same compiler pass elsewhere).
+- `shader_compile_<kind>_env_suspected` — a shader-compile failure **de-blamed**:
+  a peer workflow using the same compiler compiled the same test, so the
+  compiler isn't at fault (suspect a per-workflow toolchain/version/env
+  difference). The bare `shader_compile_<kind>` keeps the compiler blame when no
+  same-compiler workflow passes.
 
 > Lavapipe is treated as a GPU (a software rasterizer running the Vulkan path),
 > never as an API backend.

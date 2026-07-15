@@ -500,12 +500,44 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
     "api_backend_suspected_unknown":
         "Base label was `runtime_unknown`, upgraded via API-axis attribution. The "
         "API/backend correlates but the specific failure mode wasn't parsed from the log.",
-    # NOTE: there is deliberately no `compiler_suspected_*` label. A failing set
-    # that aligns on the compiler axis is surfaced via the `compiler_pattern`
-    # axis (see `attribute_divergence` / the axis legend) but is NOT upgraded to
-    # a fault-implying classification — clang-dxc and DXC emit different DXIL, so
-    # a compiler-aligned divergence is different-output, not a proven compiler
-    # bug. See `divergence_suspect_prefix` for the rationale.
+    "compiler_suspected_miscompile":
+        "Base label was `runtime_miscompile`, upgraded on the **compiler axis**: every "
+        "workflow using one compiler (clang-dxc OR dxc) failed this test, NO workflow "
+        "using that compiler passed it, and at least one workflow using the OTHER "
+        "compiler passed — with no per-GPU or per-API alignment. Every workflow runs "
+        "the exact same test from the exact same source, so wrong output confined to "
+        "one compiler (while the other compiler is correct) is high-confidence evidence "
+        "of that compiler's frontend/codegen (e.g. a clang-dxc vs DXC DXIL difference) "
+        "rather than a driver or backend — if a driver/backend were at fault the same "
+        "compiler would fail there too, but here it passes on the other compiler. Still "
+        "'suspected': an under-specified test/golden could in principle only accept one "
+        "compiler's output. See `axes` (e.g. compiler_pattern: clang-only).",
+    "compiler_suspected_crash":
+        "Base label was `runtime_driver_error`, upgraded on the compiler axis (all "
+        "failures use one compiler, no workflow on that compiler passes, at least one "
+        "workflow on the other compiler passes, no per-GPU or per-API alignment). A "
+        "crash confined to shaders from one compiler points at that compiler emitting "
+        "something the runtime rejects — but it can equally be a test-spec issue only "
+        "that compiler's output surfaces. Compiler-specific crash, root cause "
+        "unconfirmed (compiler bug OR test-spec bug).",
+    "compiler_suspected_unknown":
+        "Base label was `runtime_unknown`, upgraded via compiler-axis attribution (all "
+        "failures on one compiler, none of that compiler's workflows pass, the other "
+        "compiler passes). The compiler correlates but the specific failure mode wasn't "
+        "parsed from the log.",
+    # Shader-compile de-blame: the compiler-stage failure label is kept ONLY when
+    # no workflow using the same compiler passed the test (see the pivot). If a
+    # same-compiler peer compiled it, the compiler is exonerated and we downgrade.
+    "shader_compile_dxc_env_suspected":
+        "`dxc` failed to compile the shader here, but a peer workflow using dxc compiled "
+        "the same test successfully — so dxc itself is not at fault. Suspect a "
+        "per-workflow toolchain build/version, environment, or flags difference rather "
+        "than a DXC bug.",
+    "shader_compile_clang_dxc_env_suspected":
+        "`clang-dxc` failed to compile the shader here, but a peer workflow using "
+        "clang-dxc compiled the same test successfully — so clang-dxc itself is not at "
+        "fault. Suspect a per-workflow toolchain build/version, environment, or flags "
+        "difference rather than a clang-dxc bug.",
 }
 
 
@@ -816,12 +848,15 @@ def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
     do NOT emit `compiler_pattern`, so a `clang-only` axis never appears while
     clang is demonstrably passing elsewhere.
 
-    Note: even when `compiler_pattern` *is* emitted (a clean split — every clang
-    workflow failed, DXC passes), it is reported only as a factual correlation.
-    It is never upgraded to a fault-implying classification (see
-    `divergence_suspect_prefix`): clang-dxc and DXC emit different DXIL, so a
-    compiler split is different-output, not a proven compiler bug. Genuine
-    compiler regressions are confirmed by triage_report.py's commit bounding.
+    Note: when `compiler_pattern` *is* emitted (a clean split — every workflow
+    using that compiler failed, no such workflow passes, and the OTHER compiler
+    passes) it IS upgraded to `compiler_suspected_*` by
+    `divergence_suspect_prefix`. That clean partition is exactly the
+    high-confidence case: the same compiler is wrong on every configuration that
+    runs it while the other compiler is right, which points at the compiler
+    rather than a backend/driver (a backend/driver fault would let the same
+    compiler pass on a different backend). The passing other-compiler also shows
+    the test/golden itself is valid.
     """
     fa = [parse_workflow_axes(w) for w in fails_on]
     pa = [parse_workflow_axes(w) for w in passes_on]
@@ -844,6 +879,19 @@ def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
             continue
         out[f"{axis}_pattern"] = f"{next(iter(fvals))}-only"
     return out
+
+
+def same_compiler_passes(per_wf: dict[str, str], compiler: str) -> bool:
+    """True if some workflow using `compiler` (clang / dxc) PASSED this test.
+
+    Used to gate compiler blame: a same-compiler pass proves that compiler can
+    build/run the test, so a failure on another same-compiler workflow is
+    environment/toolchain-version specific, not a compiler defect. Absence of any
+    such pass is the high-confidence signal that the compiler is consistently at
+    fault.
+    """
+    return any(res == "PASS" and parse_workflow_axes(w).get("compiler") == compiler
+               for w, res in per_wf.items())
 
 
 # Priority for choosing which single axis to group the passing workflows on in
@@ -1730,10 +1778,11 @@ def classify_run(log_text: str, gh: GH, otss_root: pathlib.Path, issue_cache: di
 
 
 # Base runtime label -> suffix used when the cross-workflow pivot upgrades it.
-# The prefix names the tightest aligning runtime layer: `runtime_driver_suspected`
-# (per-vendor GPU split) or `api_backend_suspected` (clean API-axis split); see
-# CLASSIFICATION_LEGEND. A compiler-axis split is reported as an axis but not
-# upgraded (no fault prefix) — see `divergence_suspect_prefix`.
+# The prefix names the tightest aligning layer: `runtime_driver_suspected`
+# (per-vendor GPU split), `api_backend_suspected` (clean API-axis split), or
+# `compiler_suspected` (clean compiler split — every workflow on that compiler
+# fails, the other compiler passes); see CLASSIFICATION_LEGEND and
+# `divergence_suspect_prefix`.
 _RUNTIME_UPGRADE_SUFFIX = {
     "runtime_miscompile": "miscompile",
     "runtime_driver_error": "crash",
@@ -1741,37 +1790,39 @@ _RUNTIME_UPGRADE_SUFFIX = {
 }
 
 
-def divergence_suspect_prefix(axes: dict) -> str | None:
+def divergence_suspect_prefix(axes: dict) -> str:
     """
     Choose the suspected-layer prefix for a cross-workflow divergence from its
-    attributed axes, or None when the divergence should NOT be upgraded to a
-    fault-implying label.
+    attributed axes. The offload-test-suite exists to exercise the clang and dxc
+    compilers, so we DO blame a compiler when we can say so with high confidence
+    — but never when the fault is really the backend or driver.
 
-    GPU and API divergences run the *same* shader binary everywhere, so a
-    result that differs across runners localizes the fault to that runtime
-    layer — hence `runtime_driver_suspected` (per-vendor GPU split) and
-    `api_backend_suspected` (API split); more specific GPU wins over API.
+    Priority (most specific first):
 
-    The compiler axis is deliberately NOT upgraded. clang-dxc and DXC emit
-    *different* DXIL from the same source, so a compiler-aligned divergence only
-    means the two compilers produced different output — and different output is
-    not necessarily *wrong* output. Minting a `compiler_suspected_miscompile`
-    label would point the finger at clang/DXC, which the divergence alone can't
-    establish (the golden may encode a test-spec assumption only one compiler's
-    perfectly valid codegen happens to satisfy). So we return None: the
-    `compiler_pattern` axis chip still surfaces the correlation as a *fact*, but
-    the classification stays the neutral base symptom label rather than blaming
-    a compiler. A genuine compiler regression is confirmed instead by
-    triage_report.py's commit bounding, not asserted from the pass matrix.
+      * gpu-aligned  -> `runtime_driver_suspected` (per-vendor driver): the same
+        shader binary is right on some GPUs and wrong on others.
+      * api-aligned  -> `api_backend_suspected` (API/backend): same binary,
+        splits cleanly on the API with no per-vendor alignment.
+      * compiler-aligned -> `compiler_suspected`: the failing set is exactly one
+        compiler AND no workflow using that compiler passes the test AND at
+        least one workflow using the OTHER compiler passes. `attribute_divergence`
+        only emits `compiler_pattern` under that clean partition, which is what
+        makes the blame high-confidence: if the failure were a backend/driver
+        issue, the same compiler would pass on a different backend (a
+        same-compiler pass), and no compiler_pattern would be produced. The
+        passing other-compiler proves the test/golden is valid, so the wrong
+        output isn't a bad reference.
+      * otherwise    -> `runtime_driver_suspected` (environment-dependent).
 
-    Returns 'runtime_driver_suspected' | 'api_backend_suspected' | None.
+    Returns one of 'runtime_driver_suspected' | 'api_backend_suspected' |
+    'compiler_suspected'.
     """
     if "gpu_pattern" in axes:
         return "runtime_driver_suspected"
     if "api_pattern" in axes:
         return "api_backend_suspected"
     if "compiler_pattern" in axes:
-        return None            # compiler divergence is reported, never blamed
+        return "compiler_suspected"
     return "runtime_driver_suspected"
 
 
@@ -1909,7 +1960,9 @@ def _label_color(label: str) -> str:
     if "pipeline" in l:
         return "#bf8700"
     if "shader_compile" in l:
-        return "#953800"
+        # De-blamed variant (a same-compiler peer compiled it): mute it so it
+        # doesn't read as a compiler fault.
+        return "#57606a" if "env_suspected" in l else "#953800"
     if l == "build_failure":
         return "#cf222e"
     if l == "xpass":
@@ -2263,16 +2316,31 @@ def main() -> None:
             fails_on = sorted(w for w, res in per_wf.items() if res in ("FAIL", "XPASS"))
             t["passes_on"] = passes_on
             t["fails_on"] = fails_on
+            cls = t.get("classification", "")
+
+            # Shader-compile de-blame. `shader_compile_<kind>` blames the compiler
+            # that failed to build the shader. Keep that blame only when NO
+            # workflow using the same compiler passed this test; a same-compiler
+            # pass proves the compiler CAN build it, so this failure is a
+            # per-workflow toolchain/env difference, not a compiler defect.
+            if cls in ("shader_compile_clang_dxc", "shader_compile_dxc"):
+                comp = "clang" if cls == "shader_compile_clang_dxc" else "dxc"
+                if same_compiler_passes(per_wf, comp):
+                    t["classification"] = f"{cls}_env_suspected"
+                continue
             if passes_on and fails_on and t.get("classification", "").startswith("runtime_"):
                 axes = attribute_divergence(fails_on, passes_on)
                 t["axes"] = axes
-                # Attribute the suspected runtime layer from the tightest axis:
+                # Attribute the suspected layer from the tightest axis:
                 #   * gpu-aligned -> per-vendor driver (runtime_driver_suspected)
                 #   * api-aligned -> API/backend layer  (api_backend_suspected)
-                #   * compiler-aligned -> NOT upgraded; clang-dxc/DXC emit
-                #     different DXIL, so a compiler split is different-output,
-                #     not proof of a compiler fault. The compiler_pattern axis
-                #     is still recorded (a fact); the label stays neutral.
+                #   * compiler-aligned -> the compiler (compiler_suspected).
+                #     attribute_divergence only emits compiler_pattern on a clean
+                #     partition (every workflow on that compiler failed, none of
+                #     them passed, the OTHER compiler passed), which is the
+                #     high-confidence case: a backend/driver fault would let the
+                #     same compiler pass on another backend, so this points at
+                #     the compiler, not the runtime layer.
                 #   * none of the above -> environment-dependent
                 #     (runtime_driver_suspected)
                 # More specific axes win (gpu before api). A GPU/API-specific
@@ -2286,10 +2354,9 @@ def main() -> None:
                     t["classification"] = f"{prefix}_{suffix}"
                 if key not in seen_div:
                     seen_div.add(key)
-                    # Per-workflow classification. When a runtime layer was
-                    # attributed (gpu/api) the per-workflow failure mode (suffix)
-                    # carries the shared prefix; otherwise (e.g. compiler-only or
-                    # no clean axis) each workflow keeps its neutral base label.
+                    # Per-workflow classification: the failure mode (suffix) is
+                    # that workflow's own; the prefix (driver/api/compiler layer)
+                    # is shared for the divergence.
                     fail_cls: dict[str, str] = {}
                     for w in fails_on:
                         base = base_modes[key].get(w, "")
@@ -2401,8 +2468,11 @@ def main() -> None:
                "failing workflow is Vulkan); the **passes on** column groups the passing",
                "workflows by that same axis so the contrast is explicit. On gpu/api the",
                "shader binary is identical across workflows, so the label is upgraded to",
-               "a 'suspected' driver/backend layer (never 'confirmed'); a compiler-axis",
-               "split is reported as an axis only, without blaming the compiler.",
+               "a 'suspected' driver/backend layer (never 'confirmed'). A test is",
+               "upgraded to `compiler_suspected_*` only under a clean compiler split —",
+               "every workflow using one compiler fails, none of them pass, and the other",
+               "compiler passes — which is the high-confidence case that it's the compiler",
+               "and not the backend/driver.",
                "",
                "| test | classification | axis | fails on | passes on |",
                "|---|---|---|---|---|"]

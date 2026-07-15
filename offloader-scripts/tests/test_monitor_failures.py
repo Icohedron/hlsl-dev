@@ -140,6 +140,30 @@ class AttributeDivergence(unittest.TestCase):
         self.assertNotIn("variant_pattern", a)
 
 
+class SameCompilerPasses(unittest.TestCase):
+    def test_true_when_same_compiler_passed(self):
+        per_wf = {"Windows Vulkan NVIDIA Clang": "FAIL",
+                  "Windows D3D12 NVIDIA Clang": "PASS"}
+        self.assertTrue(mf.same_compiler_passes(per_wf, "clang"))
+
+    def test_false_when_no_same_compiler_passer(self):
+        # every clang workflow failed; only a dxc workflow passed
+        per_wf = {"Windows Vulkan NVIDIA Clang": "FAIL",
+                  "Windows D3D12 AMD Clang": "FAIL",
+                  "Windows D3D12 NVIDIA DXC": "PASS"}
+        self.assertFalse(mf.same_compiler_passes(per_wf, "clang"))
+        # ...but dxc DID pass, so dxc is exonerated
+        self.assertTrue(mf.same_compiler_passes(per_wf, "dxc"))
+
+    def test_false_on_empty_matrix(self):
+        self.assertFalse(mf.same_compiler_passes({}, "clang"))
+
+    def test_xpass_does_not_count_as_pass(self):
+        # XPASS is an unexpected pass of an XFAIL; only a clean PASS exonerates.
+        per_wf = {"Windows Vulkan NVIDIA Clang": "XPASS"}
+        self.assertFalse(mf.same_compiler_passes(per_wf, "clang"))
+
+
 class LitBlockParsing(unittest.TestCase):
     def test_extract_failure_blocks_finds_test(self):
         blocks = mf.extract_failure_blocks(load("shader_compile_clang_dxc.txt"))
@@ -850,8 +874,14 @@ class ClassificationLegend(unittest.TestCase):
         "api_backend_suspected_miscompile",
         "api_backend_suspected_crash",
         "api_backend_suspected_unknown",
-        # NOTE: no compiler_suspected_* labels — a compiler-axis divergence is
-        # reported as an axis but never upgraded to a fault-implying label.
+        # Compiler blame, gated on a clean compiler split (every workflow on that
+        # compiler fails, the other compiler passes) — high-confidence only.
+        "compiler_suspected_miscompile",
+        "compiler_suspected_crash",
+        "compiler_suspected_unknown",
+        # Shader-compile de-blame (a same-compiler peer compiled it).
+        "shader_compile_dxc_env_suspected",
+        "shader_compile_clang_dxc_env_suspected",
     }
 
     def test_every_label_documented(self):
@@ -1013,12 +1043,13 @@ class DivergenceSuspectPrefix(unittest.TestCase):
             mf.divergence_suspect_prefix({"api_pattern": "Vulkan-only"}),
             "api_backend_suspected")
 
-    def test_compiler_axis_is_not_upgraded(self):
-        # A compiler-only split is reported as an axis but must NOT be upgraded
-        # to a fault-implying label — clang-dxc/DXC emit different DXIL, so a
-        # compiler split is different-output, not a proven compiler bug.
-        self.assertIsNone(
-            mf.divergence_suspect_prefix({"compiler_pattern": "clang-only"}))
+    def test_compiler_split_is_blamed(self):
+        # attribute_divergence only emits compiler_pattern on a clean split (every
+        # workflow on that compiler fails, the other compiler passes), which is
+        # the high-confidence case — so it IS upgraded to compiler_suspected.
+        self.assertEqual(
+            mf.divergence_suspect_prefix({"compiler_pattern": "clang-only"}),
+            "compiler_suspected")
 
     def test_fallback(self):
         self.assertEqual(
