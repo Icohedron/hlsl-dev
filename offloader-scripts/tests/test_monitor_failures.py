@@ -370,6 +370,33 @@ class Classifiers(unittest.TestCase):
         b = first_block("runtime_miscompile_smoothstep.txt", "smoothstep")
         self.assertEqual(mf.classify_runtime(b["block"]), "runtime_miscompile")
 
+    def test_offloader_buffer_comparison_failure_is_miscompile(self):
+        # The offloader runs the shader to completion, reads the buffer back, and
+        # reports "Test failed" with a Comparison Rule and Expected/Got buffers
+        # when a value doesn't match the golden reference -> a miscompile, not an
+        # unknown fall-through (regression: this used to classify as
+        # runtime_unknown because no marker matched the offloader's format).
+        block = (
+            "# RUN: at line 131\n"
+            "offloader.exe -debug-layer pipeline.yaml out.o\n"
+            "# executed command: offloader.exe\n"
+            "# .---command stdout------------\n"
+            "# | Using DirectX API\n"
+            "# | Compute commands executed.\n"
+            "# | Read data back.\n"
+            "# `-----------------------------\n"
+            "# .---command stderr------------\n"
+            "# | Test failed: Test0\n"
+            "# | Comparison Rule: BufferExact\n"
+            "# | Expected:\n"
+            "# | Data:            [ -95, 206, -307 ]\n"
+            "# | Got:\n"
+            "# | Data:            [ 0, 0, 0 ]\n"
+            "# `-----------------------------\n"
+            "# error: command failed with exit status: 1\n"
+        )
+        self.assertEqual(mf.classify_runtime(block), "runtime_miscompile")
+
 
 class ExtractAllResults(unittest.TestCase):
     def test_status_kinds(self):
@@ -1196,6 +1223,41 @@ class DivergenceSuspectPrefix(unittest.TestCase):
         self.assertEqual(
             mf.divergence_suspect_prefix({"host_pattern": "ARM64-only"}),
             "runtime_driver_suspected")
+
+
+class BlamePrefixByMode(unittest.TestCase):
+    # A big shared passing set: every real GPU on both APIs passes.
+    PASSES = [
+        "Windows D3D12 AMD Clang", "Windows D3D12 AMD DXC",
+        "Windows D3D12 Intel Clang", "Windows D3D12 Intel DXC",
+        "Windows D3D12 NVIDIA Clang", "Windows D3D12 NVIDIA DXC",
+        "Windows Vulkan AMD Clang", "Windows Vulkan AMD DXC",
+        "Windows Vulkan QC Clang", "Windows Vulkan QC DXC",
+    ]
+
+    def test_independent_mode_clusters_attributed_separately(self):
+        # A pipeline error on Lavapipe AND a miscompile on D3D12/QC are two
+        # unrelated bugs. Over the union the failing set aligns on nothing
+        # (mixed gpu + api) -> runtime_driver_suspected fallback. Per mode the
+        # miscompile cluster is a clean (QC, D3D12) pair: QC passes on Vulkan,
+        # D3D12 passes on other GPUs -> gpu_api_driver_suspected.
+        mode_of = {
+            "Windows ARM64 Lavapipe Clang": "runtime_pipeline_error",
+            "Windows Lavapipe AMD Clang": "runtime_pipeline_error",
+            "Windows D3D12 QC Clang": "runtime_miscompile",
+            "Windows D3D12 QC DXC": "runtime_miscompile",
+        }
+        prefixes = mf.blame_prefix_by_mode(sorted(mode_of), self.PASSES, mode_of)
+        self.assertEqual(prefixes["runtime_miscompile"], "gpu_api_driver_suspected")
+        self.assertEqual(prefixes["runtime_pipeline_error"], "runtime_driver_suspected")
+
+    def test_mixing_the_clusters_would_dilute(self):
+        # Guard the motivation: attributing the SAME failures as one set loses
+        # the clean pair the per-mode split recovers.
+        fails = ["Windows ARM64 Lavapipe Clang", "Windows Lavapipe AMD Clang",
+                 "Windows D3D12 QC Clang", "Windows D3D12 QC DXC"]
+        whole = mf.divergence_suspect_prefix(mf.attribute_divergence(fails, self.PASSES))
+        self.assertEqual(whole, "runtime_driver_suspected")
 
 
 class CompactWorkflow(unittest.TestCase):

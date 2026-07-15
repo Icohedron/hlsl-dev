@@ -300,6 +300,12 @@ def classify_runtime(block: str) -> str:
         "mismatch", "verify failed", "verification failed",
         "image mismatch", "golden image", "expected .* actual", "diff:",
         "filecheck error",
+        # The offloader's result-comparison failure output: it prints
+        # "Test failed: <name>" with a "Comparison Rule: ..." and Expected/Got
+        # buffers when a computed value doesn't match the golden reference. The
+        # shader compiled and the pipeline ran to completion, so this is a wrong
+        # result (miscompile), not a crash or a pipeline-creation rejection.
+        "test failed", "comparison rule",
     )
 
     # If offloader crashed with an NT status (0xC0000005 etc.) treat as driver
@@ -476,8 +482,9 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
         "runtime_miscompile (ran, wrong result).",
     "runtime_miscompile":
         "Shader compiled OK, the pipeline ran to completion, but output values or "
-        "images didn't match the golden reference (FileCheck failed, verify failed, "
-        "or an 'expected X actual Y' diff). Points at wrong codegen or wrong runtime "
+        "images didn't match the golden reference (the offloader's `Test failed` / "
+        "`Comparison Rule` / Expected-vs-Got buffer dump, a FileCheck failure, verify "
+        "failed, or an 'expected X actual Y' diff). Points at wrong codegen or wrong runtime "
         "execution.",
     "runtime_unknown":
         "Shader compiled OK, a later step exited non-zero, but no driver-crash or "
@@ -2015,6 +2022,29 @@ def divergence_suspect_prefix(axes: dict) -> str:
     return "runtime_driver_suspected"
 
 
+def blame_prefix_by_mode(
+    fails_on: list[str], passes_on: list[str], mode_of: dict[str, str]
+) -> dict[str, str]:
+    """Suspected-layer prefix for each failure-MODE cluster of a divergence.
+
+    A test can fail by different mechanisms on disjoint config subsets (e.g. an
+    unrelated pipeline error on Lavapipe AND a miscompile on D3D12/QC). Blaming
+    over the union would dilute an otherwise-clean axis — the mixed set aligns on
+    nothing — so the failing workflows are grouped by their base failure mode
+    (`mode_of`) and each cluster is attributed on its own via
+    `attribute_divergence` + `divergence_suspect_prefix`.
+
+    Returns {base_mode -> prefix}.
+    """
+    clusters: dict[str, list[str]] = defaultdict(list)
+    for w in fails_on:
+        clusters[mode_of.get(w, "")].append(w)
+    return {
+        mode: divergence_suspect_prefix(attribute_divergence(ws, passes_on))
+        for mode, ws in clusters.items()
+    }
+
+
 def _fmt_commits(commits: dict) -> str:
     """Compact `llvm <sha> · dxc <sha> · offload <sha>` for the summary table
     (each part omitted if that repo's commit is unknown)."""
@@ -2505,8 +2535,9 @@ def main() -> None:
 
     # ---- cross-workflow pivot: build the test failure summary ----
     # A test's failure MODE (miscompile / crash / unknown) can differ per
-    # workflow — e.g. a driver crash on one GPU but a value mismatch on others.
-    # Only the axis-derived *prefix* (runtime_driver_suspected / ...) is shared.
+    # workflow — e.g. a driver crash on one GPU but a value mismatch on others —
+    # and each mode gets its own axis-derived blame prefix (see the cluster logic
+    # below), so a test can carry several distinct classifications at once.
     # Capture each failing workflow's base classification up front so the
     # divergence row can report the per-workflow breakdown rather than one
     # arbitrary label.
@@ -2562,20 +2593,28 @@ def main() -> None:
                 # So a test can show `compiler: clang-only` as a failure axis yet
                 # not be blamed on clang (it passes elsewhere). Upgrades stay
                 # 'suspected', never 'confirmed'.
-                prefix = divergence_suspect_prefix(attribute_divergence(fails_on, passes_on))
-                suffix = _RUNTIME_UPGRADE_SUFFIX.get(t["classification"])
+                # Attribute blame per failure-MODE cluster, not over the whole
+                # mixed failing set: a test can fail by different mechanisms on
+                # disjoint config subsets (e.g. an unrelated pipeline error on
+                # Lavapipe AND a miscompile on D3D12/QC), and blaming over the
+                # union would dilute an otherwise-clean axis.
+                mode_of = base_modes[key]
+                prefix_by_mode = blame_prefix_by_mode(fails_on, passes_on, mode_of)
+                prefix = prefix_by_mode.get(cls, "")
+                suffix = _RUNTIME_UPGRADE_SUFFIX.get(cls)
                 if prefix and suffix:
                     t["classification"] = f"{prefix}_{suffix}"
                 if key not in seen_div:
                     seen_div.add(key)
-                    # Per-workflow classification: the failure mode (suffix) is
-                    # that workflow's own; the prefix (driver/api/compiler layer)
-                    # is shared for the divergence.
+                    # Per-workflow classification: both the failure mode (suffix)
+                    # and the blame layer (prefix) come from that workflow's own
+                    # mode cluster.
                     fail_cls: dict[str, str] = {}
                     for w in fails_on:
-                        base = base_modes[key].get(w, "")
+                        base = mode_of.get(w, "")
                         sfx = _RUNTIME_UPGRADE_SUFFIX.get(base)
-                        fail_cls[w] = (f"{prefix}_{sfx}" if (prefix and sfx)
+                        wpre = prefix_by_mode.get(base, "")
+                        fail_cls[w] = (f"{wpre}_{sfx}" if (wpre and sfx)
                                        else (base or "unknown"))
                     divergences.append({
                         "suite": normalize_suite(t["suite"]), "test": t["test"],
