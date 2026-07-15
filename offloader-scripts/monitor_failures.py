@@ -461,13 +461,31 @@ def classify_build_failure(log_text: str) -> str:
     return votes.most_common(1)[0][0]
 
 
+# lit's start-of-run progress banner ("-- Testing: 152 tests, 8 workers --").
+# lit emits it only once it actually reaches the test stage, so it positively
+# marks a run that got past the build.
+_LIT_TESTING_BANNER_RE = re.compile(r"Testing:\s+\d+\s+tests?\b")
+
+
 def has_test_stage_output(log_text: str) -> bool:
-    return (
-        "Testing:" in log_text
-        or "PASS:" in log_text
-        or "FAIL:" in log_text
-        or "Total Discovered Tests" in log_text
-        or "check-hlsl" in log_text.lower()
+    """True iff the run reached lit's test stage.
+
+    Detection is deliberately strict: it keys on markers lit only emits once it
+    starts running tests — its "Testing: N tests" banner, its "Total Discovered
+    Tests" summary, or a real per-line `PASS:/FAIL: <suite> :: <test>` status
+    line. It must NOT fire on the mere presence of a target name like
+    `check-hlsl` or a bare `PASS:`/`FAIL:` substring: those show up in
+    setup/config logs (e.g. the reusable workflow echoing its
+    `TestTarget: check-hlsl-d3d12` input, or the SplitBuild suite-resolver step)
+    even when the build breaks before any test runs — which would misclassify a
+    build_failure as a test_failure.
+    """
+    if "Total Discovered Tests" in log_text:
+        return True
+    if _LIT_TESTING_BANNER_RE.search(log_text):
+        return True
+    return any(
+        LIT_STATUS_LINE_RE.match(strip_ts(raw)) for raw in log_text.splitlines()
     )
 
 
