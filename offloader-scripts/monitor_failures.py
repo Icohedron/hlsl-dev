@@ -810,15 +810,17 @@ def _md_wf_list(names: list[str], annotate: dict[str, str] | None = None) -> str
 
 
 def _md_pass_groups(passes_on: list[str], axes: dict) -> str:
-    """Passing workflows for a markdown cell, grouped by the divergence's primary
-    axis value when there is one (e.g. `api D3D12: 2: A, B`), else a flat list."""
+    """Passing workflows for a markdown cell, grouped by the value tuple across
+    all the failure axes (e.g. `gpu AMD, api D3D12: 2: A, B`), else a flat list."""
     if not passes_on:
         return "-"
-    groups = group_passes_by_axis(passes_on, axes)
+    groups = group_passes_by_axes(passes_on, axes)
     if groups is None:
         return _md_wf_list(passes_on)
-    dim = sole_failure_axis(axes)
-    return "<br>".join(f"**{dim} {value}** — {_md_wf_list(wfs)}" for value, wfs in groups)
+    dims = failure_axis_dims(axes)
+    def head(key):
+        return ", ".join(f"{d} {v}" for d, v in zip(dims, key))
+    return "<br>".join(f"**{head(key)}** — {_md_wf_list(wfs)}" for key, wfs in groups)
 
 
 def _truncate(text: str, limit: int = 60) -> str:
@@ -929,36 +931,40 @@ def same_compiler_passes(per_wf: dict[str, str], compiler: str) -> bool:
 
 
 
-def sole_failure_axis(axes: dict) -> str | None:
-    """The single failure-axis dimension (gpu / api / compiler / host / variant),
-    or None when the failing set aligns on zero or on *several* axes at once.
+# Order failure-axis dimensions most-specific-first when several align at once.
+_AXIS_PRIORITY = ("gpu", "api", "compiler", "host", "variant")
 
-    Passing workflows are grouped only when there is exactly one axis to contrast
-    against. With multiple axes the failure is really the *intersection* of those
-    values (e.g. Vulkan AND AMD), so grouping the pass side by just one of them
-    (say gpu) is arbitrary and misleading — the caller lists all passes flat
-    instead.
+
+def failure_axis_dims(axes: dict) -> list[str]:
+    """The failure-axis dimensions present (gpu / api / compiler / host /
+    variant), most-specific-first. Empty when the failing set aligns on no axis.
+    When several are present the failure is the *intersection* of those values
+    (e.g. Vulkan AND AMD), and the pass side is grouped by that same set.
     """
-    dims = [k[:-len("_pattern")] for k in axes if k.endswith("_pattern")]
-    return dims[0] if len(dims) == 1 else None
+    present = {k[:-len("_pattern")] for k in axes if k.endswith("_pattern")}
+    return [d for d in _AXIS_PRIORITY if d in present]
 
 
-def group_passes_by_axis(passes_on: list[str], axes: dict) -> list[tuple[str, list[str]]] | None:
-    """Group the passing workflows by their value on the sole failure axis, so the
-    pass side reads as a direct contrast to the (homogeneous) failing value —
-    e.g. fails on `api: Vulkan-only`, passes grouped by api into D3D12 / Metal.
-    Returns an ordered [(axis_value, [workflows])] list (largest group first),
-    or None when there isn't exactly one failure axis to group on (zero or
-    several) — the caller then lists all passes flat.
+def group_passes_by_axes(passes_on: list[str], axes: dict
+                         ) -> list[tuple[tuple[str, ...], list[str]]] | None:
+    """Group the passing workflows by their value tuple across *all* the failure
+    axes, so the pass side reads as a direct contrast to the (homogeneous)
+    failing combination on the same axes — e.g. fails on `gpu: AMD-only,
+    api: Vulkan-only`, passes grouped into (AMD, D3D12) / (NVIDIA, Vulkan) / …
+    The tuple is ordered to match `failure_axis_dims(axes)`. Returns an ordered
+    [(value_tuple, [workflows])] list (largest group first), or None when there
+    is no failure axis to group on — the caller then lists all passes flat.
     """
-    dim = sole_failure_axis(axes)
-    if dim is None or not passes_on:
+    dims = failure_axis_dims(axes)
+    if not dims or not passes_on:
         return None
-    groups: dict[str, list[str]] = {}
+    groups: dict[tuple[str, ...], list[str]] = {}
     for w in passes_on:
-        groups.setdefault(parse_workflow_axes(w).get(dim) or "unknown", []).append(w)
-    return [(v, sorted(ws))
-            for v, ws in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))]
+        wa = parse_workflow_axes(w)
+        key = tuple(wa.get(d) or "unknown" for d in dims)
+        groups.setdefault(key, []).append(w)
+    return [(k, sorted(ws))
+            for k, ws in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))]
 
 
 def test_failure_rows(entry: dict) -> list[dict]:
@@ -2129,18 +2135,20 @@ def _html_note(t: dict) -> str:
 
 def _html_pass_groups(passes_on: list[str], axes: dict,
                       run_urls: dict[str, str] | None = None) -> str:
-    """Render the passing workflows, grouped by the divergence's primary axis
-    value when there is one (each group headed by the axis-value chip), else a
-    flat pill list. Each pill links to that workflow's CI run."""
+    """Render the passing workflows, grouped by their value tuple across all the
+    failure axes (each group headed by one axis-value chip per axis), else a flat
+    pill list. Each pill links to that workflow's CI run."""
     if not passes_on:
         return '<span class="muted">\u2014</span>'
-    groups = group_passes_by_axis(passes_on, axes)
+    groups = group_passes_by_axes(passes_on, axes)
     if groups is None:
         return _html_wf_list(passes_on, run_urls=run_urls)
-    dim = sole_failure_axis(axes)
+    dims = failure_axis_dims(axes)
     return "".join(
-        f'<div class=passgrp>{_html_axis_chip(dim, value)} {_html_wf_list(wfs, run_urls=run_urls)}</div>'
-        for value, wfs in groups
+        f'<div class=passgrp>'
+        + "".join(_html_axis_chip(d, v) for d, v in zip(dims, key))
+        + f' {_html_wf_list(wfs, run_urls=run_urls)}</div>'
+        for key, wfs in groups
     )
 
 
@@ -2548,10 +2556,10 @@ def main() -> None:
                "difference, or a test that specifies pipeline inputs/outputs in a way",
                "only some configurations reject. The **failure axis** column names the axis on",
                "which the failing set is homogeneous (e.g. `api: Vulkan-only` = every",
-               "failing workflow is Vulkan). When there's exactly one failure axis the",
-               "**passes on** column groups the passing workflows by that axis so the",
-               "contrast is explicit; with multiple axes (the failure is their",
-               "intersection) it just lists them. On gpu/api the",
+               "failing workflow is Vulkan). The **passes on** column groups the passing",
+               "workflows by their value on the failure axis — or, when several axes align",
+               "at once, by the value tuple across all of them — so the contrast is",
+               "explicit. On gpu/api the",
                "shader binary is identical across workflows, so the label is upgraded to",
                "a 'suspected' driver/backend layer (never 'confirmed'). A test is",
                "upgraded to `compiler_suspected_*` only under a clean compiler split —",

@@ -165,28 +165,31 @@ class SameCompilerPasses(unittest.TestCase):
         self.assertFalse(mf.same_compiler_passes(per_wf, "clang"))
 
 
-class GroupPassesByAxis(unittest.TestCase):
+class GroupPassesByAxes(unittest.TestCase):
     def test_single_axis_groups_by_that_axis(self):
-        groups = mf.group_passes_by_axis(
+        self.assertEqual(mf.failure_axis_dims({"api_pattern": "Vulkan-only"}), ["api"])
+        groups = mf.group_passes_by_axes(
             ["Windows D3D12 AMD DXC", "Windows D3D12 NVIDIA DXC", "macOS Metal Clang"],
             {"api_pattern": "Vulkan-only"})
-        self.assertEqual(mf.sole_failure_axis({"api_pattern": "Vulkan-only"}), "api")
         vals = dict(groups)
-        self.assertEqual(sorted(vals), ["D3D12", "Metal"])
-        self.assertEqual(vals["D3D12"], ["Windows D3D12 AMD DXC", "Windows D3D12 NVIDIA DXC"])
+        self.assertEqual(sorted(vals), [("D3D12",), ("Metal",)])
+        self.assertEqual(vals[("D3D12",)], ["Windows D3D12 AMD DXC", "Windows D3D12 NVIDIA DXC"])
 
-    def test_multiple_axes_do_not_group(self):
-        # Fails on Vulkan AND AMD -> the failure is their intersection, so
-        # grouping the pass side by just one (e.g. gpu) would be misleading.
-        self.assertIsNone(mf.sole_failure_axis({"api_pattern": "Vulkan-only",
-                                                "gpu_pattern": "AMD-only"}))
-        self.assertIsNone(mf.group_passes_by_axis(
-            ["Windows D3D12 AMD DXC", "Windows Vulkan NVIDIA DXC"],
+    def test_multiple_axes_group_by_the_tuple(self):
+        # Fails on Vulkan AND AMD -> group the pass side by (gpu, api) together.
+        self.assertEqual(
+            mf.failure_axis_dims({"api_pattern": "Vulkan-only", "gpu_pattern": "AMD-only"}),
+            ["gpu", "api"])  # most-specific (gpu) first
+        groups = dict(mf.group_passes_by_axes(
+            ["Windows D3D12 AMD DXC", "Windows Vulkan NVIDIA DXC", "Windows D3D12 NVIDIA DXC"],
             {"api_pattern": "Vulkan-only", "gpu_pattern": "AMD-only"}))
+        self.assertEqual(groups[("AMD", "D3D12")], ["Windows D3D12 AMD DXC"])
+        self.assertEqual(groups[("NVIDIA", "Vulkan")], ["Windows Vulkan NVIDIA DXC"])
+        self.assertEqual(groups[("NVIDIA", "D3D12")], ["Windows D3D12 NVIDIA DXC"])
 
     def test_no_axis_does_not_group(self):
-        self.assertIsNone(mf.sole_failure_axis({}))
-        self.assertIsNone(mf.group_passes_by_axis(["Windows D3D12 AMD DXC"], {}))
+        self.assertEqual(mf.failure_axis_dims({}), [])
+        self.assertIsNone(mf.group_passes_by_axes(["Windows D3D12 AMD DXC"], {}))
 
 
 class LitBlockParsing(unittest.TestCase):
