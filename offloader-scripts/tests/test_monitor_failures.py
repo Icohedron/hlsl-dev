@@ -1091,6 +1091,14 @@ class HtmlReport(unittest.TestCase):
     def test_classification_chip_present(self):
         self.assertIn("chip", self._report())
 
+    def test_dark_mode_toggle_present(self):
+        h = self._report()
+        self.assertIn("id=themeBtn", h)               # toggle button
+        self.assertIn("toggleTheme()", h)             # onclick + fn
+        self.assertIn('[data-theme="dark"]', h)       # dark palette
+        self.assertIn("prefers-color-scheme", h)      # OS default
+        self.assertIn("otss-theme", h)                # localStorage persistence
+
 
 class ColumnLegends(unittest.TestCase):
     """

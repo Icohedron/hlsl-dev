@@ -1597,43 +1597,83 @@ def _fmt_commits(commits: dict) -> str:
 # ---------------------------------------------------------------------------
 
 _HTML_CSS = """
+:root{
+  --bg:#fff; --fg:#1f2328; --border:#d0d7de; --th-bg:#f6f8fa; --row-alt:#f9fafb;
+  --link:#0969da; --muted:#656d76;
+  --danger:#cf222e; --accent:#0969da; --success:#1a7f37;
+  --bo-bg:#dafbe1; --bo-fg:#1a7f37; --bo-bd:#1a7f37;
+  --bf-bg:#fbefff; --bf-fg:#8250df; --bf-bd:#8250df;
+  --bw-bg:#eaeef2; --bw-fg:#57606a; --bw-bd:#8c959f;
+  --bu-bg:#fff; --bu-fg:#57606a; --bu-bd:#d0d7de;
+}
+:root[data-theme="dark"]{
+  --bg:#0d1117; --fg:#e6edf3; --border:#30363d; --th-bg:#161b22; --row-alt:#161b22;
+  --link:#4493f8; --muted:#8b949e;
+  --danger:#ff7b72; --accent:#4493f8; --success:#3fb950;
+  --bo-bg:#12261c; --bo-fg:#3fb950; --bo-bd:#238636;
+  --bf-bg:#2b1a3d; --bf-fg:#bc8cff; --bf-bd:#8957e5;
+  --bw-bg:#21262d; --bw-fg:#8b949e; --bw-bd:#484f58;
+  --bu-bg:#0d1117; --bu-fg:#8b949e; --bu-bd:#30363d;
+}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
-  margin:1.5rem;color:#1f2328;background:#fff;line-height:1.45}
+  margin:1.5rem;color:var(--fg);background:var(--bg);line-height:1.45}
 h1{font-size:1.5rem} h2{font-size:1.15rem;margin-top:1.6rem}
-h1,h2{border-bottom:1px solid #d0d7de;padding-bottom:.3rem}
-a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
-.meta{color:#656d76;font-size:13px;margin:.2rem 0 1rem}
+h1,h2{border-bottom:1px solid var(--border);padding-bottom:.3rem}
+a{color:var(--link);text-decoration:none} a:hover{text-decoration:underline}
+.meta{color:var(--muted);font-size:13px;margin:.2rem 0 1rem}
 table{border-collapse:collapse;width:100%;margin:.5rem 0 1rem;font-size:13px}
-th,td{border:1px solid #d0d7de;padding:5px 8px;text-align:left;vertical-align:top}
-th{background:#f6f8fa;position:sticky;top:0;z-index:1}
-tbody tr:nth-child(even){background:#f9fafb}
+th,td{border:1px solid var(--border);padding:5px 8px;text-align:left;vertical-align:top}
+th{background:var(--th-bg);position:sticky;top:0;z-index:1}
+tbody tr:nth-child(even){background:var(--row-alt)}
 td.test{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
   white-space:nowrap;max-width:34ch;overflow:hidden;text-overflow:ellipsis}
-td.note{max-width:44ch;color:#57606a;font-size:12px}
-.muted{color:#656d76;font-size:12px}
+td.note{max-width:44ch;color:var(--muted);font-size:12px}
+.muted{color:var(--muted);font-size:12px}
 .chip{display:inline-block;padding:1px 7px;border-radius:2em;font-size:11px;
   font-weight:600;color:#fff;white-space:nowrap}
 .badge{display:inline-block;padding:0 6px;border-radius:2em;font-size:11px;
   font-weight:600;text-decoration:none;margin:1px 3px 1px 0;white-space:nowrap;
   border:1px solid transparent}
-.b-open{background:#dafbe1;color:#1a7f37;border-color:#1a7f37}
-.b-fixed{background:#fbefff;color:#8250df;border-color:#8250df}
-.b-wontfix{background:#eaeef2;color:#57606a;border-color:#8c959f}
-.b-unknown{background:#fff;color:#57606a;border-color:#d0d7de}
-.res-FAIL{color:#cf222e;font-weight:700}
-.res-XPASS{color:#0969da;font-weight:700}
-.ok{color:#1a7f37;font-weight:600}.bad{color:#cf222e;font-weight:600}
+.b-open{background:var(--bo-bg);color:var(--bo-fg);border-color:var(--bo-bd)}
+.b-fixed{background:var(--bf-bg);color:var(--bf-fg);border-color:var(--bf-bd)}
+.b-wontfix{background:var(--bw-bg);color:var(--bw-fg);border-color:var(--bw-bd)}
+.b-unknown{background:var(--bu-bg);color:var(--bu-fg);border-color:var(--bu-bd)}
+.res-FAIL{color:var(--danger);font-weight:700}
+.res-XPASS{color:var(--accent);font-weight:700}
+.ok{color:var(--success);font-weight:600}.bad{color:var(--danger);font-weight:600}
 details{margin:.3rem 0}summary{cursor:pointer;font-weight:600}
 #filter{margin:.6rem 0;padding:6px 10px;width:min(360px,90%);font-size:13px;
-  border:1px solid #d0d7de;border-radius:6px}
-.count{color:#656d76;font-weight:400;font-size:12px}
+  border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg)}
+.count{color:var(--muted);font-weight:400;font-size:12px}
+#themeBtn{position:fixed;top:12px;right:14px;z-index:5;padding:5px 11px;font-size:13px;
+  border:1px solid var(--border);border-radius:6px;background:var(--th-bg);color:var(--fg);
+  cursor:pointer}
 """
 
 _HTML_JS = """
 function filt(v){v=v.toLowerCase();
   document.querySelectorAll('tr.f').forEach(function(r){
     r.style.display=r.textContent.toLowerCase().indexOf(v)>=0?'':'none';});}
+function _syncThemeBtn(){
+  var t=document.documentElement.getAttribute('data-theme')||'light';
+  var b=document.getElementById('themeBtn');
+  if(b)b.textContent=(t==='dark')?'☀️ Light':'🌙 Dark';}
+function toggleTheme(){
+  var c=(document.documentElement.getAttribute('data-theme')==='dark')?'light':'dark';
+  document.documentElement.setAttribute('data-theme',c);
+  try{localStorage.setItem('otss-theme',c);}catch(e){}
+  _syncThemeBtn();}
+_syncThemeBtn();
 """
+
+# Runs in <head> before the body paints so the stored/preferred theme is applied
+# with no flash of the wrong colour scheme.
+_HTML_THEME_INIT = (
+    "<script>(function(){try{var t=localStorage.getItem('otss-theme');"
+    "if(!t)t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)')"
+    ".matches)?'dark':'light';"
+    "document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>"
+)
 
 
 def _label_color(label: str) -> str:
@@ -1694,8 +1734,10 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
     h: list[str] = [
         "<!doctype html><html lang=en><head><meta charset=utf-8>",
         f"<title>offload-test-suite report {esc(run_ts)}</title>",
+        _HTML_THEME_INIT,
         f"<style>{_HTML_CSS}</style>",
         "</head><body>",
+        '<button id=themeBtn onclick="toggleTheme()">Dark</button>',
         f"<h1>offload-test-suite scheduled-workflow report</h1>",
         f'<div class=meta>{esc(run_ts)} \u00b7 repo <code>{esc(REPO)}</code> '
         f"\u00b7 {len(summary)} scheduled workflows</div>",
