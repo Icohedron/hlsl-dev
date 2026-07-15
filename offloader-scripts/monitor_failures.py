@@ -512,6 +512,27 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
         "Base label was `runtime_unknown`. The test passes elsewhere, so the failure is "
         "at least *runtime-dependent* — but we couldn't pinpoint driver-crash vs "
         "miscompile from the log. Manual inspection needed; `axes` narrows the search.",
+    "gpu_api_driver_suspected_miscompile":
+        "Base label was `runtime_miscompile`. The failing set is confined to a single "
+        "(GPU vendor, API) pair, AND that same GPU passes the test on a DIFFERENT API "
+        "while that same API passes on a DIFFERENT GPU. A vendor's Vulkan and D3D12 "
+        "drivers are separate implementations, so a wrong result confined to e.g. "
+        "NVIDIA-Vulkan — with NVIDIA-D3D12 and AMD-Vulkan both correct — points at that "
+        "vendor's driver for that ONE API, not the vendor broadly or the API broadly. "
+        "Tighter than runtime_driver_suspected; the two passing peers rule out the whole "
+        "vendor driver and the whole backend. Still 'suspected' (test tolerance / "
+        "under-specified inputs can also diverge). `axes` shows gpu_pattern + api_pattern.",
+    "gpu_api_driver_suspected_crash":
+        "Base label was `runtime_driver_error`, attributed to a single (GPU vendor, API) "
+        "pair on the same evidence as gpu_api_driver_suspected_miscompile: the same GPU "
+        "passes on another API and the same API passes on another GPU, so the crash is "
+        "specific to that vendor's driver for that one API (e.g. NVIDIA's Vulkan driver) "
+        "rather than the vendor or backend as a whole. Root cause unconfirmed — could be "
+        "that driver OR a test-spec issue only it rejects.",
+    "gpu_api_driver_suspected_unknown":
+        "Base label was `runtime_unknown`, attributed to a single (GPU vendor, API) pair "
+        "(same GPU passes on another API, same API passes on another GPU). The per-API "
+        "vendor driver correlates but the specific failure mode wasn't parsed from the log.",
     "api_backend_suspected_miscompile":
         "Base label was `runtime_miscompile`, and the failing set aligns cleanly on the "
         "**API axis** (all failures share one API, at least one workflow on a different "
@@ -981,6 +1002,24 @@ def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
         if axis == "compiler" and (fvals & pvals):
             continue
         out[f"{axis}_pattern"] = f"{val}-only"
+
+    # gpu×api pair. A vendor's Vulkan and D3D12 drivers are separate
+    # implementations, so when the failing set aligns on BOTH a single GPU vendor
+    # and a single API, the vendor's driver for that ONE API is the tightest
+    # suspect — tighter than the whole vendor driver or the whole API backend.
+    # But only claim it when the matrix rules out both broader explanations with
+    # an actual passing peer: the same GPU must PASS on another API (so it isn't
+    # the vendor's whole driver stack) AND the same API must PASS on another GPU
+    # (so it isn't the whole backend). e.g. NVIDIA-Vulkan fails while
+    # NVIDIA-D3D12 and AMD-Vulkan pass -> NVIDIA's Vulkan driver specifically.
+    # This is strictly stronger than the gpu/api contrasts above, so it only ever
+    # sharpens the blame, never loosens it.
+    if "gpu_pattern" in out and "api_pattern" in out:
+        g, a = fa[0]["gpu"], fa[0]["api"]  # all fails share these (patterns fired)
+        same_gpu_other_api = any(p["gpu"] == g and p["api"] != a for p in pa)
+        same_api_other_gpu = any(p["api"] == a and p["gpu"] != g for p in pa)
+        if same_gpu_other_api and same_api_other_gpu:
+            out["gpu_api_pattern"] = f"{g}+{a}-only"
     return out
 
 
@@ -1939,6 +1978,12 @@ def divergence_suspect_prefix(axes: dict) -> str:
 
     Priority (most specific first):
 
+      * gpu+api pair -> `gpu_api_driver_suspected` (a vendor's driver for ONE
+        API): the failing set is confined to a single (GPU, API) pair, the same
+        GPU passes on another API, and the same API passes on another GPU. A
+        vendor's Vulkan and D3D12 drivers are distinct implementations, so this
+        is tighter than — and takes priority over — the whole-vendor-driver and
+        whole-API-backend explanations, both of which the passing peers rule out.
       * gpu-aligned  -> `runtime_driver_suspected` (per-vendor driver): the same
         shader binary is right on some GPUs and wrong on others.
       * api-aligned  -> `api_backend_suspected` (API/backend): same binary,
@@ -1954,9 +1999,11 @@ def divergence_suspect_prefix(axes: dict) -> str:
         output isn't a bad reference.
       * otherwise    -> `runtime_driver_suspected` (environment-dependent).
 
-    Returns one of 'runtime_driver_suspected' | 'api_backend_suspected' |
-    'compiler_suspected'.
+    Returns one of 'gpu_api_driver_suspected' | 'runtime_driver_suspected' |
+    'api_backend_suspected' | 'compiler_suspected'.
     """
+    if "gpu_api_pattern" in axes:
+        return "gpu_api_driver_suspected"
     if "gpu_pattern" in axes:
         return "runtime_driver_suspected"
     if "api_pattern" in axes:
@@ -2638,7 +2685,12 @@ def main() -> None:
                "at once, by the value tuple across all of them — so the contrast is",
                "explicit. On gpu/api the",
                "shader binary is identical across workflows, so the label is upgraded to",
-               "a 'suspected' driver/backend layer (never 'confirmed'). A test is",
+               "a 'suspected' driver/backend layer (never 'confirmed'). When the failing",
+               "set is confined to a single **(GPU vendor, API) pair** and that same GPU",
+               "passes on another API while that same API passes on another GPU, it is",
+               "upgraded further to `gpu_api_driver_suspected_*` (a vendor's Vulkan and",
+               "D3D12 drivers are separate implementations, so the fault is that vendor's",
+               "driver for that one API). A test is"
                "upgraded to `compiler_suspected_*` only under a clean compiler split —",
                "every workflow using one compiler fails, none of them pass, and the other",
                "compiler passes — which is the high-confidence case that it's the compiler",

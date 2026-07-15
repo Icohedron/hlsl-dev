@@ -129,6 +129,35 @@ class AttributeDivergence(unittest.TestCase):
         )
         self.assertEqual(a, {"host_pattern": "ARM64-only"})
 
+    def test_gpu_api_pair_when_both_cross_passes_exist(self):
+        # NVIDIA-Vulkan fails on both compilers; NVIDIA-D3D12 passes (same GPU,
+        # other API) AND AMD-Vulkan passes (same API, other GPU). The vendor's
+        # Vulkan driver specifically is the tightest suspect.
+        a = mf.attribute_divergence(
+            fails_on=["Windows Vulkan NVIDIA Clang", "Windows Vulkan NVIDIA DXC"],
+            passes_on=["Windows D3D12 NVIDIA Clang", "Windows D3D12 NVIDIA DXC",
+                       "Windows Vulkan AMD Clang", "Windows Vulkan AMD DXC"],
+        )
+        self.assertEqual(a.get("gpu_api_pattern"), "NVIDIA+Vulkan-only")
+
+    def test_no_gpu_api_pair_without_same_gpu_other_api_pass(self):
+        # NVIDIA-Vulkan fails; the only passers differ on BOTH dims (D3D12 AMD),
+        # so we can't tell the vendor driver from the backend -> no pair.
+        a = mf.attribute_divergence(
+            fails_on=["Windows Vulkan NVIDIA Clang", "Windows Vulkan NVIDIA DXC"],
+            passes_on=["Windows D3D12 AMD Clang", "Windows D3D12 AMD DXC"],
+        )
+        self.assertNotIn("gpu_api_pattern", a)
+
+    def test_no_gpu_api_pair_when_whole_vendor_fails(self):
+        # NVIDIA fails on BOTH APIs -> not confined to one (gpu, api) pair; the
+        # api_pattern doesn't even fire, so no pair (whole-vendor driver).
+        a = mf.attribute_divergence(
+            fails_on=["Windows Vulkan NVIDIA Clang", "Windows D3D12 NVIDIA Clang"],
+            passes_on=["Windows Vulkan AMD Clang", "Windows D3D12 AMD Clang"],
+        )
+        self.assertNotIn("gpu_api_pattern", a)
+
     def test_variant_only(self):
         # A test fails on both GBV variants and passes on both base variants.
         # (Hypothetical — the real workflow set only has a Clang GBV, no DXC
@@ -968,6 +997,12 @@ class ClassificationLegend(unittest.TestCase):
         "runtime_driver_suspected_miscompile",
         "runtime_driver_suspected_crash",
         "runtime_driver_suspected_unknown",
+        # Per-(GPU vendor, API) driver blame: failing set confined to one
+        # (gpu, api) pair, with the same gpu passing on another api and the same
+        # api passing on another gpu (Vulkan/D3D12 drivers are separate).
+        "gpu_api_driver_suspected_miscompile",
+        "gpu_api_driver_suspected_crash",
+        "gpu_api_driver_suspected_unknown",
         "api_backend_suspected_miscompile",
         "api_backend_suspected_crash",
         "api_backend_suspected_unknown",
@@ -1134,6 +1169,15 @@ class DivergenceSuspectPrefix(unittest.TestCase):
         self.assertEqual(
             mf.divergence_suspect_prefix({"gpu_pattern": "AMD-only", "api_pattern": "Vulkan-only"}),
             "runtime_driver_suspected")
+
+    def test_gpu_api_pair_wins_over_gpu(self):
+        # A gpu+api pair (with the cross-passing peers proven) is tighter than the
+        # whole-vendor driver and takes priority.
+        self.assertEqual(
+            mf.divergence_suspect_prefix({
+                "gpu_pattern": "NVIDIA-only", "api_pattern": "Vulkan-only",
+                "gpu_api_pattern": "NVIDIA+Vulkan-only"}),
+            "gpu_api_driver_suspected")
 
     def test_api_when_no_gpu(self):
         self.assertEqual(
