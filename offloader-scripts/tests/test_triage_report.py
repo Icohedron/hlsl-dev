@@ -233,5 +233,84 @@ class CompareUrl(unittest.TestCase):
         self.assertIsNone(rng.compare_url)
 
 
+# ---------------------------------------------------------------------------
+# plan_triage_units — consolidation into one unit per unique failure
+# ---------------------------------------------------------------------------
+
+class PlanTriageUnits(unittest.TestCase):
+    def _units_by_key(self, rows):
+        return {u["key"]: u for u in tr.plan_triage_units(rows)}
+
+    def test_build_failures_merge_by_repo_and_detail(self):
+        # Every workflow in a scheduled run builds the same commits, so the same
+        # build break on N workflows is ONE regression -> one unit, rest shared.
+        rows = [
+            {"workflow": "A", "category": "build_failure", "detail": "clang_llvm"},
+            {"workflow": "B", "category": "build_failure", "detail": "clang_llvm"},
+        ]
+        units = tr.plan_triage_units(rows)
+        self.assertEqual(len(units), 1)
+        self.assertEqual(units[0]["workflow"], "A")       # first-seen represents
+        self.assertEqual(units[0]["shared"], ["B"])
+        self.assertEqual(units[0]["strategy"], "bisect")
+
+    def test_build_failures_split_by_repo(self):
+        rows = [
+            {"workflow": "A", "category": "build_failure", "detail": "clang_llvm"},
+            {"workflow": "B", "category": "build_failure", "detail": "dxc"},
+        ]
+        self.assertEqual(len(tr.plan_triage_units(rows)), 2)
+
+    def test_same_test_classification_merges_across_workflows(self):
+        # Same shader binary everywhere -> one (test, classification) failure,
+        # triaged once however many workflows report it.
+        t = {"suite": "S", "test": "t1",
+             "classification": "runtime_driver_suspected_miscompile"}
+        rows = [
+            {"workflow": "A", "tests": [t]},
+            {"workflow": "B", "tests": [t]},
+        ]
+        units = tr.plan_triage_units(rows)
+        self.assertEqual(len(units), 1)
+        self.assertEqual(units[0]["strategy"], "dxil")   # *_miscompile -> DXIL
+        self.assertEqual(units[0]["shared"], ["B"])
+
+    def test_distinct_classifications_of_same_test_are_separate_units(self):
+        rows = [{"workflow": "A", "tests": [
+            {"suite": "S", "test": "t", "classification": "runtime_driver_suspected_crash"},
+            {"suite": "S", "test": "t", "classification": "runtime_driver_suspected_miscompile"},
+        ]}]
+        units = tr.plan_triage_units(rows)
+        self.assertEqual(len(units), 2)
+        self.assertEqual({u["strategy"] for u in units}, {"evidence", "dxil"})
+
+    def test_strategy_dispatch_covers_each_family(self):
+        rows = [{"workflow": "A", "tests": [
+            {"suite": "S", "test": "a", "classification": "shader_compile_clang"},
+            {"suite": "S", "test": "b", "classification": "api_backend_suspected_miscompile"},
+            {"suite": "S", "test": "c", "classification": "api_backend_suspected_crash"},
+        ]}]
+        by_test = {u["test"]: u["strategy"] for u in tr.plan_triage_units(rows)}
+        self.assertEqual(by_test["a"], "bisect")   # shader compile
+        self.assertEqual(by_test["b"], "dxil")     # miscompile beats the suspected-prefix
+        self.assertEqual(by_test["c"], "evidence")
+
+    def test_xpass_and_unhandled_are_skipped(self):
+        rows = [{"workflow": "A", "tests": [
+            {"suite": "S", "test": "x", "classification": "xpass"},
+            {"suite": "S", "test": "y", "classification": "runtime_pipeline_error"},
+        ]}]
+        self.assertEqual(tr.plan_triage_units(rows), [])
+
+    def test_first_seen_order_is_preserved(self):
+        rows = [
+            {"workflow": "A", "category": "build_failure", "detail": "dxc"},
+            {"workflow": "B", "tests": [
+                {"suite": "S", "test": "t", "classification": "shader_compile_clang"}]},
+        ]
+        units = tr.plan_triage_units(rows)
+        self.assertEqual([u["kind"] for u in units], ["build", "shader"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,13 @@ Triage strategies, dispatched by category/classification:
            never run (the environment may have no GPU / software renderer):
            miscompiles are reasoned about by interpreting the DXIL statically.
 
+The report is first consolidated into the UNIQUE failures worth reasoning about
+(plan_triage_units), so the agent runs once per distinct failure instead of once
+per workflow: one triage per unique (test, classification) pair — mirroring
+monitor_failures' cross-workflow "test failure summary" — and one per unique
+build break. Every workflow in a scheduled run builds the same commits from the
+same source, so a failure surfacing on N workflows is a single regression; the
+extra workflows are recorded as `shared_workflows`.
 Deterministic evidence gathering is stdlib-only and works fully headless. The
 reasoning-heavy steps delegate to an agent (`pi -p`) when one is available;
 with --no-agent the assembled evidence + a ready-to-use prompt are written for
@@ -791,6 +798,66 @@ class Ctx:
 BISECT_CLS = {"shader_compile_dxc", "shader_compile_clang"}
 
 
+def plan_triage_units(rows: list[dict]) -> list[dict]:
+    """Collapse a report's per-workflow rows into the unique failures to triage.
+
+    Produces one unit per distinct failure, in first-seen order, each carrying a
+    representative ``workflow`` (whose logs supply the excerpt / commit range)
+    and the ``shared`` workflows that hit the same failure:
+
+      * one BUILD unit per (repo, detail) — every workflow in a scheduled run
+        builds the same compiler commits, so a build break on N workflows is one
+        regression;
+      * one TEST unit per (suite, test, classification) — the same shader binary
+        is built everywhere, so a given test+classification is one failure
+        however many workflows report it (the cross-workflow "test failure
+        summary" view).
+
+    Pure and side-effect free so the consolidation is unit-testable without an
+    agent, git, or the filesystem. ``strategy`` selects the downstream triager.
+    """
+    units: dict[Any, dict] = {}
+    order: list[Any] = []
+
+    def _add(key: Any, workflow: str, **fields) -> None:
+        u = units.get(key)
+        if u is None:
+            units[key] = {"key": key, "workflow": workflow, "shared": [], **fields}
+            order.append(key)
+        elif workflow != u["workflow"] and workflow not in u["shared"]:
+            u["shared"].append(workflow)
+
+    for row in rows:
+        wf = row.get("workflow")
+        category = row.get("category")
+        detail = row.get("detail")
+
+        if category == "build_failure":
+            repo = repo_for_failure(category, detail, None)
+            slug = repo.slug if repo else None
+            _add(("build", slug, detail), wf, kind="build", strategy="bisect",
+                 category=category, detail=detail, suite="", test="", cls=None,
+                 label=f"{slug or '?'} build ({detail})")
+            continue
+
+        for t in row.get("tests") or []:
+            cls = t.get("classification") or ""
+            suite, test = t.get("suite"), t.get("test")
+            if cls in BISECT_CLS:
+                key, kind, strategy = ("shader", suite, test, cls), "shader", "bisect"
+            elif cls.endswith("_miscompile"):
+                key, kind, strategy = ("miscompile", suite, test, cls), "miscompile", "dxil"
+            elif cls.startswith(("runtime_driver_suspected", "api_backend_suspected")):
+                key, kind, strategy = ("evidence", suite, test, cls), "evidence", "evidence"
+            else:
+                continue  # xpass etc. — already carries linked issues
+            _add(key, wf, kind=kind, strategy=strategy, category=category,
+                 detail=detail, suite=suite, test=test, cls=cls,
+                 label=f"{suite}::{test} {cls}")
+
+    return [units[k] for k in order]
+
+
 def triage_report(report_dir: pathlib.Path, args) -> dict:
     history = load_history(report_dir)
     target = history.snaps[history.target_idx]
@@ -814,85 +881,38 @@ def triage_report(report_dir: pathlib.Path, args) -> dict:
         divergences=divergences,
     )
 
+    # Consolidate the report into UNIQUE triage units so the reasoning agent
+    # runs ONCE per distinct failure rather than once per workflow. This mirrors
+    # monitor_failures' cross-workflow "test failure summary" (test_failure_rows /
+    # divergences.json): the same shader binary is built for every workflow, so a
+    # given (test, classification) is a single failure however many workflows
+    # report it; and every workflow in a scheduled run builds the same compiler
+    # commits, so one build break is one regression. See plan_triage_units.
+    units = plan_triage_units(target.rows)
+
     items: list[dict] = []
-    seen: dict[Any, dict] = {}   # dedup key -> already-emitted item meta
-    n = 0
     deduped = 0
-
-    def _repo_slug(repo: RepoCfg | None) -> str | None:
-        return repo.slug if repo else None
-
-    for row in target.rows:
-        wf = row["workflow"]
-        category = row.get("category")
-        detail = row.get("detail")
-
-        if category == "build_failure":
-            repo = repo_for_failure(category, detail, None)
-            rng = ctx.history.bound_build(repo, wf)
-            # Same repo + same good..bad commit range == the same build break,
-            # regardless of which workflow surfaced it. Only merge when we could
-            # actually pin commits; otherwise keep them separate (can't prove same).
-            if rng.good_sha or rng.bad_sha:
-                key = ("build", _repo_slug(repo), rng.good_sha, rng.bad_sha)
-            else:
-                key = ("build", _repo_slug(repo), detail, wf)
-            dup = seen.get(key)
-            if dup is not None:
-                _mark_shared(dup, wf)
-                deduped += 1
-                print(f"  [dedup   ] {wf} shares build triage -> triage/{dup['file']}",
-                      file=sys.stderr)
-                continue
-            _emit(ctx, items, "bisect", wf,
-                  triage_bisect(ctx, wf, category, detail, "", "", None, rng),
-                  _slug("build", wf))
-            seen[key] = items[-1]
-            n += 1
-            if args.max and n >= args.max:
-                break
-            continue
-
-        for t in row.get("tests") or []:
-            cls = t.get("classification") or ""
-            suite, test = t["suite"], t["test"]
-            div = divergences.get((suite, test))
-            if cls in BISECT_CLS:
-                repo = repo_for_failure(category, detail, cls)
-                rng = ctx.history.bound_test(repo, wf, suite, test)
-                if rng.good_sha or rng.bad_sha:
-                    key = ("shader", _repo_slug(repo), suite, test,
-                           rng.good_sha, rng.bad_sha)
-                else:
-                    key = ("shader", suite, test, cls, wf)
-                make = lambda: triage_bisect(ctx, wf, category, detail,
-                                             suite, test, cls, rng)
-            elif cls.endswith("_miscompile"):
-                # DXIL analysis is per-(test, classification); workflow-independent.
-                key = ("miscompile", suite, test, cls)
-                make = lambda: triage_miscompile(ctx, wf, suite, test, cls, div)
-            elif cls.startswith(("runtime_driver_suspected", "api_backend_suspected")):
-                # Evidence report reasons over the whole pass/fail split (div),
-                # so it only needs producing once per (test, classification).
-                key = ("evidence", suite, test, cls)
-                make = lambda: triage_evidence(ctx, wf, suite, test, cls, div)
-            else:
-                continue  # xpass etc. — already carries linked issues
-
-            dup = seen.get(key)
-            if dup is not None:
-                _mark_shared(dup, wf)
-                deduped += 1
-                print(f"  [dedup   ] {wf} shares {suite}::{test} triage "
-                      f"-> triage/{dup['file']}", file=sys.stderr)
-                continue
-
-            res = make()
-            _emit(ctx, items, res[1]["strategy"], wf, res, _slug(wf, suite, test))
-            seen[key] = items[-1]
-            n += 1
-            if args.max and n >= args.max:
-                break
+    for n, u in enumerate(units, 1):
+        wf = u["workflow"]
+        suite, test, cls = u["suite"], u["test"], u["cls"]
+        div = ctx.divergences.get((suite, test))
+        for shared_wf in u["shared"]:
+            print(f"  [dedup   ] {shared_wf} shares {u['label']} "
+                  f"({u['strategy']})", file=sys.stderr)
+        if u["kind"] == "build":
+            res = triage_bisect(ctx, wf, u["category"], u["detail"], "", "", None)
+            slug = _slug("build", wf)
+        elif u["kind"] == "shader":
+            res = triage_bisect(ctx, wf, u["category"], u["detail"], suite, test, cls)
+            slug = _slug(wf, suite, test)
+        elif u["kind"] == "miscompile":
+            res = triage_miscompile(ctx, wf, suite, test, cls, div)
+            slug = _slug(wf, suite, test)
+        else:  # evidence
+            res = triage_evidence(ctx, wf, suite, test, cls, div)
+            slug = _slug(wf, suite, test)
+        _emit(ctx, items, u["strategy"], wf, res, slug, shared=u["shared"])
+        deduped += len(u["shared"])
         if args.max and n >= args.max:
             break
 
@@ -902,21 +922,16 @@ def triage_report(report_dir: pathlib.Path, args) -> dict:
 
 
 def _emit(ctx: Ctx, items: list[dict], strategy: str, workflow: str,
-          res: tuple[str, dict], slug: str) -> None:
+          res: tuple[str, dict], slug: str, shared: list[str] | None = None) -> None:
     md, meta = res
     fname = f"{strategy}__{slug}.md"
     (ctx.triage_dir / fname).write_text(md)
     meta.update({"workflow": workflow, "file": fname})
+    if shared:
+        meta["shared_workflows"] = list(shared)
     items.append(meta)
-    print(f"  [{strategy:8s}] {workflow} -> triage/{fname}", file=sys.stderr)
-
-
-def _mark_shared(item: dict, workflow: str) -> None:
-    """Record that another workflow hit the same failure this item already covers."""
-    shared = item.setdefault("shared_workflows", [])
-    if workflow != item.get("workflow") and workflow not in shared:
-        shared.append(workflow)
-
+    extra = f" (+{len(shared)})" if shared else ""
+    print(f"  [{strategy:8s}] {workflow}{extra} -> triage/{fname}", file=sys.stderr)
 
 def _write_index(ctx: Ctx, items: list[dict], target: Snapshot) -> None:
     total_shared = sum(len(it.get("shared_workflows") or []) for it in items)
