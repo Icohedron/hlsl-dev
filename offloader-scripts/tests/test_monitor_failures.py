@@ -164,6 +164,30 @@ class SameCompilerPasses(unittest.TestCase):
         self.assertFalse(mf.same_compiler_passes(per_wf, "clang"))
 
 
+class GroupPassesByAxis(unittest.TestCase):
+    def test_single_axis_groups_by_that_axis(self):
+        groups = mf.group_passes_by_axis(
+            ["Windows D3D12 AMD DXC", "Windows D3D12 NVIDIA DXC", "macOS Metal Clang"],
+            {"api_pattern": "Vulkan-only"})
+        self.assertEqual(mf.sole_failure_axis({"api_pattern": "Vulkan-only"}), "api")
+        vals = dict(groups)
+        self.assertEqual(sorted(vals), ["D3D12", "Metal"])
+        self.assertEqual(vals["D3D12"], ["Windows D3D12 AMD DXC", "Windows D3D12 NVIDIA DXC"])
+
+    def test_multiple_axes_do_not_group(self):
+        # Fails on Vulkan AND AMD -> the failure is their intersection, so
+        # grouping the pass side by just one (e.g. gpu) would be misleading.
+        self.assertIsNone(mf.sole_failure_axis({"api_pattern": "Vulkan-only",
+                                                "gpu_pattern": "AMD-only"}))
+        self.assertIsNone(mf.group_passes_by_axis(
+            ["Windows D3D12 AMD DXC", "Windows Vulkan NVIDIA DXC"],
+            {"api_pattern": "Vulkan-only", "gpu_pattern": "AMD-only"}))
+
+    def test_no_axis_does_not_group(self):
+        self.assertIsNone(mf.sole_failure_axis({}))
+        self.assertIsNone(mf.group_passes_by_axis(["Windows D3D12 AMD DXC"], {}))
+
+
 class LitBlockParsing(unittest.TestCase):
     def test_extract_failure_blocks_finds_test(self):
         blocks = mf.extract_failure_blocks(load("shader_compile_clang_dxc.txt"))
