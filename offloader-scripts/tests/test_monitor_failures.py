@@ -1091,6 +1091,21 @@ class HtmlReport(unittest.TestCase):
     def test_classification_chip_present(self):
         self.assertIn("chip", self._report())
 
+    def test_axis_rendered_as_chips_not_plain_text(self):
+        h = self._report()
+        self.assertIn('class="axis ax-api"', h)
+        self.assertIn("Vulkan-only", h)
+        # the old plain "api: Vulkan-only" rendering is gone
+        self.assertNotIn("<td>api: Vulkan-only", h)
+
+    def test_axes_legend_paragraph_present(self):
+        h = self._report()
+        self.assertIn("<b>Axes.</b>", h)
+        self.assertIn("non-Vulkan workflow passes", h)
+        # the value key lists every dimension
+        for dim in ("api", "gpu", "compiler", "host", "variant"):
+            self.assertIn(f"<span class=k>{dim}</span>", h)
+
     def test_dark_mode_toggle_present(self):
         h = self._report()
         self.assertIn("id=themeBtn", h)               # toggle button

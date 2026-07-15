@@ -1605,6 +1605,7 @@ _HTML_CSS = """
   --bf-bg:#fbefff; --bf-fg:#8250df; --bf-bd:#8250df;
   --bw-bg:#eaeef2; --bw-fg:#57606a; --bw-bd:#8c959f;
   --bu-bg:#fff; --bu-fg:#57606a; --bu-bd:#d0d7de;
+  --ax-api:#0969da; --ax-gpu:#1a7f37; --ax-compiler:#8250df; --ax-host:#bc4c00; --ax-variant:#6e7781;
 }
 :root[data-theme="dark"]{
   --bg:#0d1117; --fg:#e6edf3; --border:#30363d; --th-bg:#161b22; --row-alt:#161b22;
@@ -1614,6 +1615,7 @@ _HTML_CSS = """
   --bf-bg:#2b1a3d; --bf-fg:#bc8cff; --bf-bd:#8957e5;
   --bw-bg:#21262d; --bw-fg:#8b949e; --bw-bd:#484f58;
   --bu-bg:#0d1117; --bu-fg:#8b949e; --bu-bd:#30363d;
+  --ax-api:#4493f8; --ax-gpu:#3fb950; --ax-compiler:#bc8cff; --ax-host:#e3903c; --ax-variant:#8b949e;
 }
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
   margin:1.5rem;color:var(--fg);background:var(--bg);line-height:1.45}
@@ -1641,6 +1643,14 @@ td.note{max-width:44ch;color:var(--muted);font-size:12px}
 .res-FAIL{color:var(--danger);font-weight:700}
 .res-XPASS{color:var(--accent);font-weight:700}
 .ok{color:var(--success);font-weight:600}.bad{color:var(--danger);font-weight:600}
+.axis{display:inline-block;padding:1px 8px;border-radius:2em;font-size:11px;
+  margin:1px 3px 1px 0;white-space:nowrap;background:var(--th-bg);border:1px solid var(--border)}
+.axis .k{color:var(--muted)} .axis .v{font-weight:700}
+.ax-api{border-color:var(--ax-api)} .ax-api .v{color:var(--ax-api)}
+.ax-gpu{border-color:var(--ax-gpu)} .ax-gpu .v{color:var(--ax-gpu)}
+.ax-compiler{border-color:var(--ax-compiler)} .ax-compiler .v{color:var(--ax-compiler)}
+.ax-host{border-color:var(--ax-host)} .ax-host .v{color:var(--ax-host)}
+.ax-variant{border-color:var(--ax-variant)} .ax-variant .v{color:var(--ax-variant)}
 details{margin:.3rem 0}summary{cursor:pointer;font-weight:600}
 #filter{margin:.6rem 0;padding:6px 10px;width:min(360px,90%);font-size:13px;
   border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg)}
@@ -1691,6 +1701,43 @@ def _label_color(label: str) -> str:
     if l == "xpass":
         return "#0969da"
     return "#57606a"  # unknown / other
+
+
+# Axis dimension -> css class + the value set it can take (also used to render a
+# colour key in the legend).
+_AXIS_CLASS = {"api": "ax-api", "gpu": "ax-gpu", "compiler": "ax-compiler",
+               "host": "ax-host", "variant": "ax-variant"}
+_AXIS_VALUES = [
+    ("api", "D3D12 / Vulkan / Metal"),
+    ("gpu", "AMD / NVIDIA / Intel / QC / Warp / Lavapipe / Metal"),
+    ("compiler", "clang / dxc"),
+    ("host", "x64 / ARM64 / macOS"),
+    ("variant", "GBV / Preview / none"),
+]
+
+
+def _html_axis_chip(dim: str, value: str) -> str:
+    cls = _AXIS_CLASS.get(dim, "ax-variant")
+    return (f'<span class="axis {cls}"><span class=k>{html.escape(dim)}</span> '
+            f'<span class=v>{html.escape(str(value))}</span></span>')
+
+
+def _html_axis_chips(axes: dict) -> str:
+    if not axes:
+        return '<span class="muted">\u2014</span>'
+    return "".join(_html_axis_chip(k.replace("_pattern", ""), v) for k, v in axes.items())
+
+
+def _html_axis_legend() -> str:
+    chips = "".join(_html_axis_chip(dim, vals) for dim, vals in _AXIS_VALUES)
+    return (
+        '<p class=muted><b>Axes.</b> Each divergence row is tagged with the axis '
+        "(dimension) on which its failing set is homogeneous while at least one "
+        "workflow on a different value passes. The dimensions and their values:</p>"
+        f"<p>{chips}</p>"
+        "<p class=muted>e.g. <code>api: Vulkan-only</code> means every failing "
+        "workflow is Vulkan and at least one non-Vulkan workflow passes.</p>"
+    )
 
 
 def _html_chip(label: str) -> str:
@@ -1751,7 +1798,9 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
         for label, n in used_labels.most_common():
             expl = " ".join(CLASSIFICATION_LEGEND.get(label, "(no legend entry)").split())
             h.append(f"<tr><td>{_html_chip(label)}</td><td>{n}</td><td>{esc(expl)}</td></tr>")
-        h.append("</tbody></table></details>")
+        h.append("</tbody></table>")
+        h.append(_html_axis_legend())
+        h.append("</details>")
 
     # Category / detail column legend (collapsible), values that appear.
     used_cat: Counter = Counter()
@@ -1799,12 +1848,10 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
         h.append("<table><thead><tr><th>test</th><th>classification</th><th>axis</th>"
                  "<th>fails on</th><th>passes on</th></tr></thead><tbody>")
         for d in divergences:
-            axis = "; ".join(f"{k.replace('_pattern','')}: {v}"
-                             for k, v in (d.get("axes") or {}).items()) or "\u2014"
             h.append(
                 f'<tr class=f><td class=test>{esc(d["test"])}</td>'
                 f"<td>{_html_chip(d['classification'])}</td>"
-                f"<td>{esc(axis)}</td>"
+                f"<td>{_html_axis_chips(d.get('axes') or {})}</td>"
                 f'<td class=note>{esc(_compact_wf_list(d["fails_on"]))}</td>'
                 f'<td class=note>{esc(_compact_wf_list(d["passes_on"]))}</td></tr>')
         h.append("</tbody></table>")
