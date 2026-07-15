@@ -171,7 +171,13 @@ def _parse_lit_commands(block: str) -> list[dict]:
             cmd = m.group(1)
             kind = "other"
             low = cmd.lower()
-            if re.search(r"[\\/]clang[-_]?dxc(?:\.exe)?['\"]?", low) or "clang_dxc" in low or "clang-dxc" in low:
+            # Shader compiler = clang. Match the clang-dxc binary (clang-dxc /
+            # clang_dxc, any suffix like a version) OR plain clang as a whole
+            # word. `.exe` is optional (Windows only; macOS/Linux have no
+            # extension). Checked before dxc so clang-dxc isn't mistaken for dxc.
+            if (re.search(r"[\\/]clang[-_]?dxc(?:\.exe)?", low)
+                    or re.search(r"[\\/]clang(?:\.exe)?(?=['\"\s]|$)", low)
+                    or "clang-dxc" in low or "clang_dxc" in low):
                 kind = "clang"
             elif re.search(r"[\\/]dxc(?:\.exe)?['\"]?", low):
                 kind = "dxc"
@@ -424,14 +430,17 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
 
     # Test-stage failures — base categories (no cross-workflow data used).
     "shader_compile_dxc":
-        "The `dxc.exe` invocation in the failing test's block exited non-zero — "
-        "DXC couldn't compile the shader. Not the runtime's fault.",
+        "The `dxc` invocation in the failing test's block exited non-zero (`.exe` on "
+        "Windows; no suffix on macOS/Linux) — DXC couldn't compile the shader. Not the "
+        "runtime's fault.",
     "shader_compile_clang":
-        "The clang shader-compile invocation (usually `clang-dxc.exe`, sometimes "
-        "`clang.exe`) in the failing test's block exited non-zero — clang couldn't "
-        "compile the shader. Not the runtime's fault.",
+        "The clang shader-compile invocation (the `clang-dxc` binary, or plain "
+        "`clang`; `.exe` on Windows, no suffix on macOS/Linux) in the failing test's "
+        "block exited non-zero — clang couldn't compile the shader. Not the runtime's "
+        "fault.",
     "runtime_driver_error":
-        "Shader compiled OK, but a later step (typically `offloader.exe`) crashed with "
+        "Shader compiled OK, but a later step (typically the `offloader` / `gpu-exec` "
+        "tool) crashed with "
         "an NT status like 0xC0000005, hit a device-lost / TDR / access-violation "
         "marker, or otherwise reported the driver had gone away.",
     "runtime_pipeline_error":

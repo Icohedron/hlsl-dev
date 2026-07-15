@@ -220,6 +220,29 @@ class LitBlockParsing(unittest.TestCase):
         self.assertEqual(compilers[0]["exit_status"], "1")
         self.assertTrue(compilers[0]["stderr"])
 
+    def _kind(self, cmd: str) -> str:
+        block = f"# executed command: {cmd}\n# error: command failed with exit status: 1"
+        return mf._parse_lit_commands(block)[0]["kind"]
+
+    def test_compiler_kind_is_cross_platform(self):
+        # `.exe` is Windows-only; macOS/Linux invoke the same binaries with no
+        # extension. Detection must not depend on `.exe`.
+        self.assertEqual(self._kind("'C:\\bin\\clang-dxc.exe' -T cs_6_0 s.hlsl"), "clang")
+        self.assertEqual(self._kind("/Users/runner/bin/clang-dxc -T cs_6_0 s.hlsl"), "clang")
+        self.assertEqual(self._kind("/home/runner/bin/clang-dxc -T cs_6_0 s.hlsl"), "clang")
+        self.assertEqual(self._kind("'/Users/runner/bin/dxc' -T cs_6_0 s.hlsl"), "dxc")
+        self.assertEqual(self._kind("/opt/bin/dxc -T cs_6_0 s.hlsl"), "dxc")
+
+    def test_plain_clang_is_detected_as_compiler(self):
+        # clang-dxc is usual, but plain clang can also compile shaders.
+        self.assertEqual(self._kind("/opt/llvm/bin/clang -T cs_6_0 s.hlsl"), "clang")
+        self.assertEqual(self._kind("'/opt/llvm/bin/clang' -T cs_6_0 s.hlsl"), "clang")
+
+    def test_clang_lookalikes_are_not_the_compiler(self):
+        # clang-format / clang++ / clangd are not the shader compiler.
+        self.assertEqual(self._kind("/usr/bin/clang-format -i foo.cpp"), "other")
+        self.assertEqual(self._kind("/usr/bin/clang++ -c host.cpp"), "other")
+
 
 class Classifiers(unittest.TestCase):
     def test_shader_compile_positive(self):
