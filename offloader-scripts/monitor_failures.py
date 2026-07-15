@@ -580,6 +580,30 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
         "pass, the other compiler passes), but the log didn't show whether it crashed "
         "or gave a wrong result. The compiler correlates; exact failure mode unclear.",
 
+    "compiler_backend_suspected_miscompile":
+        "A wrong result confined to ONE compiler on ONE graphics API — e.g. clang on "
+        "Vulkan — where that same compiler is correct on the OTHER API (clang on "
+        "D3D12) AND that same API is correct with the OTHER compiler (dxc on Vulkan). "
+        "clang and dxc each generate code through a separate backend per target "
+        "(DXIL for DirectX, SPIR-V for Vulkan), so this pins the bug on that one "
+        "compiler's backend for that one target (here, clang's SPIR-V code "
+        "generation) — not the whole compiler and not the API's runtime, both of "
+        "which the passing peers clear. Still 'suspected': an under-specified test "
+        "could in principle only accept the other compiler's output on that API.",
+    "compiler_backend_suspected_crash":
+        "A run-time crash confined to ONE compiler on ONE graphics API (e.g. clang on "
+        "Vulkan), while that compiler is fine on the other API and that API is fine "
+        "with the other compiler. Since each compiler has a separate DXIL and SPIR-V "
+        "backend, this points at that one compiler's backend for that one target "
+        "emitting something the runtime rejects. Cause unconfirmed, though — it could "
+        "instead be a test whose pipeline setup only that compiler's output trips on "
+        "that API. Compiler-backend-specific crash, backend bug OR test-spec bug.",
+    "compiler_backend_suspected_unknown":
+        "A run-time failure confined to ONE compiler on ONE graphics API (that "
+        "compiler passes on the other API; that API passes with the other compiler), "
+        "but the log didn't show whether it crashed or gave a wrong result. Points at "
+        "that compiler's backend for that one target (DXIL or SPIR-V); mode unclear.",
+
     # De-blamed compiler failures: the shader didn't build here, but a sibling
     # workflow using the SAME compiler built the identical test fine.
     "shader_compile_dxc_env_suspected":
@@ -1003,13 +1027,17 @@ def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
     *runtime* behaviour, which legitimately varies per configuration (a driver
     bug can be Vulkan-only on NVIDIA yet fine on that same NVIDIA card under
     D3D12), so partial passes within the failing value are expected. The
-    compiler, by contrast, is config-independent: one compiler build emits the
-    same DXIL regardless of which GPU/API later runs it, so if any workflow
-    using the suspected compiler *passes*, the compiler can't be the
-    differentiator (the real cause is a GPU/API/driver the failing set didn't
-    cleanly isolate, or a per-workflow toolchain version skew). In that case we
-    do NOT emit `compiler_pattern`, so a `clang-only` axis never appears while
-    clang is demonstrably passing elsewhere.
+    compiler, by contrast, is largely config-independent: for a given target a
+    compiler build emits the same code regardless of which GPU later runs it, so
+    if any workflow using the suspected compiler *passes on the same API*, the
+    compiler can't be the differentiator for that API (the real cause is a
+    GPU/API/driver the failing set didn't cleanly isolate, or a per-workflow
+    toolchain version skew). In that case we do NOT emit `compiler_pattern`, so a
+    `clang-only` axis never appears while clang is demonstrably passing elsewhere.
+    (A compiler is NOT fully config-independent across APIs, though: clang and dxc
+    each have separate DXIL and SPIR-V backends, so a bug in one backend fails on
+    one API while the compiler passes on the other. That case is caught by
+    `compiler_api_pattern` below, not `compiler_pattern`.)
 
     Note: when `compiler_pattern` *is* emitted (a clean split — every workflow
     using that compiler failed, no such workflow passes, and the OTHER compiler
@@ -1063,6 +1091,30 @@ def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
         same_api_other_gpu = any(p["api"] == a and p["gpu"] != g for p in pass_axes)
         if same_gpu_other_api and same_api_other_gpu:
             out["gpu_api_pattern"] = f"{g}+{a}-only"
+
+    # compiler×api pair. clang and dxc each have SEPARATE codegen backends per
+    # target — DXIL for DirectX, SPIR-V for Vulkan — so a compiler can be correct
+    # on one API yet wrong on the other. Blame that ONE backend only when the
+    # matrix rules out the two broader explanations AND confirms determinism:
+    #   * the same compiler PASSES on the OTHER API  -> not the whole compiler;
+    #   * the same API PASSES with the OTHER compiler -> not the whole API runtime;
+    #   * NO (same compiler, same API) workflow passes -> the compiler's output
+    #     for this target is wrong on every GPU that runs it. A compiler emits the
+    #     identical DXIL/SPIR-V for a target regardless of GPU, so a single
+    #     passing (compiler, API) peer would prove the code is fine and the
+    #     failures are GPU-specific — the same determinism argument as the whole-
+    #     compiler clean partition above.
+    # e.g. clang+Vulkan fails on every GPU while clang+D3D12 and dxc+Vulkan pass
+    # -> clang's SPIR-V codegen specifically. Computed directly (compiler_pattern
+    # is deliberately withheld here — the same compiler passes on the other API).
+    comp = _shared_fail_value(fail_axes, "compiler")
+    api = _shared_fail_value(fail_axes, "api")
+    if comp and api:
+        same_comp_api_passes = any(p["compiler"] == comp and p["api"] == api for p in pass_axes)
+        same_comp_other_api = any(p["compiler"] == comp and p["api"] != api for p in pass_axes)
+        same_api_other_comp = any(p["api"] == api and p["compiler"] != comp for p in pass_axes)
+        if not same_comp_api_passes and same_comp_other_api and same_api_other_comp:
+            out["compiler_api_pattern"] = f"{comp}+{api}-only"
     return out
 
 
@@ -2057,6 +2109,13 @@ def divergence_suspect_prefix(axes: dict) -> str:
         vendor's Vulkan and D3D12 drivers are distinct implementations, so this
         is tighter than — and takes priority over — the whole-vendor-driver and
         whole-API-backend explanations, both of which the passing peers rule out.
+      * compiler+api pair -> `compiler_backend_suspected` (a compiler's codegen
+        backend for ONE target): the failing set is confined to a single
+        (compiler, API) pair, the same compiler passes on the other API, and the
+        same API passes with the other compiler. clang and dxc each have separate
+        DXIL and SPIR-V backends, so this isolates one of them (e.g. clang's
+        SPIR-V path) — tighter than blaming the whole compiler or the whole API
+        backend, both of which the passing peers rule out.
       * gpu-aligned  -> `runtime_driver_suspected` (per-vendor driver): the same
         shader binary is right on some GPUs and wrong on others.
       * api-aligned  -> `api_backend_suspected` (API/backend): same binary,
@@ -2072,11 +2131,18 @@ def divergence_suspect_prefix(axes: dict) -> str:
         output isn't a bad reference.
       * otherwise    -> `runtime_driver_suspected` (environment-dependent).
 
-    Returns one of 'gpu_api_driver_suspected' | 'runtime_driver_suspected' |
-    'api_backend_suspected' | 'compiler_suspected'.
+    The two pairs come first because they're the most specific; they can't both
+    fire in the common cases (gpu+api needs the failing GPUs identical, compiler+
+    api needs the failing compilers identical), and where a single failing cell
+    makes both fire the driver reading is chosen.
+
+    Returns one of 'gpu_api_driver_suspected' | 'compiler_backend_suspected' |
+    'runtime_driver_suspected' | 'api_backend_suspected' | 'compiler_suspected'.
     """
     if "gpu_api_pattern" in axes:
         return "gpu_api_driver_suspected"
+    if "compiler_api_pattern" in axes:
+        return "compiler_backend_suspected"
     if "gpu_pattern" in axes:
         return "runtime_driver_suspected"
     if "api_pattern" in axes:
@@ -2661,6 +2727,10 @@ def main() -> None:
                 t["axes"] = axes
                 # Blame is decided separately, from the stricter contrast/clean-
                 # partition attribution, and names the suspected layer:
+                #   * gpu+api pair -> that vendor's driver for ONE API
+                #     (gpu_api_driver_suspected)
+                #   * compiler+api pair -> that compiler's codegen backend for ONE
+                #     target, DXIL or SPIR-V (compiler_backend_suspected)
                 #   * gpu-aligned -> per-vendor driver (runtime_driver_suspected)
                 #   * api-aligned -> API/backend layer  (api_backend_suspected)
                 #   * compiler-aligned -> the compiler (compiler_suspected), only
@@ -2811,7 +2881,12 @@ def main() -> None:
                "passes on another API while that same API passes on another GPU, it is",
                "upgraded further to `gpu_api_driver_suspected_*` (a vendor's Vulkan and",
                "D3D12 drivers are separate implementations, so the fault is that vendor's",
-               "driver for that one API). A test is"
+               "driver for that one API). Likewise, when the failing set is confined to a",
+               "single **(compiler, API) pair** — that compiler passes on the other API and",
+               "that API passes with the other compiler, and the compiler's output for that",
+               "API fails on every GPU — it becomes `compiler_backend_suspected_*` (clang and",
+               "dxc have separate DXIL and SPIR-V backends, so the fault is that one",
+               "backend, e.g. clang's SPIR-V). A test is"
                "upgraded to `compiler_suspected_*` only under a clean compiler split —",
                "every workflow using one compiler fails, none of them pass, and the other",
                "compiler passes — which is the high-confidence case that it's the compiler",

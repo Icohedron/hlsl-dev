@@ -158,6 +158,38 @@ class AttributeDivergence(unittest.TestCase):
         )
         self.assertNotIn("gpu_api_pattern", a)
 
+    def test_compiler_api_pair_isolates_one_backend(self):
+        # clang+Vulkan fails on EVERY GPU that runs it, while clang+D3D12 passes
+        # (not the whole compiler) and dxc+Vulkan passes (not the whole Vulkan
+        # runtime) -> clang's SPIR-V backend specifically.
+        a = mf.attribute_divergence(
+            fails_on=["Windows Vulkan NVIDIA Clang", "Windows Vulkan AMD Clang"],
+            passes_on=["Windows D3D12 NVIDIA Clang", "Windows D3D12 AMD Clang",
+                       "Windows Vulkan NVIDIA DXC", "Windows Vulkan AMD DXC"],
+        )
+        self.assertEqual(a.get("compiler_api_pattern"), "clang+Vulkan-only")
+
+    def test_no_compiler_api_pair_when_same_compiler_api_passes(self):
+        # clang+Vulkan fails on Lavapipe but PASSES on AMD. A compiler emits the
+        # same SPIR-V regardless of GPU, so a passing clang+Vulkan proves the
+        # backend is fine -> the failure is GPU-specific, not a compiler backend.
+        a = mf.attribute_divergence(
+            fails_on=["Windows ARM64 Lavapipe Clang", "Windows Lavapipe AMD Clang"],
+            passes_on=["Windows Vulkan AMD Clang", "Windows Vulkan AMD DXC",
+                       "Windows D3D12 AMD Clang"],
+        )
+        self.assertNotIn("compiler_api_pattern", a)
+
+    def test_no_compiler_api_pair_when_whole_api_fails(self):
+        # Both compilers fail on Vulkan -> the compiler isn't the differentiator;
+        # stays a plain API-backend pattern, no compiler+api pair.
+        a = mf.attribute_divergence(
+            fails_on=["Windows Vulkan NVIDIA Clang", "Windows Vulkan NVIDIA DXC"],
+            passes_on=["Windows D3D12 NVIDIA Clang", "Windows D3D12 NVIDIA DXC"],
+        )
+        self.assertNotIn("compiler_api_pattern", a)
+        self.assertEqual(a.get("api_pattern"), "Vulkan-only")
+
     def test_variant_only(self):
         # A test fails on both GBV variants and passes on both base variants.
         # (Hypothetical — the real workflow set only has a Clang GBV, no DXC
@@ -1098,6 +1130,12 @@ class ClassificationLegend(unittest.TestCase):
         "compiler_suspected_miscompile",
         "compiler_suspected_crash",
         "compiler_suspected_unknown",
+        # Compiler-backend blame: failure confined to one (compiler, API) pair;
+        # that compiler passes on the other API and that API passes with the
+        # other compiler -> one compiler's DXIL/SPIR-V backend specifically.
+        "compiler_backend_suspected_miscompile",
+        "compiler_backend_suspected_crash",
+        "compiler_backend_suspected_unknown",
         # Shader-compile de-blame (a same-compiler peer compiled it).
         "shader_compile_dxc_env_suspected",
         "shader_compile_clang_env_suspected",
@@ -1265,6 +1303,15 @@ class DivergenceSuspectPrefix(unittest.TestCase):
                 "gpu_pattern": "NVIDIA-only", "api_pattern": "Vulkan-only",
                 "gpu_api_pattern": "NVIDIA+Vulkan-only"}),
             "gpu_api_driver_suspected")
+
+    def test_compiler_api_pair_beats_plain_api(self):
+        # A compiler+api pair isolates one compiler's backend; it's tighter than
+        # blaming the whole API runtime, so it wins over a bare api_pattern.
+        self.assertEqual(
+            mf.divergence_suspect_prefix({
+                "api_pattern": "Vulkan-only",
+                "compiler_api_pattern": "clang+Vulkan-only"}),
+            "compiler_backend_suspected")
 
     def test_api_when_no_gpu(self):
         self.assertEqual(
