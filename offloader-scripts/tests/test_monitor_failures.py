@@ -82,6 +82,29 @@ class AttributeDivergence(unittest.TestCase):
         )
         self.assertEqual(a, {"compiler_pattern": "clang-only"})
 
+    def test_compiler_only_requires_clean_partition(self):
+        # Some Clang workflows PASS this test while others FAIL. Because a
+        # compiler build's DXIL is config-independent, a passing Clang run means
+        # the compiler can't be the differentiator (the split is really per
+        # GPU/API/driver, or a toolchain version skew). We must NOT report a
+        # contradictory 'clang-only' axis while Clang is demonstrably passing.
+        a = mf.attribute_divergence(
+            fails_on=["Windows Vulkan NVIDIA Clang"],
+            passes_on=["Windows D3D12 NVIDIA Clang", "Windows D3D12 NVIDIA DXC"],
+        )
+        self.assertNotIn("compiler_pattern", a)
+
+    def test_gpu_axis_allows_partial_passes_of_same_value(self):
+        # Contrast with the compiler axis: a driver bug can be NVIDIA-only under
+        # Vulkan yet fine on the same NVIDIA card under D3D12 (same binary,
+        # runtime-layer behaviour), so a passing NVIDIA workflow does NOT veto a
+        # gpu_pattern the way a passing Clang vetoes compiler_pattern.
+        a = mf.attribute_divergence(
+            fails_on=["Windows Vulkan NVIDIA DXC"],
+            passes_on=["Windows D3D12 NVIDIA DXC", "Windows Vulkan AMD DXC"],
+        )
+        self.assertEqual(a.get("gpu_pattern"), "NVIDIA-only")
+
     def test_mixed_no_axis(self):
         a = mf.attribute_divergence(
             fails_on=["Windows Vulkan NVIDIA DXC", "Windows D3D12 AMD Clang"],
@@ -827,9 +850,8 @@ class ClassificationLegend(unittest.TestCase):
         "api_backend_suspected_miscompile",
         "api_backend_suspected_crash",
         "api_backend_suspected_unknown",
-        "compiler_suspected_miscompile",
-        "compiler_suspected_crash",
-        "compiler_suspected_unknown",
+        # NOTE: no compiler_suspected_* labels — a compiler-axis divergence is
+        # reported as an axis but never upgraded to a fault-implying label.
     }
 
     def test_every_label_documented(self):
@@ -991,10 +1013,12 @@ class DivergenceSuspectPrefix(unittest.TestCase):
             mf.divergence_suspect_prefix({"api_pattern": "Vulkan-only"}),
             "api_backend_suspected")
 
-    def test_compiler_when_no_gpu_or_api(self):
-        self.assertEqual(
-            mf.divergence_suspect_prefix({"compiler_pattern": "clang-only"}),
-            "compiler_suspected")
+    def test_compiler_axis_is_not_upgraded(self):
+        # A compiler-only split is reported as an axis but must NOT be upgraded
+        # to a fault-implying label — clang-dxc/DXC emit different DXIL, so a
+        # compiler split is different-output, not a proven compiler bug.
+        self.assertIsNone(
+            mf.divergence_suspect_prefix({"compiler_pattern": "clang-only"}))
 
     def test_fallback(self):
         self.assertEqual(
@@ -1032,7 +1056,7 @@ class CompactWorkflow(unittest.TestCase):
     def test_fail_mode(self):
         self.assertEqual(mf._fail_mode("runtime_driver_suspected_crash"), "crash")
         self.assertEqual(mf._fail_mode("api_backend_suspected_miscompile"), "miscompile")
-        self.assertEqual(mf._fail_mode("compiler_suspected_unknown"), "unknown")
+        self.assertEqual(mf._fail_mode("runtime_driver_suspected_unknown"), "unknown")
         # not an upgraded label -> returned as-is
         self.assertEqual(mf._fail_mode("runtime_pipeline_error"), "runtime_pipeline_error")
 
