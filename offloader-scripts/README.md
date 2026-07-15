@@ -88,9 +88,9 @@ For each active workflow it fetches the latest scheduled run; if the run isn't
 
 **Classification tree** (best-effort, log-driven):
 
-- `build_failure` — `clang_llvm` (building llvm-project / clang / clang-dxc),
+- `build_failure` — `clang_llvm` (building llvm-project / clang),
   `dxc` (building DirectXShaderCompiler), or `other` (infra / checkout / cmake).
-- `test_failure` — `shader_compile_dxc` / `shader_compile_clang_dxc` (compiler
+- `test_failure` — `shader_compile_dxc` / `shader_compile_clang` (compiler
   failed to build a shader), or `runtime_*` (shader compiled; failure at
   execute/verify: `driver_error` | `miscompile` | `unknown`).
 - `xpass` — an XFAIL test that unexpectedly passed (with linked GitHub issue).
@@ -99,7 +99,7 @@ For each active workflow it fetches the latest scheduled run; if the run isn't
   others. Labels stay **suspected**; divergence alone is not proof.
 - `compiler_suspected_*` — a runtime failure upgraded to blame the compiler,
   but only on a **clean compiler split**: every workflow using one compiler
-  (clang-dxc or dxc) fails, none of them pass, and the **other** compiler
+  (clang or dxc) fails, none of them pass, and the **other** compiler
   passes. That's the high-confidence case that it's the compiler, not the
   backend/driver (a backend fault would let the same compiler pass elsewhere).
 - `shader_compile_<kind>_env_suspected` — a shader-compile failure **de-blamed**:
@@ -128,13 +128,13 @@ python3 triage_report.py <report> [--no-agent] [--no-fetch-history] [--max N] \
 Triage routes each failure to one of three strategies by its classification:
 
 ### 1. Commit bisect — build & shader-compile failures
-`build_failure`, `shader_compile_dxc`, `shader_compile_clang_dxc`.
+`build_failure`, `shader_compile_dxc`, `shader_compile_clang`.
 
 Every scheduled run records the exact compiler commits it built. The monitor
 now captures these in `summary.json` (`row["commits"]`), so triage bounds
 *when* a failure first appeared **without building anything**: the last report
 where the test/build passed and the first where it failed pin a `good..bad`
-range in `llvm-project` (clang / clang-dxc) or `DirectXShaderCompiler` (dxc).
+range in `llvm-project` (clang) or `DirectXShaderCompiler` (dxc).
 The range is then narrowed to the first faulting commit by reading the diffs in
 the local checkout (agentically, when `pi` is available). If a SHA can't be
 resolved locally, a GitHub `/compare/` URL is emitted instead.

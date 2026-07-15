@@ -70,8 +70,8 @@ class RepoDispatch(unittest.TestCase):
     def test_shader_compile_dxc(self):
         self.assertIs(tr.repo_for_failure("test_failure", None, "shader_compile_dxc"), tr.DXC)
 
-    def test_shader_compile_clang_dxc(self):
-        self.assertIs(tr.repo_for_failure("test_failure", None, "shader_compile_clang_dxc"), tr.LLVM)
+    def test_shader_compile_clang(self):
+        self.assertIs(tr.repo_for_failure("test_failure", None, "shader_compile_clang"), tr.LLVM)
 
     def test_runtime_classification_has_no_repo(self):
         self.assertIsNone(tr.repo_for_failure("test_failure", None, "runtime_driver_suspected_crash"))

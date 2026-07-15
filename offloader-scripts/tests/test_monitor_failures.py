@@ -215,8 +215,8 @@ class LitBlockParsing(unittest.TestCase):
     def test_parse_lit_commands_extracts_compiler_step(self):
         b = first_block("shader_compile_clang_dxc.txt", "matrix_swizzle_one_based")
         cmds = mf._parse_lit_commands(b["block"])
-        compilers = [c for c in cmds if c["kind"] == "clang_dxc"]
-        self.assertTrue(compilers, msg=f"no clang_dxc command; kinds={[c['kind'] for c in cmds]}")
+        compilers = [c for c in cmds if c["kind"] == "clang"]
+        self.assertTrue(compilers, msg=f"no clang command; kinds={[c['kind'] for c in cmds]}")
         self.assertEqual(compilers[0]["exit_status"], "1")
         self.assertTrue(compilers[0]["stderr"])
 
@@ -224,7 +224,7 @@ class LitBlockParsing(unittest.TestCase):
 class Classifiers(unittest.TestCase):
     def test_shader_compile_positive(self):
         b = first_block("shader_compile_clang_dxc.txt", "matrix_swizzle_one_based")
-        self.assertEqual(mf.classify_shader_compile(b["block"]), "shader_compile_clang_dxc")
+        self.assertEqual(mf.classify_shader_compile(b["block"]), "shader_compile_clang")
 
     def test_shader_compile_negative_when_dxc_succeeded(self):
         # dxc succeeded; failure was offloader.exe NT-status crash. A prior
@@ -863,7 +863,7 @@ class ClassificationLegend(unittest.TestCase):
     EXPECTED_LABELS = {
         # Base labels from classify_run
         "build_failure",
-        "shader_compile_dxc", "shader_compile_clang_dxc",
+        "shader_compile_dxc", "shader_compile_clang",
         "runtime_driver_error", "runtime_pipeline_error",
         "runtime_miscompile", "runtime_unknown",
         "xpass",
@@ -881,7 +881,7 @@ class ClassificationLegend(unittest.TestCase):
         "compiler_suspected_unknown",
         # Shader-compile de-blame (a same-compiler peer compiled it).
         "shader_compile_dxc_env_suspected",
-        "shader_compile_clang_dxc_env_suspected",
+        "shader_compile_clang_env_suspected",
     }
 
     def test_every_label_documented(self):
@@ -1563,7 +1563,7 @@ class MainSmoke(unittest.TestCase):
             # Category / detail column legend rendered with the used values.
             self.assertIn("Category / detail column legend", md)
             self.assertIn("reached the lit test stage", md)  # test_failure
-            self.assertIn("llvm-project / clang / clang-dxc subtree", md)  # detail clang_llvm
+            self.assertIn("llvm-project / clang subtree", md)  # detail clang_llvm
             self.assertIn("[#337](", md)
             self.assertIn("| result | test | classification | issues | notes |", md)
             self.assertNotIn("OffloadTest-clang-vk ::", md)  # suite prefix stripped

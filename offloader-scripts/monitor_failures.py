@@ -8,12 +8,12 @@ If it's not "success", download its logs, parse them, and classify each failure.
 Classification tree (best-effort, log-driven):
 
   build_failure
-      clang_llvm    - failure while building llvm-project / clang / clang-dxc
+      clang_llvm    - failure while building llvm-project / clang
       dxc           - failure while building DirectXShaderCompiler
       other         - infra / checkout / cmake / device-setup step failed
   test_failure
       shader_compile_dxc         - dxc failed to compile a shader for a test
-      shader_compile_clang_dxc   - clang-dxc failed to compile a shader
+      shader_compile_clang       - clang failed to compile a shader
       runtime                    - shader compiled; failure was at execute/verify
         (subclass: driver_error | miscompile | unknown)
       xpass                      - test expected to fail but passed
@@ -144,7 +144,7 @@ def _parse_lit_commands(block: str) -> list[dict]:
 
         {"cmd": "...full command line...",
          "stdout": "...", "stderr": "...",
-         "exit_status": "0"|"1"|"0xc0000005"|... (str), "kind": "dxc"|"clang_dxc"|"offloader"|"filecheck"|"other"}
+         "exit_status": "0"|"1"|"0xc0000005"|... (str), "kind": "dxc"|"clang"|"offloader"|"filecheck"|"other"}
 
     lit's output looks like:
         # RUN: at line 84
@@ -172,7 +172,7 @@ def _parse_lit_commands(block: str) -> list[dict]:
             kind = "other"
             low = cmd.lower()
             if re.search(r"[\\/]clang[-_]?dxc(?:\.exe)?['\"]?", low) or "clang_dxc" in low or "clang-dxc" in low:
-                kind = "clang_dxc"
+                kind = "clang"
             elif re.search(r"[\\/]dxc(?:\.exe)?['\"]?", low):
                 kind = "dxc"
             elif "offloader" in low or "gpu-exec" in low:
@@ -219,15 +219,15 @@ def _status_is_failure(status: str) -> bool:
 
 def classify_shader_compile(block: str) -> str | None:
     """
-    Return 'shader_compile_dxc' or 'shader_compile_clang_dxc' iff the dxc /
-    clang-dxc invocation in this failure block itself exited non-zero.
+    Return 'shader_compile_dxc' or 'shader_compile_clang' iff the dxc /
+    clang invocation in this failure block itself exited non-zero.
     Otherwise None (failure was in a later step: offloader / filecheck / etc.).
     """
     cmds = _parse_lit_commands(block)
     if not cmds:
         return None
     for c in cmds:
-        if c["kind"] in ("dxc", "clang_dxc") and _status_is_failure(c["exit_status"]):
+        if c["kind"] in ("dxc", "clang") and _status_is_failure(c["exit_status"]):
             return f"shader_compile_{c['kind']}"
     return None
 
@@ -246,14 +246,14 @@ _GPU_EXEC_ERROR = "gpu-exec: error:"
 
 def classify_runtime(block: str) -> str:
     """
-    Called when the dxc/clang-dxc step succeeded but a later step failed.
+    Called when the dxc/clang step succeeded but a later step failed.
     Distinguish driver crash (offloader access violation, TDR, device lost)
     from a pipeline-state creation failure, a value/image mismatch
     (miscompile), or unknown.
     """
     cmds = _parse_lit_commands(block)
     # Focus on the first failing non-compiler command
-    failing = [c for c in cmds if _status_is_failure(c["exit_status"]) and c["kind"] not in ("dxc", "clang_dxc")]
+    failing = [c for c in cmds if _status_is_failure(c["exit_status"]) and c["kind"] not in ("dxc", "clang")]
 
     driver_markers = (
         "device removed", "device lost", "dxgi_error", "vk_error_device_lost",
@@ -426,9 +426,10 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
     "shader_compile_dxc":
         "The `dxc.exe` invocation in the failing test's block exited non-zero — "
         "DXC couldn't compile the shader. Not the runtime's fault.",
-    "shader_compile_clang_dxc":
-        "The `clang-dxc.exe` invocation in the failing test's block exited non-zero — "
-        "clang-dxc couldn't compile the shader. Not the runtime's fault.",
+    "shader_compile_clang":
+        "The clang shader-compile invocation (usually `clang-dxc.exe`, sometimes "
+        "`clang.exe`) in the failing test's block exited non-zero — clang couldn't "
+        "compile the shader. Not the runtime's fault.",
     "runtime_driver_error":
         "Shader compiled OK, but a later step (typically `offloader.exe`) crashed with "
         "an NT status like 0xC0000005, hit a device-lost / TDR / access-violation "
@@ -502,12 +503,12 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
         "API/backend correlates but the specific failure mode wasn't parsed from the log.",
     "compiler_suspected_miscompile":
         "Base label was `runtime_miscompile`, upgraded on the **compiler axis**: every "
-        "workflow using one compiler (clang-dxc OR dxc) failed this test, NO workflow "
+        "workflow using one compiler (clang OR dxc) failed this test, NO workflow "
         "using that compiler passed it, and at least one workflow using the OTHER "
         "compiler passed — with no per-GPU or per-API alignment. Every workflow runs "
         "the exact same test from the exact same source, so wrong output confined to "
         "one compiler (while the other compiler is correct) is high-confidence evidence "
-        "of that compiler's frontend/codegen (e.g. a clang-dxc vs DXC DXIL difference) "
+        "of that compiler's frontend/codegen (e.g. a clang vs DXC DXIL difference) "
         "rather than a driver or backend — if a driver/backend were at fault the same "
         "compiler would fail there too, but here it passes on the other compiler. Still "
         "'suspected': an under-specified test/golden could in principle only accept one "
@@ -533,11 +534,11 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
         "the same test successfully — so dxc itself is not at fault. Suspect a "
         "per-workflow toolchain build/version, environment, or flags difference rather "
         "than a DXC bug.",
-    "shader_compile_clang_dxc_env_suspected":
-        "`clang-dxc` failed to compile the shader here, but a peer workflow using "
-        "clang-dxc compiled the same test successfully — so clang-dxc itself is not at "
+    "shader_compile_clang_env_suspected":
+        "`clang` failed to compile the shader here, but a peer workflow using "
+        "clang compiled the same test successfully — so clang itself is not at "
         "fault. Suspect a per-workflow toolchain build/version, environment, or flags "
-        "difference rather than a clang-dxc bug.",
+        "difference rather than a clang bug.",
 }
 
 
@@ -564,7 +565,7 @@ CATEGORY_LEGEND: dict[str, str] = {
 DETAIL_LEGEND: dict[str, str] = {
     # build_failure subtree (from classify_build_failure)
     "clang_llvm":
-        "Build error was in the llvm-project / clang / clang-dxc subtree.",
+        "Build error was in the llvm-project / clang subtree.",
     "dxc":
         "Build error was in DirectXShaderCompiler.",
     "other":
@@ -2323,8 +2324,8 @@ def main() -> None:
             # workflow using the same compiler passed this test; a same-compiler
             # pass proves the compiler CAN build it, so this failure is a
             # per-workflow toolchain/env difference, not a compiler defect.
-            if cls in ("shader_compile_clang_dxc", "shader_compile_dxc"):
-                comp = "clang" if cls == "shader_compile_clang_dxc" else "dxc"
+            if cls in ("shader_compile_clang", "shader_compile_dxc"):
+                comp = "clang" if cls == "shader_compile_clang" else "dxc"
                 if same_compiler_passes(per_wf, comp):
                     t["classification"] = f"{cls}_env_suspected"
                 continue
@@ -2461,7 +2462,7 @@ def main() -> None:
                "Tests that fail on some workflows but pass on others, one row per",
                "(test, classification). The same test source runs everywhere, so the",
                "split points at something configuration-specific: a per-vendor driver",
-               "bug, an API/backend bug, a compiler (DXC vs clang-dxc) codegen",
+               "bug, an API/backend bug, a compiler (DXC vs clang) codegen",
                "difference, or a test that specifies pipeline inputs/outputs in a way",
                "only some configurations reject. The **axis** column names the axis on",
                "which the failing set is homogeneous (e.g. `api: Vulkan-only` = every",

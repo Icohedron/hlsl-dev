@@ -8,13 +8,13 @@ writes triage artifacts under <report>/triage/.
 
 Triage strategies, dispatched by category/classification:
 
-  * build_failure / shader_compile_dxc / shader_compile_clang_dxc
+  * build_failure / shader_compile_dxc / shader_compile_clang
         -> COMMIT BISECT. Each scheduled run records, in its logs, the exact
            compiler commits it built ("Syncing repository: X" -> "HEAD is now
            at <sha>"). Because the monitor runs on a schedule, the report
            history lets us bound *when* a failure first appeared: the last
            report where the test/build passed and the first where it failed
-           pin a good..bad range in llvm-project (clang / clang-dxc) or
+           pin a good..bad range in llvm-project (clang) or
            DirectXShaderCompiler (dxc) — with no building required. The range
            is then (optionally, agentically) narrowed to the first faulting
            commit by reading the diffs in the local checkout.
@@ -83,7 +83,7 @@ def repo_for_failure(category: str | None, detail: str | None,
         return DXC if detail == "dxc" else LLVM  # clang_llvm / other / unknown
     if classification == "shader_compile_dxc":
         return DXC
-    if classification == "shader_compile_clang_dxc":
+    if classification == "shader_compile_clang":
         return LLVM
     return None
 
@@ -788,7 +788,7 @@ class Ctx:
         return self.llvm_root if repo is LLVM else self.dxc_root
 
 
-BISECT_CLS = {"shader_compile_dxc", "shader_compile_clang_dxc"}
+BISECT_CLS = {"shader_compile_dxc", "shader_compile_clang"}
 
 
 def triage_report(report_dir: pathlib.Path, args) -> dict:

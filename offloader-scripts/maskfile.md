@@ -50,7 +50,7 @@ Triages a report produced by `monitor_failures.py` (`mask monitor`). Writes
 triage artifacts under `<report>/triage/`:
 
 * **build / shader-compile failures** — bounds the first-faulting commit range
-  in `llvm-project` (clang / clang-dxc) or `DirectXShaderCompiler` (dxc) by
+  in `llvm-project` (clang) or `DirectXShaderCompiler` (dxc) by
   comparing across the report history (no building required), then narrows to
   the culprit commit.
 * **suspected driver / API-backend failures** — writes an evidence report from
