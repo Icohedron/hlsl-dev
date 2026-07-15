@@ -1106,6 +1106,17 @@ class HtmlReport(unittest.TestCase):
         for dim in ("api", "gpu", "compiler", "host", "variant"):
             self.assertIn(f"<span class=k>{dim}</span>", h)
 
+    def test_toolbar_has_title_timestamp_filter_and_toggle(self):
+        h = self._report()
+        self.assertIn("<div id=toolbar>", h)
+        self.assertIn("<span class=title>offload-test-suite report</span>", h)
+        self.assertIn("2026-07-14T00-00-00Z", h)      # timestamp in the sub span
+        # filter + toggle live in the toolbar; exactly one of each in the doc
+        self.assertEqual(h.count("id=filter"), 1)
+        self.assertEqual(h.count("id=themeBtn"), 1)
+        # the old in-flow header is gone (title/timestamp now live in the bar)
+        self.assertNotIn("<h1>", h)
+
     def test_dark_mode_toggle_present(self):
         h = self._report()
         self.assertIn("id=themeBtn", h)               # toggle button

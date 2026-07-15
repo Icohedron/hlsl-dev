@@ -1618,14 +1618,14 @@ _HTML_CSS = """
   --ax-api:#4493f8; --ax-gpu:#3fb950; --ax-compiler:#bc8cff; --ax-host:#e3903c; --ax-variant:#8b949e;
 }
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
-  margin:1.5rem;color:var(--fg);background:var(--bg);line-height:1.45}
+  margin:0 1.5rem 1.5rem;padding-top:3.4rem;color:var(--fg);background:var(--bg);line-height:1.45}
 h1{font-size:1.5rem} h2{font-size:1.15rem;margin-top:1.6rem}
 h1,h2{border-bottom:1px solid var(--border);padding-bottom:.3rem}
 a{color:var(--link);text-decoration:none} a:hover{text-decoration:underline}
 .meta{color:var(--muted);font-size:13px;margin:.2rem 0 1rem}
 table{border-collapse:collapse;width:100%;margin:.5rem 0 1rem;font-size:13px}
 th,td{border:1px solid var(--border);padding:5px 8px;text-align:left;vertical-align:top}
-th{background:var(--th-bg);position:sticky;top:0;z-index:1}
+th{background:var(--th-bg);position:sticky;top:46px;z-index:1}
 tbody tr:nth-child(even){background:var(--row-alt)}
 td.test{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
   white-space:nowrap;max-width:34ch;overflow:hidden;text-overflow:ellipsis}
@@ -1652,10 +1652,16 @@ td.note{max-width:44ch;color:var(--muted);font-size:12px}
 .ax-host{border-color:var(--ax-host)} .ax-host .v{color:var(--ax-host)}
 .ax-variant{border-color:var(--ax-variant)} .ax-variant .v{color:var(--ax-variant)}
 details{margin:.3rem 0}summary{cursor:pointer;font-weight:600}
-#filter{margin:.6rem 0;padding:6px 10px;width:min(360px,90%);font-size:13px;
+#toolbar{position:fixed;top:0;left:0;right:0;z-index:6;display:flex;align-items:center;
+  gap:12px;padding:7px 14px;background:var(--th-bg);border-bottom:1px solid var(--border);
+  box-shadow:0 1px 5px rgba(0,0,0,.12)}
+#toolbar .title{font-weight:700;font-size:15px;white-space:nowrap}
+#toolbar .sub{color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#toolbar .spacer{flex:1 1 auto}
+#filter{padding:5px 9px;width:210px;font-size:13px;
   border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg)}
 .count{color:var(--muted);font-weight:400;font-size:12px}
-#themeBtn{position:fixed;top:12px;right:14px;z-index:5;padding:5px 11px;font-size:13px;
+#themeBtn{padding:5px 11px;font-size:13px;white-space:nowrap;
   border:1px solid var(--border);border-radius:6px;background:var(--th-bg);color:var(--fg);
   cursor:pointer}
 """
@@ -1778,16 +1784,28 @@ def _html_note(t: dict) -> str:
 def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict],
                        used_labels: Counter) -> str:
     esc = html.escape
+    # A fixed full-width top bar carries the report title + timestamp on the left
+    # and the theme toggle plus (when there are any failures) the test filter on
+    # the right, so all stay visible without scrolling back up.
+    has_failures = any(r.get("tests") for r in summary)
+    filter_input = ('<input id=filter placeholder="filter tests / classification / issue\u2026" '
+                    'oninput="filt(this.value)">') if has_failures else ""
+    toolbar = (
+        "<div id=toolbar>"
+        '<span class=title>offload-test-suite report</span>'
+        f'<span class=sub>{esc(run_ts)} \u00b7 {esc(REPO)} \u00b7 {len(summary)} workflows</span>'
+        "<span class=spacer></span>"
+        f"{filter_input}"
+        '<button id=themeBtn onclick="toggleTheme()">Dark</button>'
+        "</div>"
+    )
     h: list[str] = [
         "<!doctype html><html lang=en><head><meta charset=utf-8>",
         f"<title>offload-test-suite report {esc(run_ts)}</title>",
         _HTML_THEME_INIT,
         f"<style>{_HTML_CSS}</style>",
         "</head><body>",
-        '<button id=themeBtn onclick="toggleTheme()">Dark</button>',
-        f"<h1>offload-test-suite scheduled-workflow report</h1>",
-        f'<div class=meta>{esc(run_ts)} \u00b7 repo <code>{esc(REPO)}</code> '
-        f"\u00b7 {len(summary)} scheduled workflows</div>",
+        toolbar,
     ]
 
     # Legend (collapsible).
@@ -1860,8 +1878,6 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
     workflows_with_tests = [r for r in summary if r.get("tests")]
     if workflows_with_tests:
         h.append("<h2>Failures by workflow</h2>")
-        h.append('<input id=filter placeholder="filter tests / classification / issue\u2026" '
-                 'oninput="filt(this.value)">')
         for r in workflows_with_tests:
             tests = r["tests"]
             h.append(f"<details open><summary>{esc(r['workflow'])} "
