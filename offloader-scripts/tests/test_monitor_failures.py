@@ -1460,12 +1460,10 @@ class HtmlReport(unittest.TestCase):
         self.assertIn("Test failure summary", h)
         self.assertIn("runtime_driver_suspected_crash", h)
         self.assertIn("runtime_driver_suspected_miscompile", h)
-        # each row carries its own failing workflow. A workflow with a
-        # 'Failures by workflow' subsection is a link to it; one without stays a
-        # plain pill.
-        self.assertIn('<a class=wf href="#wf-windows-vulkan-amd-clang">Windows Vulkan AMD Clang</a>', h)
-        self.assertIn('<details open id="wf-windows-vulkan-amd-clang">', h)
-        self.assertIn("<span class=wf>Windows Lavapipe AMD DXC</span>", h)  # no subsection -> plain
+        # each row carries its own failing workflow, linked to that workflow's
+        # CI run. Workflows absent from the summary (no run url) stay plain pills.
+        self.assertIn('<a class=wf href="https://x/1" target=_blank>Windows Vulkan AMD Clang</a>', h)
+        self.assertIn("<span class=wf>Windows Lavapipe AMD DXC</span>", h)  # not in summary -> plain
         self.assertNotIn("<span class=wfmode>", h)
 
     def test_test_failure_summary_groups_passes_by_axis(self):

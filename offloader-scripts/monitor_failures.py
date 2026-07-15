@@ -1974,7 +1974,6 @@ td.note{max-width:44ch;color:var(--muted);font-size:12px}
 a.wf{color:var(--fg);text-decoration:none}
 a.wf:hover{border-color:var(--link);color:var(--link)}
 details{margin:.3rem 0}summary{cursor:pointer;font-weight:600}
-details[id]{scroll-margin-top:52px}
 #toolbar{position:fixed;top:0;left:0;right:0;z-index:6;display:flex;align-items:center;
   gap:12px;padding:7px 14px;background:var(--th-bg);border-bottom:1px solid var(--border);
   box-shadow:0 1px 5px rgba(0,0,0,.12)}
@@ -2071,18 +2070,13 @@ def _html_axis_legend() -> str:
     )
 
 
-def _wf_anchor(name: str) -> str:
-    """Stable in-page anchor id for a workflow's 'Failures by workflow' section."""
-    return "wf-" + (re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "x")
-
-
 def _html_wf_list(names: list[str], annotate: dict[str, str] | None = None,
-                  linkable: set[str] | None = None) -> str:
+                  run_urls: dict[str, str] | None = None) -> str:
     """Render workflow names as individual pills (full names), count-badged, so
     the members of a fails-on / passes-on set are visually separate and clear.
     When `annotate` is given, each pill shows its per-workflow value (e.g. the
-    failure mode) as a small muted suffix. When a name is in `linkable` (it has a
-    'Failures by workflow' subsection) the pill links to that section's anchor."""
+    failure mode) as a small muted suffix. When `run_urls` maps the name, the
+    pill links to that workflow's CI run."""
     if not names:
         return '<span class="muted">\u2014</span>'
     pills = []
@@ -2090,8 +2084,9 @@ def _html_wf_list(names: list[str], annotate: dict[str, str] | None = None,
         label = html.escape(n)
         if annotate and n in annotate:
             label += f' <span class=wfmode>{html.escape(annotate[n])}</span>'
-        if linkable and n in linkable:
-            pills.append(f'<a class=wf href="#{_wf_anchor(n)}">{label}</a>')
+        url = run_urls.get(n) if run_urls else None
+        if url:
+            pills.append(f'<a class=wf href="{html.escape(url)}" target=_blank>{label}</a>')
         else:
             pills.append(f'<span class=wf>{label}</span>')
     return f'<span class=wfcount>{len(names)}\u00d7</span>' + "".join(pills)
@@ -2133,19 +2128,18 @@ def _html_note(t: dict) -> str:
 
 
 def _html_pass_groups(passes_on: list[str], axes: dict,
-                      linkable: set[str] | None = None) -> str:
+                      run_urls: dict[str, str] | None = None) -> str:
     """Render the passing workflows, grouped by the divergence's primary axis
     value when there is one (each group headed by the axis-value chip), else a
-    flat pill list. Pills link to their 'Failures by workflow' section when one
-    exists (a workflow can pass this test yet fail others)."""
+    flat pill list. Each pill links to that workflow's CI run."""
     if not passes_on:
         return '<span class="muted">\u2014</span>'
     groups = group_passes_by_axis(passes_on, axes)
     if groups is None:
-        return _html_wf_list(passes_on, linkable=linkable)
+        return _html_wf_list(passes_on, run_urls=run_urls)
     dim = sole_failure_axis(axes)
     return "".join(
-        f'<div class=passgrp>{_html_axis_chip(dim, value)} {_html_wf_list(wfs, linkable=linkable)}</div>'
+        f'<div class=passgrp>{_html_axis_chip(dim, value)} {_html_wf_list(wfs, run_urls=run_urls)}</div>'
         for value, wfs in groups
     )
 
@@ -2231,10 +2225,8 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
     # Test failure summary: one row per (test, classification), naming the
     # aligning axis, the workflows it fails on, and — grouped by that axis — the
     # workflows it passes on.
-    # Workflows that have their own 'Failures by workflow' subsection below — the
-    # fails-on / passes-on pills link to it (a workflow can pass one test yet
-    # fail others, so a pass pill may or may not have a target).
-    linkable = {r["workflow"] for r in summary if r.get("tests")}
+    # fails-on / passes-on pills link to each workflow's CI run.
+    run_urls = {r["workflow"]: r["run_url"] for r in summary if r.get("run_url")}
     if divergences:
         n_rows = sum(len(test_failure_rows(d)) for d in divergences)
         h.append("<h2>Test failure summary "
@@ -2245,13 +2237,13 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
         for d in divergences:
             axes = d.get("axes") or {}
             axis_cell = _html_axis_chips(axes)
-            passes_cell = _html_pass_groups(d.get("passes_on") or [], axes, linkable=linkable)
+            passes_cell = _html_pass_groups(d.get("passes_on") or [], axes, run_urls=run_urls)
             for row in test_failure_rows(d):
                 h.append(
                     f'<tr class=f><td class=test>{esc(d["test"])}</td>'
                     f'<td>{_html_chip(row["classification"])}</td>'
                     f"<td>{axis_cell}</td>"
-                    f'<td class=note>{_html_wf_list(row["fails_on"], linkable=linkable)}</td>'
+                    f'<td class=note>{_html_wf_list(row["fails_on"], run_urls=run_urls)}</td>'
                     f'<td class=note>{passes_cell}</td></tr>')
         h.append("</tbody></table>")
 
@@ -2261,7 +2253,7 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
         h.append("<h2>Failures by workflow</h2>")
         for r in workflows_with_tests:
             tests = r["tests"]
-            h.append(f'<details open id="{_wf_anchor(r["workflow"])}"><summary>{esc(r["workflow"])} '
+            h.append(f"<details open><summary>{esc(r['workflow'])} "
                      f'<span class=count>\u2014 {len(tests)} failure(s)</span></summary>')
             h.append(f'<div class=meta><a href="{esc(r["run_url"])}" target=_blank>run \u2197</a></div>')
             h.append("<table><thead><tr><th>result</th><th>test</th><th>classification</th>"
