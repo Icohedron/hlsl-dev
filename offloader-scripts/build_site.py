@@ -73,6 +73,7 @@ td.ts{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap
 #toolbar .spacer{flex:1 1 auto}
 #themeBtn{padding:5px 11px;font-size:13px;white-space:nowrap;
   border:1px solid var(--border);border-radius:6px;background:var(--th-bg);color:var(--fg);cursor:pointer}
+#toolbar a.latest{font-weight:600;font-size:13px;white-space:nowrap;margin-right:4px}
 """
 
 _THEME_INIT = (
@@ -189,6 +190,51 @@ def report_health(report_dir: pathlib.Path) -> dict:
     return info
 
 
+def sorted_report_names(site_reports: pathlib.Path) -> list[str]:
+    """Return retained report dir names, newest-first."""
+    found: list[tuple[dt.datetime, str]] = []
+    if site_reports.exists():
+        for d in site_reports.iterdir():
+            ts = parse_ts(d.name) if d.is_dir() else None
+            if ts is not None:
+                found.append((ts, d.name))
+    found.sort(key=lambda x: x[0], reverse=True)
+    return [name for _, name in found]
+
+
+def write_latest_redirect(site_dir: pathlib.Path, reports: list[str]) -> None:
+    """Write a permanent `latest/` page redirecting to the newest report.
+
+    `<site>/latest/` is a stable URL that always forwards to the freshest
+    `summary.html`. It's a plain `<meta refresh>` (no JavaScript): the newest
+    timestamp is baked in at build time, which is fine because a new report
+    only appears on the site when this script re-runs anyway. When no reports
+    are retained the page shows a short placeholder instead.
+
+    `reports` must be newest-first.
+    """
+    latest_dir = site_dir / "latest"
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    newest = reports[0] if reports else None
+    if newest:
+        target = html.escape(f"../reports/{newest}/summary.html")
+        page = (
+            "<!doctype html><html lang=en><head><meta charset=utf-8>"
+            f'<meta http-equiv=refresh content="0; url={target}">'
+            f'<link rel=canonical href="{target}">'
+            "<title>latest offload-test-suite report</title>"
+            f'</head><body><p>Redirecting to the <a href="{target}">latest '
+            "report</a>&hellip;</p></body></html>"
+        )
+    else:
+        page = (
+            "<!doctype html><html lang=en><head><meta charset=utf-8>"
+            "<title>latest offload-test-suite report</title></head>"
+            "<body><p>No reports yet.</p></body></html>"
+        )
+    (latest_dir / "index.html").write_text(page)
+
+
 def render_index(site_reports: pathlib.Path, repo: str) -> str:
     esc = html.escape
     reports = []
@@ -209,6 +255,7 @@ def render_index(site_reports: pathlib.Path, repo: str) -> str:
         "</head><body>",
         '<div id=toolbar><span class=title>offload-test-suite reports</span>'
         '<span class=spacer></span>'
+        '<a class=latest href="latest/">Latest report \u2192</a>'
         '<button id=themeBtn onclick="toggleTheme()">Dark</button></div>',
         "<h1>offload-test-suite scheduled-workflow reports</h1>",
         f'<div class=meta>Monitoring <a href="https://github.com/{esc(repo)}" '
@@ -274,6 +321,8 @@ def main() -> None:
     # Disable Jekyll so nothing is filtered (e.g. dot/underscore paths).
     (site_dir / ".nojekyll").write_text("")
     (site_dir / "index.html").write_text(render_index(site_reports, args.repo))
+    # Permanent URL that always forwards to the freshest report.
+    write_latest_redirect(site_dir, sorted_report_names(site_reports))
 
     retained = sum(1 for d in site_reports.iterdir()
                    if d.is_dir() and parse_ts(d.name) is not None)
