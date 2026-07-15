@@ -739,6 +739,10 @@ def parse_workflow_axes(name: str) -> dict[str, str]:
     else:
         compiler = "unknown"
 
+    # Runner CPU architecture. Kept accurate here (it also feeds hardware-
+    # feature inference for XPASS matching); the *axis* logic separately treats
+    # it as relevant only for WARP (see `_host_axis_value`), which ships distinct
+    # x64 and ARM64 builds.
     if has("ARM64"):
         host = "ARM64"
     elif has("macOS"):
@@ -746,8 +750,6 @@ def parse_workflow_axes(name: str) -> dict[str, str]:
     elif has("QC", ci=False):
         # Qualcomm boards (Snapdragon X Plus) are ARM64-only; the display name
         # doesn't carry an ARM64 token, but the host always is (RUNNER_ARCH=ARM64).
-        # Keyed on the QC *name* token, not the gpu axis, so a Lavapipe run on a
-        # Qualcomm board (gpu=Lavapipe) is still recognised as ARM64.
         host = "ARM64"
     elif has("Windows"):
         host = "x64"
@@ -756,6 +758,24 @@ def parse_workflow_axes(name: str) -> dict[str, str]:
 
     variant = next((t for t in _VARIANT_TOKENS if has(t)), "none")
     return {"api": api, "gpu": gpu, "compiler": compiler, "host": host, "variant": variant}
+
+
+def _host_axis_value(ax: dict) -> str:
+    """Host as a *divergence axis* (as opposed to the real runner arch that
+    parse_workflow_axes reports for feature inference). The arch only
+    distinguishes failures for WARP, which ships separate x64 and ARM64 builds;
+    everywhere else it's incidental (Qualcomm boards are ARM64, real GPUs /
+    Lavapipe don't care), so the host axis is n/a ('none'). macOS is kept as the
+    Metal host."""
+    if ax.get("gpu") == "Warp":
+        return ax.get("host", "unknown")
+    if ax.get("host") == "macOS":
+        return "macOS"
+    return "none"
+
+
+def _axis_value(ax: dict, axis: str) -> str:
+    return _host_axis_value(ax) if axis == "host" else ax[axis]
 
 
 def compact_workflow(name: str) -> str:
@@ -882,9 +902,15 @@ def failure_axes(fails_on: list[str]) -> dict:
     out: dict[str, str] = {}
     for axis in ("api", "gpu", "compiler", "host", "variant"):
         drop = {"unknown", "none"} if axis == "variant" else {"unknown"}
-        fvals = {x[axis] for x in fa} - drop
-        if len(fvals) == 1:
-            out[f"{axis}_pattern"] = f"{next(iter(fvals))}-only"
+        fvals = {_axis_value(x, axis) for x in fa} - drop
+        if len(fvals) != 1:
+            continue
+        val = next(iter(fvals))
+        if val == "none":
+            # host n/a (non-WARP): the failures don't share a host arch, so no
+            # host axis (a mixed WARP + non-WARP set is len!=1 and also skipped).
+            continue
+        out[f"{axis}_pattern"] = f"{val}-only"
     return out
 
 def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
@@ -938,17 +964,23 @@ def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
     # variant=GBV, passers all have variant=none -> GBV-only).
     out: dict[str, str] = {}
     for axis in ("api", "gpu", "compiler", "host", "variant"):
+        # host is a divergence axis only for WARP (see _host_axis_value); for
+        # variant 'none' is a real base state kept in the passers so it can
+        # establish a pattern (failers all GBV, passers none -> GBV-only).
         drop_from_fails = {"unknown", "none"} if axis == "variant" else {"unknown"}
-        fvals = {x[axis] for x in fa} - drop_from_fails
-        pvals = {x[axis] for x in pa} - {"unknown"}
+        fvals = {_axis_value(x, axis) for x in fa} - drop_from_fails
+        pvals = {_axis_value(x, axis) for x in pa} - {"unknown"}
         if len(fvals) != 1 or not (pvals - fvals):
+            continue
+        val = next(iter(fvals))
+        if val == "none":
             continue
         # Compiler-only: require a clean partition — the failing compiler must
         # not also appear among the passers (see docstring). Any passing
         # workflow of that compiler means the compiler isn't the differentiator.
         if axis == "compiler" and (fvals & pvals):
             continue
-        out[f"{axis}_pattern"] = f"{next(iter(fvals))}-only"
+        out[f"{axis}_pattern"] = f"{val}-only"
     return out
 
 
@@ -2083,7 +2115,7 @@ _AXIS_VALUES = [
     ("api", "D3D12 / Vulkan / Metal"),
     ("gpu", "AMD / NVIDIA / Intel / QC / Warp / Lavapipe / Metal"),
     ("compiler", "clang / dxc"),
-    ("host", "x64 / ARM64 / macOS"),
+    ("host", "x64 / ARM64 (WARP only) / macOS"),
     ("variant", "GBV / Preview / none"),
 ]
 
@@ -2533,7 +2565,7 @@ def main() -> None:
         md += ["",
                "Axes: **api** (D3D12 / Vulkan / Metal), "
                "**gpu** (AMD / NVIDIA / Intel / QC / Warp / Lavapipe / Metal), "
-               "**compiler** (clang / dxc), **host** (x64 / ARM64 / macOS), "
+               "**compiler** (clang / dxc), **host** (x64 / ARM64 — WARP only / macOS), "
                "**variant** (GBV / Preview / none). A row's `axes` dict names the axes "
                "on which the failing workflows are all alike (descriptive — what the "
                "failures have in common, not blame) — e.g. `api_pattern: Vulkan-only` "

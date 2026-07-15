@@ -57,11 +57,9 @@ class ParseWorkflowAxes(unittest.TestCase):
 
 class AttributeDivergence(unittest.TestCase):
     def test_api_only(self):
-        # Vulkan fails; D3D12 passes. The passing set spans multiple hosts
-        # (Windows + macOS), so 'api_pattern' should be reported. The failing
-        # set mixes x64 (AMD/NVIDIA) with ARM64 (QC), so NO host_pattern should
-        # be attributed — QC is an ARM64 board, not x64. (Regression guard: this
-        # used to wrongly report 'host_pattern: x64-only'.)
+        # (Windows + macOS), so 'api_pattern' should be reported. No host_pattern:
+        # none of these are WARP, so the runner arch is not a host axis (AMD/NVIDIA
+        # x64 and QC ARM64 alike are treated as host n/a).
         a = mf.attribute_divergence(
             fails_on=["Windows Vulkan AMD Clang", "Windows Vulkan NVIDIA Clang", "Windows Vulkan QC Clang"],
             passes_on=["Windows D3D12 AMD Clang", "Windows D3D12 NVIDIA Clang", "macOS Metal Clang"],
@@ -172,10 +170,18 @@ class FailureAxes(unittest.TestCase):
         a = mf.failure_axes(["Windows Vulkan AMD Clang", "Windows ARM64 D3D12 Warp DXC"])
         self.assertEqual(a, {})
 
-    def test_shared_host_is_reported(self):
-        # Both x64 (different api/gpu/compiler) -> host is the one shared axis.
-        a = mf.failure_axes(["Windows Vulkan AMD Clang", "Windows D3D12 NVIDIA DXC"])
-        self.assertEqual(a, {"host_pattern": "x64-only"})
+    def test_host_axis_only_for_warp(self):
+        # x64/ARM64 only distinguishes failures for WARP (separate builds). Two
+        # non-WARP x64 workflows do NOT get a host axis (the arch is incidental).
+        self.assertEqual(
+            mf.failure_axes(["Windows Vulkan AMD Clang", "Windows D3D12 NVIDIA DXC"]), {})
+        # Two ARM64 WARP workflows DO -> the ARM64 WARP build is a real axis.
+        self.assertEqual(
+            mf.failure_axes(["Windows ARM64 D3D12 Warp Clang", "Windows ARM64 D3D12 Warp DXC"]
+                            ).get("host_pattern"), "ARM64-only")
+        # A QC (ARM64 hardware, non-WARP) failure is NOT an ARM64 host axis.
+        self.assertNotIn("host_pattern",
+                         mf.failure_axes(["Windows Vulkan QC Clang", "Windows Vulkan QC DXC"]))
 
     def test_single_fail_no_axes(self):
         self.assertEqual(mf.failure_axes(["Windows Vulkan QC DXC"]), {})
