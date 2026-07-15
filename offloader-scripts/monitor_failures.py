@@ -516,6 +516,46 @@ CLASSIFICATION_LEGEND: dict[str, str] = {
 }
 
 
+# The workflow summary table's `category` column: the stage at which the run
+# failed. Rendered as its own legend so a reader knows what `test_failure` vs
+# `build_failure` mean without inferring it from the per-test classifications.
+CATEGORY_LEGEND: dict[str, str] = {
+    "build_failure":
+        "The run failed before any test executed — no lit test-stage output was "
+        "produced (cmake/compile/link/ninja/msbuild error, or an infra/checkout/"
+        "device-setup step). The `detail` column says which subtree. There are no "
+        "per-test rows for this workflow.",
+    "test_failure":
+        "The run reached the lit test stage and at least one test FAILED or XPASSed. "
+        "Each failing test gets a row under 'Failures by workflow' with its own "
+        "`classification`; the `detail` column is normally empty (see the per-test "
+        "rows) unless no per-test block could be parsed (`unknown_no_blocks`).",
+}
+
+
+# The workflow summary table's `detail` column: refines `category`. For
+# build_failure it names the failing subtree; for test_failure it only appears
+# when the per-test blocks couldn't be parsed.
+DETAIL_LEGEND: dict[str, str] = {
+    # build_failure subtree (from classify_build_failure)
+    "clang_llvm":
+        "Build error was in the llvm-project / clang / clang-dxc subtree.",
+    "dxc":
+        "Build error was in DirectXShaderCompiler.",
+    "other":
+        "Build error was in infra / checkout / cmake / device-setup — not a "
+        "compiler subtree.",
+    "unknown":
+        "A build-error marker fired but no surrounding path context identified "
+        "the subtree.",
+    # test_failure detail
+    "unknown_no_blocks":
+        "The test stage ran but no per-test FAIL/XPASS block could be parsed — "
+        "e.g. a build error that still emitted a partial testing marker, or an "
+        "infra flake. No per-test classification is available for this run.",
+}
+
+
 # lit suite names encode the platform as a suffix on a shared base name:
 #   OffloadTest-vk, OffloadTest-clang-vk, OffloadTest-d3d12,
 #   OffloadTest-warp-d3d12, OffloadTest-clang-warp-d3d12, OffloadTest-mtl, ...
@@ -1668,6 +1708,27 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
             h.append(f"<tr><td>{_html_chip(label)}</td><td>{n}</td><td>{esc(expl)}</td></tr>")
         h.append("</tbody></table></details>")
 
+    # Category / detail column legend (collapsible), values that appear.
+    used_cat: Counter = Counter()
+    used_det: Counter = Counter()
+    for r in summary:
+        if r.get("category"):
+            used_cat[r["category"]] += 1
+        if r.get("detail"):
+            used_det[r["detail"]] += 1
+    if used_cat or used_det:
+        h.append("<details><summary>Category / detail column legend</summary>")
+        h.append("<table><thead><tr><th>column</th><th>value</th><th>count</th>"
+                 "<th>meaning</th></tr></thead><tbody>")
+        for c, n in used_cat.most_common():
+            expl = " ".join(CATEGORY_LEGEND.get(c, "(no legend entry)").split())
+            h.append(f"<tr><td>category</td><td><code>{esc(c)}</code></td>"
+                     f"<td>{n}</td><td>{esc(expl)}</td></tr>")
+        for d, n in used_det.most_common():
+            expl = " ".join(DETAIL_LEGEND.get(d, "(no legend entry)").split())
+            h.append(f"<tr><td>detail</td><td><code>{esc(d)}</code></td>"
+                     f"<td>{n}</td><td>{esc(expl)}</td></tr>")
+        h.append("</tbody></table></details>")
     # Per-workflow summary table.
     h.append("<h2>Workflows</h2>")
     h.append("<table><thead><tr><th>workflow</th><th>conclusion</th><th>category</th>"
@@ -1713,6 +1774,7 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
             tests = r["tests"]
             h.append(f"<details open><summary>{esc(r['workflow'])} "
                      f'<span class=count>\u2014 {len(tests)} failure(s)</span></summary>')
+            h.append(f'<div class=meta><a href="{esc(r["run_url"])}" target=_blank>run \u2197</a></div>')
             h.append("<table><thead><tr><th>result</th><th>test</th><th>classification</th>"
                      "<th>issues</th><th>notes</th></tr></thead><tbody>")
             for t in tests:
@@ -1895,6 +1957,37 @@ def main() -> None:
                "</details>",
                ""]
 
+    # Legend for the workflow table's `category` / `detail` columns (only the
+    # values that actually appear).
+    used_cat: Counter = Counter()
+    used_det: Counter = Counter()
+    for r in summary:
+        if r.get("category"):
+            used_cat[r["category"]] += 1
+        if r.get("detail"):
+            used_det[r["detail"]] += 1
+    if used_cat or used_det:
+        md += ["<details>",
+               "<summary>Category / detail column legend</summary>",
+               "",
+               "`category` — the stage at which the run failed:",
+               "",
+               "| category (count) | meaning |",
+               "|---|---|"]
+        for c, n in used_cat.most_common():
+            expl = " ".join(CATEGORY_LEGEND.get(c, "*(no legend entry — add one to CATEGORY_LEGEND)*").split())
+            md.append(f"| `{c}` (×{n}) | {expl} |")
+        if used_det:
+            md += ["",
+                   "`detail` — refines the category (build subtree, or why no per-test rows):",
+                   "",
+                   "| detail (count) | meaning |",
+                   "|---|---|"]
+            for d, n in used_det.most_common():
+                expl = " ".join(DETAIL_LEGEND.get(d, "*(no legend entry — add one to DETAIL_LEGEND)*").split())
+                md.append(f"| `{d}` (×{n}) | {expl} |")
+        md += ["", "</details>", ""]
+
     md += ["| workflow | conclusion | category | detail | # test failures | build (llvm / dxc) | run |",
            "|---|---|---|---|---|---|---|"]
     for r in summary:
@@ -1938,7 +2031,9 @@ def main() -> None:
         md += ["<details open>",
                f"<summary><b>{r['workflow']}</b> — {len(tests)} failure(s)</summary>",
                "",
-               "| result | test | classification | issues | notes |",
+               f"[run]({r['run_url']})",
+               ""]
+        md += ["| result | test | classification | issues | notes |",
                "|---|---|---|---|---|"]
         for t in tests:
             recs = _issue_records(t)

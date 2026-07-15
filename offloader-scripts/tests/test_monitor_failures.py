@@ -1092,6 +1092,33 @@ class HtmlReport(unittest.TestCase):
         self.assertIn("chip", self._report())
 
 
+class ColumnLegends(unittest.TestCase):
+    """
+    Guards the workflow table's category/detail legends against drift, the same
+    way ClassificationLegend guards the per-test labels.
+    """
+    EXPECTED_CATEGORIES = {"build_failure", "test_failure"}
+    # build subtree values from classify_build_failure + the test_failure detail
+    EXPECTED_DETAILS = {"clang_llvm", "dxc", "other", "unknown", "unknown_no_blocks"}
+
+    def test_category_legend_complete_and_not_stale(self):
+        self.assertEqual(set(mf.CATEGORY_LEGEND), self.EXPECTED_CATEGORIES)
+
+    def test_detail_legend_complete_and_not_stale(self):
+        self.assertEqual(set(mf.DETAIL_LEGEND), self.EXPECTED_DETAILS)
+
+    def test_explanations_non_trivial(self):
+        for legend in (mf.CATEGORY_LEGEND, mf.DETAIL_LEGEND):
+            for key, expl in legend.items():
+                with self.subTest(key=key):
+                    self.assertGreater(len(expl), 40, f"legend for {key!r} is too short")
+
+    def test_classify_build_failure_details_are_documented(self):
+        # Every value classify_build_failure can return must have a legend entry.
+        for detail in ("clang_llvm", "dxc", "other", "unknown"):
+            self.assertIn(detail, mf.DETAIL_LEGEND)
+
+
 # ---------------------------------------------------------------------------
 # End-to-end smoke test: drive main() with the network boundary mocked so the
 # full report-generation path runs — workflow loop, classification, the
@@ -1216,6 +1243,12 @@ class MainSmoke(unittest.TestCase):
             md = (out_dir / "summary.md").read_text()
             self.assertIn("<details", md)
             self.assertIn("## Failures by workflow", md)
+            # Each per-workflow section links its run (workflow A's run is /1).
+            self.assertIn("[run](https://x/1)", md)
+            # Category / detail column legend rendered with the used values.
+            self.assertIn("Category / detail column legend", md)
+            self.assertIn("reached the lit test stage", md)  # test_failure
+            self.assertIn("llvm-project / clang / clang-dxc subtree", md)  # detail clang_llvm
             self.assertIn("[#337](", md)
             self.assertIn("| result | test | classification | issues | notes |", md)
             self.assertNotIn("OffloadTest-clang-vk ::", md)  # suite prefix stripped
