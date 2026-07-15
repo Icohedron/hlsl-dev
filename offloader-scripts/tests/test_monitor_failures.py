@@ -90,7 +90,7 @@ class AttributeDivergence(unittest.TestCase):
         # GPU/API/driver, or a toolchain version skew). We must NOT report a
         # contradictory 'clang-only' axis while Clang is demonstrably passing.
         a = mf.attribute_divergence(
-            fails_on=["Windows Vulkan NVIDIA Clang"],
+            fails_on=["Windows Vulkan NVIDIA Clang", "Windows Vulkan AMD Clang"],
             passes_on=["Windows D3D12 NVIDIA Clang", "Windows D3D12 NVIDIA DXC"],
         )
         self.assertNotIn("compiler_pattern", a)
@@ -101,10 +101,20 @@ class AttributeDivergence(unittest.TestCase):
         # runtime-layer behaviour), so a passing NVIDIA workflow does NOT veto a
         # gpu_pattern the way a passing Clang vetoes compiler_pattern.
         a = mf.attribute_divergence(
-            fails_on=["Windows Vulkan NVIDIA DXC"],
+            fails_on=["Windows Vulkan NVIDIA DXC", "Windows Vulkan NVIDIA Clang"],
             passes_on=["Windows D3D12 NVIDIA DXC", "Windows Vulkan AMD DXC"],
         )
         self.assertEqual(a.get("gpu_pattern"), "NVIDIA-only")
+
+    def test_single_fail_gets_no_axes(self):
+        # One failing workflow is trivially '-only' on every axis, so no axis is
+        # attributed — an axis needs >= 2 failing workflows sharing a value.
+        a = mf.attribute_divergence(
+            fails_on=["Windows Vulkan QC DXC"],
+            passes_on=["Windows D3D12 AMD DXC", "Windows Vulkan NVIDIA DXC",
+                       "Windows ARM64 Lavapipe DXC"],
+        )
+        self.assertEqual(a, {})
 
     def test_mixed_no_axis(self):
         a = mf.attribute_divergence(

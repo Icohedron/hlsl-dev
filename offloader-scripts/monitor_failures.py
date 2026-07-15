@@ -892,7 +892,13 @@ def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
     rather than a backend/driver (a backend/driver fault would let the same
     compiler pass on a different backend). The passing other-compiler also shows
     the test/golden itself is valid.
+    A single failing workflow is trivially homogeneous on *every* axis, so it
+    would spuriously get an '-only' on each dimension while describing no real
+    cross-workflow pattern. An axis is only meaningful once at least two
+    workflows fail and share that value, so a single failure gets no axes.
     """
+    if len(fails_on) < 2:
+        return {}
     fa = [parse_workflow_axes(w) for w in fails_on]
     pa = [parse_workflow_axes(w) for w in passes_on]
     # 'unknown' means we couldn't parse the axis — never pattern-worthy on
