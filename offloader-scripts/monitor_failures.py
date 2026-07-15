@@ -175,7 +175,7 @@ def _parse_lit_commands(block: str) -> list[dict]:
                 kind = "clang_dxc"
             elif re.search(r"[\\/]dxc(?:\.exe)?['\"]?", low):
                 kind = "dxc"
-            elif "offloader" in low:
+            elif "offloader" in low or "gpu-exec" in low:
                 kind = "offloader"
             elif "filecheck" in low:
                 kind = "filecheck"
@@ -231,6 +231,18 @@ def classify_shader_compile(block: str) -> str | None:
             return f"shader_compile_{c['kind']}"
     return None
 
+# Runtime rejected pipeline/PSO creation. Matches the offloader's messages
+# across backends: D3D12 "Failed to create PSO." / "Failed to create graphics
+# PSO." / "Failed to create mesh shader PSO." and Vulkan "Failed to create
+# compute pipeline." / "Failed to create graphics pipeline." (the optional words
+# between "create" and "pso/pipeline" cover the graphics/mesh-shader variants).
+_PIPELINE_MARKER_RE = re.compile(r"failed to create (?:\w+ )*(?:pso|pipeline)\b")
+
+# The offloader tool (tools/offloader, internally "gpu-exec") prefixes every
+# error it emits with "gpu-exec: error: " — an unambiguous marker that a failure
+# came from the GPU-execution stage (i.e. is runtime-related), never the
+# compiler or FileCheck.
+_GPU_EXEC_ERROR = "gpu-exec: error:"
 
 def classify_runtime(block: str) -> str:
     """
@@ -248,34 +260,31 @@ def classify_runtime(block: str) -> str:
         "hung", "tdr", "access violation", "unhandled exception",
         "driver crashed", "d3d12: removing device",
     )
-    # Pipeline/PSO creation was rejected by the runtime. The shader compiled to
-    # DXIL/SPIR-V fine, but Create*PipelineState / vkCreate*Pipelines failed.
-    # This is distinct from both a driver crash (the process survives and
-    # reports a clean error) and a miscompile (nothing ever executed). Depending
-    # on the HRESULT/VkResult it's usually a backend/driver rejection or a
+    # Pipeline/PSO creation was rejected by the runtime — detected via
+    # _PIPELINE_MARKER_RE (covers D3D12 "Failed to create [graphics/mesh shader]
+    # PSO." and Vulkan "Failed to create compute/graphics pipeline."). The shader
+    # compiled fine but Create*PipelineState / vkCreate*Pipelines failed; this is
+    # distinct from a driver crash (process survives, clean error) and a
+    # miscompile (nothing ever executed). Usually a backend/driver rejection or a
     # malformed pipeline spec in the test itself.
-    pipeline_markers = (
-        "failed to create pso",
-        "failed to create pipeline",
-        "failed to create compute pipeline",
-        "failed to create graphics pipeline",
-    )
     miscompile_markers = (
         "mismatch", "verify failed", "verification failed",
         "image mismatch", "golden image", "expected .* actual", "diff:",
         "filecheck error",
     )
 
-    # If offloader crashed with an NT status (0xC0000005 etc.) treat as driver crash.
+    # If offloader crashed with an NT status (0xC0000005 etc.) treat as driver
+    # crash. A command is offloader output if its kind says so OR its payload
+    # carries the gpu-exec error prefix (robust to command-kind misdetection).
     for c in failing:
-        if c["kind"] == "offloader" and c["exit_status"].startswith(("0x", "-")):
+        payload = (c["stdout"] + "\n" + c["stderr"]).lower()
+        is_offloader = c["kind"] == "offloader" or _GPU_EXEC_ERROR in payload
+        if is_offloader and c["exit_status"].startswith(("0x", "-")):
             return "runtime_driver_error"
-        if c["kind"] == "offloader":
-            # Non-zero decimal exit — inspect payload
-            payload = (c["stdout"] + "\n" + c["stderr"]).lower()
+        if is_offloader:
             if any(m in payload for m in driver_markers):
                 return "runtime_driver_error"
-            if any(m in payload for m in pipeline_markers):
+            if _PIPELINE_MARKER_RE.search(payload):
                 return "runtime_pipeline_error"
             if any(re.search(m, payload) for m in miscompile_markers):
                 return "runtime_miscompile"
@@ -286,7 +295,7 @@ def classify_runtime(block: str) -> str:
     lower = block.lower()
     if any(m in lower for m in driver_markers):
         return "runtime_driver_error"
-    if any(m in lower for m in pipeline_markers):
+    if _PIPELINE_MARKER_RE.search(lower):
         return "runtime_pipeline_error"
     if any(re.search(m, lower) for m in miscompile_markers):
         return "runtime_miscompile"

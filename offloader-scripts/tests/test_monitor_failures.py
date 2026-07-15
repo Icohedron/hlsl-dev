@@ -938,6 +938,28 @@ class RuntimePipelineError(unittest.TestCase):
         b = _runtime_block("offloader", "1", stdout="something unhelpful")
         self.assertEqual(mf.classify_runtime(b), "runtime_unknown")
 
+    def test_graphics_and_mesh_pso_variants(self):
+        # D3D12 graphics / mesh-shader PSO wording ("Failed to create graphics
+        # PSO.") must classify as pipeline error, not fall through to unknown.
+        for msg in ("gpu-exec: error: Failed to create graphics PSO.",
+                    "gpu-exec: error: Failed to create mesh shader PSO.",
+                    "gpu-exec: error: Failed to create graphics pipeline."):
+            with self.subTest(msg=msg):
+                b = _runtime_block("offloader", "1", stdout=msg)
+                self.assertEqual(mf.classify_runtime(b), "runtime_pipeline_error")
+
+    def test_root_signature_is_not_a_pipeline_marker(self):
+        b = _runtime_block("offloader", "1", stdout="gpu-exec: error: Failed to create root signature.")
+        self.assertEqual(mf.classify_runtime(b), "runtime_unknown")
+
+    def test_gpu_exec_prefix_treated_as_offloader(self):
+        # Even if the command kind weren't 'offloader', the gpu-exec error prefix
+        # marks the payload as runtime (offloader) output, so PSO/mismatch
+        # markers in it are still honoured.
+        cmds = mf._parse_lit_commands(_runtime_block("gpu-exec", "1",
+                                                     stdout="gpu-exec: error: Failed to create PSO."))
+        self.assertTrue(any(c["kind"] == "offloader" for c in cmds))
+
 
 class NormalizeSuite(unittest.TestCase):
     def test_platform_suffixes_collapse(self):
