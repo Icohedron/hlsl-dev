@@ -1311,14 +1311,28 @@ class HtmlReport(unittest.TestCase):
         self.assertIn("<span class=wf>Windows D3D12 Warp DXC</span>", h)
         self.assertNotIn("AMD/Vulkan/Clang", h)
 
-    def test_divergence_shows_per_workflow_failure_modes(self):
-        # A test that crashes on one workflow but miscompiles on others must show
-        # BOTH classifications and annotate each failing workflow with its mode.
+    def test_test_failure_summary_splits_rows_per_classification(self):
+        # A test that crashes on one workflow but miscompiles on another is split
+        # into one row per (test, classification), each listing only the
+        # workflows that failed with that mode.
         h = self._report()
+        self.assertIn("Test failure summary", h)
         self.assertIn("runtime_driver_suspected_crash", h)
         self.assertIn("runtime_driver_suspected_miscompile", h)
-        self.assertIn("Windows Lavapipe AMD DXC <span class=wfmode>crash</span>", h)
-        self.assertIn("Windows Vulkan AMD Clang <span class=wfmode>miscompile</span>", h)
+        # each row carries its own failing workflow (no per-workflow mode
+        # annotation now that the row itself names the classification)
+        self.assertIn("<span class=wf>Windows Lavapipe AMD DXC</span>", h)
+        self.assertIn("<span class=wf>Windows Vulkan AMD Clang</span>", h)
+        self.assertNotIn("<span class=wfmode>", h)
+
+    def test_test_failure_summary_groups_passes_by_axis(self):
+        # The failing set is api:Vulkan-only, so the passing side is grouped by
+        # the api axis and headed with the contrasting value (D3D12).
+        h = self._report()
+        summary = h.split("Test failure summary", 1)[1]
+        self.assertIn("class=passgrp", summary)
+        self.assertIn('<span class=v>D3D12</span>', summary)
+        self.assertIn("<span class=wf>Windows D3D12 Warp DXC</span>", summary)
 
     def test_toolbar_has_title_timestamp_filter_and_toggle(self):
         h = self._report()
@@ -1511,6 +1525,7 @@ class MainSmoke(unittest.TestCase):
             self.assertIn("tested commits (llvm / dxc / offload)", md)
             self.assertIn("offload `abc1234ef`", md)
             self.assertIn("<details", md)
+            self.assertIn("## Test failure summary", md)
             self.assertIn("## Failures by workflow", md)
             # Each per-workflow section links its run (workflow A's run is /1).
             self.assertIn("[run](https://x/1)", md)

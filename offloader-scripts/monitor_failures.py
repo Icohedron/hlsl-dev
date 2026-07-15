@@ -744,6 +744,18 @@ def _md_wf_list(names: list[str], annotate: dict[str, str] | None = None) -> str
     return f"{len(names)}: " + ", ".join(one(n) for n in names)
 
 
+def _md_pass_groups(passes_on: list[str], axes: dict) -> str:
+    """Passing workflows for a markdown cell, grouped by the divergence's primary
+    axis value when there is one (e.g. `api D3D12: 2: A, B`), else a flat list."""
+    if not passes_on:
+        return "-"
+    groups = group_passes_by_axis(passes_on, axes)
+    if groups is None:
+        return _md_wf_list(passes_on)
+    dim = primary_axis_dim(axes)
+    return "<br>".join(f"**{dim} {value}** — {_md_wf_list(wfs)}" for value, wfs in groups)
+
+
 def _truncate(text: str, limit: int = 60) -> str:
     """Collapse whitespace and clip to `limit` chars (for table cells)."""
     text = " ".join((text or "").split())
@@ -832,6 +844,53 @@ def attribute_divergence(fails_on: list[str], passes_on: list[str]) -> dict:
             continue
         out[f"{axis}_pattern"] = f"{next(iter(fvals))}-only"
     return out
+
+
+# Priority for choosing which single axis to group the passing workflows on in
+# the test-failure summary: the most specific runtime layer first.
+_AXIS_PRIORITY = ("gpu", "api", "compiler", "host", "variant")
+
+
+def primary_axis_dim(axes: dict) -> str | None:
+    """The dimension (gpu/api/…) to summarise a divergence on, or None. When a
+    failing set aligns on several axes at once, the most specific one wins."""
+    present = {k[:-len("_pattern")] for k in axes if k.endswith("_pattern")}
+    return next((d for d in _AXIS_PRIORITY if d in present), None)
+
+
+def group_passes_by_axis(passes_on: list[str], axes: dict) -> list[tuple[str, list[str]]] | None:
+    """Group the passing workflows by their value on the divergence's primary
+    axis, so the pass side reads as a direct contrast to the (homogeneous)
+    failing value on that same axis — e.g. fails on `api: Vulkan-only`, passes
+    grouped by api into D3D12 / Metal. Returns an ordered
+    [(axis_value, [workflows])] list (largest group first), or None when there
+    is no single axis to group on (the caller then lists all passes flat).
+    """
+    dim = primary_axis_dim(axes)
+    if dim is None or not passes_on:
+        return None
+    groups: dict[str, list[str]] = {}
+    for w in passes_on:
+        groups.setdefault(parse_workflow_axes(w).get(dim) or "unknown", []).append(w)
+    return [(v, sorted(ws))
+            for v, ws in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))]
+
+
+def test_failure_rows(entry: dict) -> list[dict]:
+    """Split one cross-workflow failure entry into per-(test, classification)
+    display rows. Failing workflows are grouped by their assigned
+    classification; the aggregate axis and passing set are shared by every row
+    of the test (the axis is attributed over the whole failing set, which is
+    more meaningful than re-deriving it from a one-workflow subset). Returns
+    rows as {classification, fails_on} sorted by classification.
+    """
+    by_cls: dict[str, list[str]] = {}
+    for w, cls in (entry.get("fail_classifications") or {}).items():
+        by_cls.setdefault(cls or "unknown", []).append(w)
+    if not by_cls:  # defensive: fall back to the aggregate view
+        for c in entry.get("classifications") or ["unknown"]:
+            by_cls.setdefault(c, list(entry.get("fails_on") or []))
+    return [{"classification": c, "fails_on": sorted(ws)} for c, ws in sorted(by_cls.items())]
 
 
 # ---------------------------------------------------------------------------
@@ -1773,6 +1832,7 @@ tbody tr:nth-child(even){background:var(--row-alt)}
 td.test{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
   white-space:nowrap;max-width:34ch;overflow:hidden;text-overflow:ellipsis}
 td.note{max-width:44ch;color:var(--muted);font-size:12px}
+.passgrp{margin:2px 0}.passgrp+.passgrp{margin-top:3px;padding-top:3px;border-top:1px dashed var(--border)}
 .muted{color:var(--muted);font-size:12px}
 .chip{display:inline-block;padding:1px 7px;border-radius:2em;font-size:11px;
   font-weight:600;color:#fff;white-space:nowrap}
@@ -1885,7 +1945,7 @@ def _html_axis_chips(axes: dict) -> str:
 def _html_axis_legend() -> str:
     chips = "".join(_html_axis_chip(dim, vals) for dim, vals in _AXIS_VALUES)
     return (
-        '<p class=muted><b>Axes.</b> Each divergence row is tagged with the axis '
+        '<p class=muted><b>Axes.</b> Each test failure summary row is tagged with the axis '
         "(dimension) on which its failing set is homogeneous while at least one "
         "workflow on a different value passes. The dimensions and their values:</p>"
         f"<p>{chips}</p>"
@@ -1943,6 +2003,22 @@ def _html_note(t: dict) -> str:
     if t.get("note"):
         return html.escape(t["note"])
     return '<span class="muted">\u2014</span>'
+
+
+def _html_pass_groups(passes_on: list[str], axes: dict) -> str:
+    """Render the passing workflows, grouped by the divergence's primary axis
+    value when there is one (each group headed by the axis-value chip), else a
+    flat pill list."""
+    if not passes_on:
+        return '<span class="muted">\u2014</span>'
+    groups = group_passes_by_axis(passes_on, axes)
+    if groups is None:
+        return _html_wf_list(passes_on)
+    dim = primary_axis_dim(axes)
+    return "".join(
+        f'<div class=passgrp>{_html_axis_chip(dim, value)} {_html_wf_list(wfs)}</div>'
+        for value, wfs in groups
+    )
 
 
 def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict],
@@ -2023,22 +2099,27 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
             f'<td><a href="{esc(r["run_url"])}" target=_blank>run</a></td></tr>')
     h.append("</tbody></table>")
 
-    # Divergences.
+    # Test failure summary: one row per (test, classification), naming the
+    # aligning axis, the workflows it fails on, and — grouped by that axis — the
+    # workflows it passes on.
     if divergences:
-        h.append("<h2>Cross-workflow divergences "
-                 '<span class=count>(GPU/API/compiler-specific failures)</span></h2>')
+        n_rows = sum(len(test_failure_rows(d)) for d in divergences)
+        h.append("<h2>Test failure summary "
+                 f'<span class=count>({n_rows} test/classification rows · '
+                 'fails on some workflows, passes on others)</span></h2>')
         h.append("<table><thead><tr><th>test</th><th>classification</th><th>axis</th>"
                  "<th>fails on</th><th>passes on</th></tr></thead><tbody>")
         for d in divergences:
-            cls_chips = "".join(_html_chip(c) for c in (d.get("classifications") or [])) \
-                or '<span class="muted">\u2014</span>'
-            fail_modes = {w: _fail_mode(c) for w, c in (d.get("fail_classifications") or {}).items()}
-            h.append(
-                f'<tr class=f><td class=test>{esc(d["test"])}</td>'
-                f"<td>{cls_chips}</td>"
-                f"<td>{_html_axis_chips(d.get('axes') or {})}</td>"
-                f'<td class=note>{_html_wf_list(d["fails_on"], fail_modes)}</td>'
-                f'<td class=note>{_html_wf_list(d["passes_on"])}</td></tr>')
+            axes = d.get("axes") or {}
+            axis_cell = _html_axis_chips(axes)
+            passes_cell = _html_pass_groups(d.get("passes_on") or [], axes)
+            for row in test_failure_rows(d):
+                h.append(
+                    f'<tr class=f><td class=test>{esc(d["test"])}</td>'
+                    f'<td>{_html_chip(row["classification"])}</td>'
+                    f"<td>{axis_cell}</td>"
+                    f'<td class=note>{_html_wf_list(row["fails_on"])}</td>'
+                    f'<td class=note>{passes_cell}</td></tr>')
         h.append("</tbody></table>")
 
     # Per-workflow failure detail (collapsible), with a shared filter box.
@@ -2309,34 +2390,30 @@ def main() -> None:
     md.append("")
 
     if divergences:
-        md += ["## Cross-workflow divergences (GPU/API/compiler-specific failures)", "",
-               "Tests that fail on some workflows but pass on others. The same test source",
-               "runs everywhere, so divergence points at something configuration-specific:",
-               "a per-vendor driver bug, an API/backend bug, a compiler (DXC vs clang-dxc)",
-               "codegen difference, or a test that specifies pipeline inputs/outputs in a way",
-               "only some configurations reject. On the gpu/api axes the shader binary is",
-               "identical across the diverging workflows, so a divergence localizes the",
-               "fault to that runtime layer and the label is upgraded to a 'suspected'",
-               "driver/backend classification (never 'confirmed'). On the compiler axis the",
-               "binary DIFFERS (DXC vs clang-dxc emit different DXIL), so a split there is",
-               "merely different output — not a proven compiler bug — and is reported as an",
-               "axis only, WITHOUT blaming the compiler in the classification.",
-               "The 'axis' column names the axis (api / gpu / compiler) on which the failure",
-               "set is homogeneous — e.g. 'api: Vulkan-only' = all failing workflows are",
-               "Vulkan, at least one non-Vulkan workflow passes. "
-               "A test's failure mode can differ per workflow (crash vs miscompile); "
-               "the 'classification' column lists each distinct mode and the 'fails on' "
-               "column annotates every workflow with its own mode.",
+        md += ["## Test failure summary", "",
+               "Tests that fail on some workflows but pass on others, one row per",
+               "(test, classification). The same test source runs everywhere, so the",
+               "split points at something configuration-specific: a per-vendor driver",
+               "bug, an API/backend bug, a compiler (DXC vs clang-dxc) codegen",
+               "difference, or a test that specifies pipeline inputs/outputs in a way",
+               "only some configurations reject. The **axis** column names the axis on",
+               "which the failing set is homogeneous (e.g. `api: Vulkan-only` = every",
+               "failing workflow is Vulkan); the **passes on** column groups the passing",
+               "workflows by that same axis so the contrast is explicit. On gpu/api the",
+               "shader binary is identical across workflows, so the label is upgraded to",
+               "a 'suspected' driver/backend layer (never 'confirmed'); a compiler-axis",
+               "split is reported as an axis only, without blaming the compiler.",
                "",
                "| test | classification | axis | fails on | passes on |",
                "|---|---|---|---|---|"]
         for d in divergences:
-            axis_bits = [f"{k.replace('_pattern','')}: {v}" for k, v in (d.get("axes") or {}).items()]
+            axes = d.get("axes") or {}
+            axis_bits = [f"{k.replace('_pattern','')}: {v}" for k, v in axes.items()]
             axis_str = "; ".join(axis_bits) or "-"
-            cls_str = ", ".join(f"`{c}`" for c in (d.get("classifications") or [])) or "-"
-            fail_modes = {w: _fail_mode(c) for w, c in (d.get("fail_classifications") or {}).items()}
-            md.append(f"| `{d['test']}` | {cls_str} | {axis_str} | "
-                      f"{_md_wf_list(d['fails_on'], fail_modes)} | {_md_wf_list(d['passes_on'])} |")
+            passes_str = _md_pass_groups(d.get("passes_on") or [], axes)
+            for row in test_failure_rows(d):
+                md.append(f"| `{d['test']}` | `{row['classification']}` | {axis_str} | "
+                          f"{_md_wf_list(row['fails_on'])} | {passes_str} |")
         md.append("")
 
     tested = [r for r in summary if r.get("tests")]
@@ -2394,7 +2471,7 @@ def main() -> None:
 
     print(f"\nReport: {out_dir}", file=sys.stderr)
     print(f"  summary.md / summary.html / summary.json / summary.csv / divergences.json", file=sys.stderr)
-    print(f"  {len(divergences)} cross-GPU divergences", file=sys.stderr)
+    print(f"  {len(divergences)} tests fail-on-some/pass-on-others (test failure summary)", file=sys.stderr)
 
 
 if __name__ == "__main__":

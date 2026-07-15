@@ -78,7 +78,7 @@ For each active workflow it fetches the latest scheduled run; if the run isn't
 | file | contents |
 |---|---|
 | `summary.json` | machine-readable per-workflow rows, including `commits` (built llvm/dxc/offload SHAs) and per-test `classification` |
-| `summary.md` | human summary table (with a **build (llvm / dxc)** column) + cross-workflow divergence pivot |
+| `summary.md` | human summary table (with a **build (llvm / dxc)** column) + per-(test, classification) test failure summary |
 | `summary.csv` | flat per-test rows |
 | `summary.html` | self-contained rich view (colour-coded chips, issue badges, live filter, dark mode) — for local viewing or GitHub Pages |
 | `divergences.json` | tests that fail on some workflows but pass on others |
