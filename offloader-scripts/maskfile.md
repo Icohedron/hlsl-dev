@@ -20,6 +20,13 @@ every `llvm/offload-test-suite` workflow, classifies failures, and writes
 Requires a GitHub token exported as `$GH_TOKEN` or `$GITHUB_TOKEN`. Only
 public-repo read scope is needed.
 
+To read each XFAIL test file at the exact revision a run tested, the monitor
+fetches the `offload-test-suite` commit the run built. Run logs record only
+abbreviated SHAs, which a shallow clone can't fetch by ref, so by default the
+monitor unshallows `offload-test-suite` on first need (a one-time full fetch;
+later runs resolve locally). Pass `--no-unshallow` to only attempt a targeted
+fetch, or `--no-git-fetch` to read the working tree as-is.
+
 **OPTIONS**
 * mode: Optional. One of:
   * (unset) — full run: downloads logs for both failing and successful runs;

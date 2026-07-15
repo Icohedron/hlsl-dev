@@ -1415,10 +1415,15 @@ def git_commit_available(repo_root: pathlib.Path, commit: str) -> bool:
     if _GIT_FETCH_MODE == "off":
         return _finish(False)
 
-    # Targeted by-sha fetch (works where the server allows it; cheap).
-    _git(repo_root, "fetch", "--quiet", "--depth", "1", "origin", commit, timeout=120)
-    if _git_resolves(repo_root, commit):
-        return _finish(True)
+    # A targeted by-sha fetch only works for a full 40-char sha the server
+    # allows fetching (allowReachableSHA1InWant). Run logs record ABBREVIATED
+    # SHAs (`HEAD is now at <short>`), which git can't fetch by ref — those can
+    # only be resolved by having the history locally (deepen), so skip the
+    # doomed fetch for them.
+    if len(commit) >= 40:
+        _git(repo_root, "fetch", "--quiet", "--depth", "1", "origin", commit, timeout=120)
+        if _git_resolves(repo_root, commit):
+            return _finish(True)
 
     # Last resort: pull full history, then re-check.
     if _GIT_FETCH_MODE == "unshallow":
@@ -2007,15 +2012,21 @@ def main() -> None:
     ap.add_argument("--skip-logs", action="store_true", help="don't download logs, only list run statuses")
     ap.add_argument("--no-pass-matrix", action="store_true",
                     help="don't download logs for successful runs (skips cross-GPU divergence analysis)")
-    ap.add_argument("--unshallow", action="store_true",
-                    help="if a run's offload-test-suite commit isn't present locally, unshallow / "
-                         "full-fetch the repo to obtain it, so XFAIL clauses match the tested "
-                         "revision exactly (slower first run)")
+    ap.add_argument("--no-unshallow", action="store_true",
+                    help="don't unshallow to obtain a run's offload-test-suite commit; only try a "
+                         "targeted by-sha fetch. Note: logs record abbreviated SHAs, which a shallow "
+                         "clone usually can't resolve, so XFAIL matching may fall back to the working "
+                         "tree (possibly-stale clauses)")
     ap.add_argument("--no-git-fetch", action="store_true",
                     help="never fetch commits; read XFAIL test files from the working tree as-is")
     args = ap.parse_args()
 
-    set_git_fetch_mode("off" if args.no_git_fetch else "unshallow" if args.unshallow else "targeted")
+    # Default: unshallow when needed. Run logs only carry abbreviated commit
+    # SHAs (`HEAD is now at <short>`), which git can't fetch by ref on a shallow
+    # clone; fetching full history is the only reliable way to resolve them, so
+    # XFAIL clauses are read from the exact tested revision. It's a one-time cost
+    # per repo (subsequent commits resolve locally).
+    set_git_fetch_mode("off" if args.no_git_fetch else "targeted" if args.no_unshallow else "unshallow")
 
     otss_root = pathlib.Path(args.otss_root).resolve()
     if not otss_root.exists():

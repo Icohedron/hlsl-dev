@@ -1121,31 +1121,38 @@ class GitFetchMode(unittest.TestCase):
         g.assert_not_called()
         deep.assert_not_called()
 
-    def test_targeted_fetch_recovers_commit(self):
+    def test_targeted_fetch_only_for_full_sha(self):
+        # A full 40-char sha the server allows can be fetched directly.
+        full = "a" * 40
         mf.set_git_fetch_mode("targeted")
         with unittest.mock.patch.object(mf, "_git_resolves", side_effect=[False, True]), \
              unittest.mock.patch.object(mf, "_git") as g, \
              unittest.mock.patch.object(mf, "_git_deepen") as deep:
-            self.assertTrue(mf.git_commit_available(pathlib.Path("/x"), "sha2"))
+            self.assertTrue(mf.git_commit_available(pathlib.Path("/x"), full))
         g.assert_called_once()          # one targeted fetch
-        deep.assert_not_called()         # never unshallowed in targeted mode
-
-    def test_targeted_does_not_unshallow(self):
-        mf.set_git_fetch_mode("targeted")
-        with unittest.mock.patch.object(mf, "_git_resolves", return_value=False), \
-             unittest.mock.patch.object(mf, "_git"), \
-             unittest.mock.patch.object(mf, "_git_deepen") as deep:
-            self.assertFalse(mf.git_commit_available(pathlib.Path("/x"), "sha3"))
         deep.assert_not_called()
 
-    def test_unshallow_used_as_last_resort(self):
-        mf.set_git_fetch_mode("unshallow")
-        # resolves: initial False, after targeted False, after deepen True
-        with unittest.mock.patch.object(mf, "_git_resolves", side_effect=[False, False, True]), \
-             unittest.mock.patch.object(mf, "_git"), \
+    def test_abbreviated_sha_skips_targeted_fetch(self):
+        # Log SHAs are abbreviated and can't be fetched by ref, so no targeted
+        # fetch is attempted (targeted mode just gives up).
+        mf.set_git_fetch_mode("targeted")
+        with unittest.mock.patch.object(mf, "_git_resolves", return_value=False), \
+             unittest.mock.patch.object(mf, "_git") as g, \
              unittest.mock.patch.object(mf, "_git_deepen") as deep:
-            self.assertTrue(mf.git_commit_available(pathlib.Path("/x"), "sha4"))
-        deep.assert_called_once()
+            self.assertFalse(mf.git_commit_available(pathlib.Path("/x"), "b69c9706"))
+        g.assert_not_called()
+        deep.assert_not_called()
+
+    def test_unshallow_resolves_abbreviated_sha(self):
+        # The real case: an abbreviated sha, missing locally, resolved by
+        # deepening (unshallow) rather than a by-sha fetch.
+        mf.set_git_fetch_mode("unshallow")
+        with unittest.mock.patch.object(mf, "_git_resolves", side_effect=[False, True]), \
+             unittest.mock.patch.object(mf, "_git") as g, \
+             unittest.mock.patch.object(mf, "_git_deepen") as deep:
+            self.assertTrue(mf.git_commit_available(pathlib.Path("/x"), "b69c9706"))
+        g.assert_not_called()            # no doomed by-sha fetch
+        deep.assert_called_once()        # deepened to get the history
 
     def test_result_is_cached(self):
         mf.set_git_fetch_mode("targeted")
