@@ -928,12 +928,12 @@ class CompactWorkflow(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(mf.compact_workflow(name), slug)
 
-    def test_compact_list_has_count(self):
-        out = mf._compact_wf_list(["Windows Vulkan AMD DXC", "macOS Metal DXC"])
-        self.assertEqual(out, "2: AMD/Vulkan/DXC, Metal/DXC/macOS")
+    def test_md_wf_list_full_names_with_count(self):
+        out = mf._md_wf_list(["Windows Vulkan AMD DXC", "macOS Metal DXC"])
+        self.assertEqual(out, "2: Windows Vulkan AMD DXC, macOS Metal DXC")
 
-    def test_compact_list_empty(self):
-        self.assertEqual(mf._compact_wf_list([]), "-")
+    def test_md_wf_list_empty(self):
+        self.assertEqual(mf._md_wf_list([]), "-")
 
     def test_truncate(self):
         self.assertEqual(mf._truncate("abcdef", 10), "abcdef")

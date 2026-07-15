@@ -729,11 +729,13 @@ def compact_workflow(name: str) -> str:
     return "/".join(parts) or name
 
 
-def _compact_wf_list(names: list[str]) -> str:
-    """Comma-join workflow names as compact slugs, prefixed with the count."""
+def _md_wf_list(names: list[str]) -> str:
+    """Comma-join full workflow names, prefixed with the count (markdown cells).
+    Full names (not compact slugs) so they're easy to match against the workflow
+    table and the section headers."""
     if not names:
         return "-"
-    return f"{len(names)}: " + ", ".join(compact_workflow(n) for n in names)
+    return f"{len(names)}: " + ", ".join(names)
 
 
 def _truncate(text: str, limit: int = 60) -> str:
@@ -2195,8 +2197,8 @@ def main() -> None:
                "The 'axis' column names the axis (api / gpu / compiler) on which the failure",
                "set is homogeneous — e.g. 'api: Vulkan-only' = all failing workflows are",
                "Vulkan, at least one non-Vulkan workflow passes. "
-               "The 'fails on' / 'passes on' columns use compact `gpu/api/compiler` "
-               "slugs (with the count) instead of full workflow names.",
+               "The 'fails on' / 'passes on' columns list the full workflow names, "
+               "prefixed with the count.",
                "",
                "| test | classification | axis | fails on | passes on |",
                "|---|---|---|---|---|"]
@@ -2204,7 +2206,7 @@ def main() -> None:
             axis_bits = [f"{k.replace('_pattern','')}: {v}" for k, v in (d.get("axes") or {}).items()]
             axis_str = "; ".join(axis_bits) or "-"
             md.append(f"| `{d['test']}` | {d['classification']} | {axis_str} | "
-                      f"{_compact_wf_list(d['fails_on'])} | {_compact_wf_list(d['passes_on'])} |")
+                      f"{_md_wf_list(d['fails_on'])} | {_md_wf_list(d['passes_on'])} |")
         md.append("")
 
     tested = [r for r in summary if r.get("tests")]
@@ -2232,7 +2234,7 @@ def main() -> None:
                 # can't break the markdown table cell.
                 ncell.append(t["note"].replace("|", "\\|"))
             if t.get("passes_on"):
-                ncell.append(f"passes on {_compact_wf_list(t['passes_on'])}")
+                ncell.append(f"passes on {_md_wf_list(t['passes_on'])}")
             notes = "<br>".join(ncell) or "—"
             md.append(f"| {t['result']} | `{t['test']}` | "
                       f"{t.get('classification','')} | {issues} | {notes} |")
