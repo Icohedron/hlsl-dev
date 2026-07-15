@@ -406,6 +406,61 @@ class ExtractAllResults(unittest.TestCase):
         self.assertTrue(set(res.values()) <= valid, f"unexpected result kinds: {set(res.values()) - valid}")
 
 
+_XUNIT = """<?xml version="1.0" encoding="UTF-8"?>
+<testsuites time="2.00">
+<testsuite name="OffloadTest-d3d12" tests="4" failures="1" skipped="1" time="2.00">
+<testcase classname="OffloadTest-d3d12.Feature/TypedBuffer" name="64bit-scalar.test" time="0.1">
+  <failure><![CDATA[Test failed: Test0]]></failure>
+</testcase>
+<testcase classname="OffloadTest-d3d12.Feature/TypedBuffer" name="32bit.test" time="0.1"/>
+<testcase classname="OffloadTest-d3d12.Basic" name="simple.test" time="0.1">
+  <skipped message="Missing required feature(s): Int64"/>
+</testcase>
+<testcase classname="OffloadTest-d3d12.OffloadTest-d3d12" name="root.test" time="0.1"/>
+</testsuite>
+</testsuites>
+"""
+
+
+class ParseXunit(unittest.TestCase):
+    def test_maps_failure_skip_and_pass(self):
+        r = mf.parse_xunit(_XUNIT)
+        self.assertEqual(r[("OffloadTest-d3d12", "Feature/TypedBuffer/64bit-scalar.test")], "FAIL")
+        self.assertEqual(r[("OffloadTest-d3d12", "Feature/TypedBuffer/32bit.test")], "PASS")
+        self.assertEqual(r[("OffloadTest-d3d12", "Basic/simple.test")], "UNSUPPORTED")
+
+    def test_suite_root_test_has_no_dir_prefix(self):
+        # classname == "<suite>.<suite>" (empty dir) -> test is just the basename.
+        r = mf.parse_xunit(_XUNIT)
+        self.assertEqual(r[("OffloadTest-d3d12", "root.test")], "PASS")
+
+    def test_identity_matches_log_scan(self):
+        # The reconstructed (suite, test) key must match what the log scan emits,
+        # so the two sources merge into one matrix entry.
+        log = "FAIL: OffloadTest-d3d12 :: Feature/TypedBuffer/64bit-scalar.test (1 of 9)"
+        (log_key,) = mf.extract_all_results(log)
+        self.assertIn(log_key, mf.parse_xunit(_XUNIT))
+
+    def test_malformed_xml_is_empty(self):
+        self.assertEqual(mf.parse_xunit("<not-xml"), {})
+        self.assertEqual(mf.parse_xunit("<other>doc</other>"), {})
+
+    def test_supplements_only_missing_tests(self):
+        # Merge semantics used by main(): the log scan wins; xunit only fills
+        # tests the log didn't report (setdefault), preserving XPASS/XFAIL codes.
+        log_results = {
+            ("OffloadTest-d3d12", "Feature/TypedBuffer/64bit-scalar.test"): "XPASS",
+        }
+        for k, v in mf.parse_xunit(_XUNIT).items():
+            log_results.setdefault(k, v)
+        # log's richer XPASS is kept (xunit only had the coarse FAIL)...
+        self.assertEqual(
+            log_results[("OffloadTest-d3d12", "Feature/TypedBuffer/64bit-scalar.test")], "XPASS")
+        # ...and a test the log never mentioned is filled in from xunit.
+        self.assertEqual(
+            log_results[("OffloadTest-d3d12", "Feature/TypedBuffer/32bit.test")], "PASS")
+
+
 # ---------------------------------------------------------------------------
 # XPASS → per-workflow XFAIL / issue matching
 # ---------------------------------------------------------------------------

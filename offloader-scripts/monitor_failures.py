@@ -4,6 +4,9 @@ Monitor scheduled-workflow failures on llvm/offload-test-suite.
 
 For each active workflow that has scheduled runs, fetch the latest scheduled run.
 If it's not "success", download its logs, parse them, and classify each failure.
+A cross-workflow pass/fail matrix (used to attribute blame) is built from the lit
+result lines in the logs, supplemented by each run's `testresults.xunit.xml`
+artifact when present, so the matrix stays complete regardless of log verbosity.
 
 Classification tree (best-effort, log-driven):
 
@@ -46,6 +49,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 import zipfile
 from collections import Counter, defaultdict
 from typing import Any
@@ -687,6 +691,47 @@ def extract_all_results(log_text: str) -> dict[tuple[str, str], str]:
         m = LIT_STATUS_LINE_RE.match(strip_ts(raw))
         if m:
             results[(m.group("suite"), m.group("test"))] = m.group("result")
+    return results
+
+
+def parse_xunit(xml_text: str) -> dict[tuple[str, str], str]:
+    """Parse a lit `--xunit-xml-output` document into a {(suite, test): result}
+    map, matching the identity that `extract_all_results` produces from the log
+    so the two can be merged.
+
+    lit's xunit is a COARSER signal than its text output (see lit's
+    XunitReport._write_test): a testcase is only ever pass / `<failure>` /
+    `<skipped>`, so XPASS is folded into `<failure>` (reported here as FAIL) and
+    XFAIL into a plain pass (reported as PASS). It's therefore used only to
+    *supplement* the richer log scan, never to override it.
+
+    Identity reconstruction: lit writes classname="<suite>.<dir/with/slashes>"
+    ("<suite>.<suite>" when the test is in the suite root) and name="<basename>".
+    Directory dots are squashed to '_' by lit, but offload-test-suite dirs carry
+    no dots, so `<dir>/<basename>` faithfully rebuilds the lit test path.
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return {}
+    results: dict[tuple[str, str], str] = {}
+    for ts in root.iter("testsuite"):
+        suite = ts.get("name") or ""
+        for tc in ts.findall("testcase"):
+            name = tc.get("name") or ""
+            if not name:
+                continue
+            cls = tc.get("classname") or ""
+            prefix = suite + "."
+            path = cls[len(prefix):] if cls.startswith(prefix) else ""
+            test = f"{path}/{name}" if path and path != suite else name
+            if tc.find("failure") is not None:
+                code = "FAIL"
+            elif tc.find("skipped") is not None:
+                code = "UNSUPPORTED"
+            else:
+                code = "PASS"
+            results[(suite, test)] = code
     return results
 
 
@@ -1830,6 +1875,36 @@ def download_run_logs(gh: GH, run_id: int) -> bytes:
     return gh.get_bytes(url)
 
 
+def fetch_xunit_results(gh: GH, run_id: int) -> dict[tuple[str, str], str]:
+    """Per-test outcomes from the run's `testresults.xunit.xml` artifact, or {}
+    when the run has no such artifact (older runs / expired) or it can't be
+    fetched. Best-effort: any network/zip/XML error yields {} so the caller
+    silently falls back to the log scan.
+
+    Each artifact is a zip; we open the ones whose name looks result-related and
+    merge every `<testsuites>` XML they contain. A non-xunit XML simply parses to
+    {} (harmless).
+    """
+    try:
+        data = gh.get_json(f"/repos/{REPO}/actions/runs/{run_id}/artifacts", per_page=100)
+    except (urllib.error.URLError, OSError, ValueError):
+        return {}
+    results: dict[tuple[str, str], str] = {}
+    for art in data.get("artifacts", []):
+        name = (art.get("name") or "").lower()
+        if art.get("expired") or not any(k in name for k in ("xunit", "junit", "result")):
+            continue
+        try:
+            blob = gh.get_bytes(art["archive_download_url"])
+            with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+                for n in zf.namelist():
+                    if n.endswith(".xml"):
+                        results.update(parse_xunit(zf.read(n).decode("utf-8", "replace")))
+        except (urllib.error.URLError, OSError, ValueError, KeyError, zipfile.BadZipFile):
+            continue
+    return results
+
+
 def combined_log_text(zip_bytes: bytes) -> str:
     """
     GitHub packs run logs as a zip with:
@@ -2443,6 +2518,11 @@ def main() -> None:
     ap.add_argument("--skip-logs", action="store_true", help="don't download logs, only list run statuses")
     ap.add_argument("--no-pass-matrix", action="store_true",
                     help="don't download logs for successful runs (skips cross-GPU divergence analysis)")
+    ap.add_argument("--no-xunit", action="store_true",
+                    help="don't download each run's testresults.xunit.xml artifact. By "
+                         "default it's fetched and used to fill in any test the log scan "
+                         "missed (robust to lit verbosity / truncated logs); the log scan "
+                         "stays authoritative where it has a result.")
     ap.add_argument("--no-unshallow", action="store_true",
                     help="skip the git deep-fetch/unshallow fallback when resolving a run's "
                          "offload-test-suite commit. The GitHub contents API is tried first "
@@ -2525,7 +2605,18 @@ def main() -> None:
             # platform-independent (base_suite, test) identity so the same test
             # file is grouped across workflows (e.g. OffloadTest-vk and
             # OffloadTest-warp-d3d12 both fold into OffloadTest for comparison).
-            for (suite, test), res in extract_all_results(log_text).items():
+            # The log scan is authoritative (it distinguishes XPASS/XFAIL, which
+            # xunit can't); the xunit artifact only supplements tests the scan
+            # missed (e.g. if lit wasn't verbose or the log was truncated).
+            results = extract_all_results(log_text)
+            if not args.no_xunit:
+                xunit = fetch_xunit_results(gh, run["id"])
+                added = sum(1 for k in xunit if k not in results)
+                for k, v in xunit.items():
+                    results.setdefault(k, v)
+                if added:
+                    row["xunit_added"] = added
+            for (suite, test), res in results.items():
                 matrix[normalize_test_key(suite, test)][wf["name"]] = res
 
             # Classify only failing runs.
