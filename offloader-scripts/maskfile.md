@@ -20,6 +20,12 @@ every `llvm/offload-test-suite` workflow, classifies failures, and writes
 Requires a GitHub token exported as `$GH_TOKEN` or `$GITHUB_TOKEN`. Only
 public-repo read scope is needed.
 
+Every failing test is dated "failing since": each report stores that date, so a
+run normally inherits it from the previous report under `reports/` (or any extra
+`--history-dir` root, which CI points at the published site) and reads just that
+one report; only failures with no recorded date are walked further back. Pass
+`--no-history` to skip the scan.
+
 To read each XFAIL test file at the exact revision a run tested, the monitor
 retrieves the `offload-test-suite` commit the run built. It first uses the
 GitHub **contents API** at that commit — which resolves any commit the server

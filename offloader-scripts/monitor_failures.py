@@ -22,6 +22,12 @@ Classification tree (best-effort, log-driven):
       xpass                      - test expected to fail but passed
         (with linked GitHub issue lookup from the test file)
 
+Every failing test is also dated: each report stores a "failing since" date per
+failure, so a run normally just inherits the date recorded by the previous
+report (see --history-dir). Only when the recent reports carry no record for a
+failure is the report history walked further back, newest -> oldest, to the
+oldest report in the unbroken streak carrying the same failure.
+
 The tool writes:
   offloader-scripts/reports/<UTC-timestamp>/summary.{json,md,csv}
   offloader-scripts/reports/<UTC-timestamp>/logs/<workflow>.log     (raw combined log, gzipped)
@@ -1225,9 +1231,11 @@ def test_failure_rows(entry: dict) -> list[dict]:
     and each row gets its OWN failure axis, attributed over just that row's
     failing workflows — so a row with a single failure has no axes (an axis
     needs >= 2 failures alike). The passing set is shared by every row of the
-    test. Returns rows as {classification, fails_on, axes} sorted by
-    classification.
+    test. Returns rows as {classification, fails_on, axes, failing_since} sorted
+    by classification; `failing_since` is the record of the row's longest-failing
+    workflow (the oldest date), or None when the entry carries no history.
     """
+    since_by_wf = entry.get("failing_since") or {}
     by_cls: dict[str, list[str]] = {}
     for w, cls in (entry.get("fail_classifications") or {}).items():
         by_cls.setdefault(cls or "unknown", []).append(w)
@@ -1237,7 +1245,10 @@ def test_failure_rows(entry: dict) -> list[dict]:
     rows = []
     for c, ws in sorted(by_cls.items()):
         ws = sorted(ws)
-        rows.append({"classification": c, "fails_on": ws, "axes": failure_axes(ws)})
+        recs = [since_by_wf[w] for w in ws if since_by_wf.get(w)]
+        rows.append({"classification": c, "fails_on": ws, "axes": failure_axes(ws),
+                     "failing_since": (min(recs, key=lambda r: r["failing_since"])
+                                       if recs else None)})
     return rows
 
 
@@ -2239,6 +2250,284 @@ def _fmt_commits(commits: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Failure history — "failing since"
+#
+# Each run writes its own report directory, so the sibling directories (plus any
+# extra --history-dir root, e.g. the accumulated GitHub Pages site restored in
+# CI) form a chronological history. Walking it newest -> oldest and stopping at
+# the first report that proves the test did NOT fail dates every failure: the
+# oldest report of that unbroken streak is when the failure started.
+#
+# The walk is incremental, not a full history scan. Every report *stores* the
+# date it computed for each failure, so the newest report that still carries a
+# failure has already done the walk for everything older: its recorded date is
+# inherited as-is and the walk stops there. The common steady state therefore
+# reads exactly ONE past report, and reports are loaded lazily so the rest are
+# never even parsed. Only a failure that's absent from (or unrecorded in) the
+# recent reports falls back to walking further back — which is also what makes
+# the feature work on a history written before it existed.
+# ---------------------------------------------------------------------------
+
+
+REPORT_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z$")
+REPORT_TS_FMT = "%Y-%m-%dT%H-%M-%SZ"
+
+
+def parse_report_ts(name: str) -> dt.datetime | None:
+    """Parse a report directory name (`2026-07-15T01-26-47Z`) to an aware UTC
+    datetime, or None if it isn't one. The format sorts lexicographically in
+    chronological order, so plain string ordering is used elsewhere."""
+    if not REPORT_TS_RE.match(name or ""):
+        return None
+    try:
+        return dt.datetime.strptime(name, REPORT_TS_FMT).replace(tzinfo=dt.UTC)
+    except ValueError:
+        return None
+
+
+def failure_key(workflow: str, suite: str, test: str, result: str) -> tuple[str, str, str, str]:
+    """Identity of "the same failure" across reports: the workflow it happened
+    on, the platform-independent (base suite, test path) identity, and the lit
+    result (FAIL vs XPASS — a test flipping between the two is a *different*
+    failure and restarts the clock).
+
+    Deliberately NOT keyed on the classification: that label is re-derived every
+    run and can shift with the cross-workflow pivot (e.g. `runtime_miscompile` ->
+    `compiler_suspected_miscompile` as soon as a peer workflow starts passing)
+    without the underlying failure having changed.
+    """
+    base_suite, test_path = normalize_test_key(suite, test)
+    return (workflow, base_suite, test_path, result)
+
+
+def _row_has_test_results(row: dict) -> bool:
+    """True iff a past report's workflow row is evidence about individual tests,
+    i.e. a test NOT listed as failing really did not fail.
+
+    Only two shapes qualify: a successful run (everything passed) and a failing
+    run whose per-test FAIL/XPASS blocks were parsed. A build failure, a run
+    that never reported per-test blocks (`unknown_no_blocks`), a log we couldn't
+    download, and a still-running / cancelled run all say nothing about a given
+    test — such reports are skipped when walking the history rather than treated
+    as a passing report that ends the streak.
+    """
+    if row.get("log_error"):
+        return False
+    conclusion = row.get("conclusion")
+    if conclusion == "success":
+        return True
+    if conclusion != "failure":
+        return False
+    return row.get("category") == "test_failure" and row.get("detail") != "unknown_no_blocks"
+
+
+class PastReport:
+    """A previously written report reduced to what dating a failure needs: the
+    failures it recorded (each with the "failing since" record that report
+    itself computed, when it has one), and which workflows it can speak for."""
+
+    def __init__(self, ts: str, rows: list[dict]):
+        self.ts = ts
+        # key -> the report's own failing-since record, or None when it predates
+        # the feature / didn't record one.
+        self._failures: dict[tuple[str, str, str, str], dict | None] = {}
+        self._results_known: dict[str, bool] = {}
+        for row in rows:
+            workflow = row.get("workflow")
+            if not workflow:
+                continue
+            self._results_known[workflow] = _row_has_test_results(row)
+            for t in row.get("tests") or []:
+                key = failure_key(workflow, t.get("suite", ""),
+                                  t.get("test", ""), t.get("result", ""))
+                self._failures[key] = self._since_record(t)
+
+    @staticmethod
+    def _since_record(t: dict) -> dict | None:
+        """The failing-since record a past report stored for one test entry, or
+        None if it has none (a report written before this feature existed)."""
+        since = t.get("failing_since")
+        if not since or parse_report_ts(since) is None:
+            return None
+        return {"failing_since": since,
+                "failing_since_reports": t.get("failing_since_reports") or 1,
+                "failing_since_truncated": bool(t.get("failing_since_truncated"))}
+
+    def has_failure(self, key: tuple[str, str, str, str]) -> bool:
+        return key in self._failures
+
+    def recorded_since(self, key: tuple[str, str, str, str]) -> dict | None:
+        """This report's own failing-since record for `key`, when it has one —
+        the fast path: it already dated the failure against everything older."""
+        return self._failures.get(key)
+
+    def knows_results(self, workflow: str) -> bool:
+        return self._results_known.get(workflow, False)
+
+    @classmethod
+    def load(cls, report_dir: pathlib.Path) -> "PastReport | None":
+        """Read `<report_dir>/summary.json`; None if missing or unreadable (a
+        half-written or hand-edited report must not abort the run)."""
+        try:
+            rows = json.loads((report_dir / "summary.json").read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(rows, list):
+            return None
+        return cls(report_dir.name, rows)
+
+
+class ReportHistory:
+    """Past reports in chronological order, parsed on demand.
+
+    Holds one entry per report directory but reads `summary.json` only when the
+    walk actually reaches that report, so the usual case — inheriting a date
+    recorded by the newest report — parses a single file no matter how long the
+    retained history is. Entries may also be pre-built `PastReport` objects (for
+    tests / in-memory use).
+    """
+
+    def __init__(self, sources=()):
+        self._sources = list(sources)          # oldest first: Path or PastReport
+        self._cache: dict[int, PastReport | None] = {}
+        self.loads = 0                         # summary.json files actually read
+
+    def __len__(self) -> int:
+        return len(self._sources)
+
+    @property
+    def timestamps(self) -> list[str]:
+        """Report timestamps, oldest first (from directory names — no parsing)."""
+        return [s.ts if isinstance(s, PastReport) else s.name for s in self._sources]
+
+    def at(self, i: int) -> PastReport | None:
+        """The i-th report (0 = oldest), parsing it on first access. None when
+        its summary.json is missing or unreadable — the walk then treats it like
+        any other report that can't speak for the workflow."""
+        src = self._sources[i]
+        if isinstance(src, PastReport):
+            return src
+        if i not in self._cache:
+            self.loads += 1
+            self._cache[i] = PastReport.load(src)
+        return self._cache[i]
+
+
+def load_report_history(roots, exclude=()) -> ReportHistory:
+    """Index every past report found under `roots`, oldest first.
+
+    `roots` are directories holding `<UTC-timestamp>/summary.json` children (the
+    local `reports/` dir and, in CI, the accumulated Pages site restored from
+    cache). A timestamp seen in more than one root is indexed once, first root
+    wins. `exclude` drops directories (e.g. the run being written right now).
+
+    Only directory names are inspected here; the reports themselves are parsed
+    lazily by `ReportHistory.at`.
+    """
+    excluded = {pathlib.Path(p).resolve() for p in exclude}
+    found: dict[str, pathlib.Path] = {}
+    for root in roots:
+        root = pathlib.Path(root)
+        if not root.is_dir():
+            continue
+        for d in sorted(root.iterdir()):
+            if not d.is_dir() or parse_report_ts(d.name) is None:
+                continue
+            if d.name in found or d.resolve() in excluded:
+                continue
+            if not (d / "summary.json").is_file():
+                continue
+            found[d.name] = d
+    return ReportHistory(found[name] for name in sorted(found))
+
+
+def failing_since(history, workflow: str, suite: str, test: str,
+                  result: str, current_ts: str) -> dict:
+    """Date a failure by walking `history` (a `ReportHistory`, or a plain
+    oldest-first list of `PastReport`s) backwards from the newest report,
+    extending the streak while the same failure is present.
+
+    Fast path: the first report reached that both carries the failure AND
+    recorded its own "failing since" for it ends the walk — that report already
+    dated the failure against everything older, so its date (and truncation
+    flag) is inherited and its streak length added to what we've counted. In the
+    steady state that's the newest report, i.e. exactly one summary.json is
+    parsed however long the history is.
+
+    Slow path (a failure the recent reports don't carry a record for — e.g.
+    history written before this feature existed): keep walking. The walk stops
+    at the first report that *proves* the test didn't fail then
+    (`_row_has_test_results` — a green run, or a red run whose per-test blocks
+    were parsed and don't list it). Reports that can't speak for the workflow
+    (build failure, missing log, workflow not yet existing, run still going) are
+    skipped without ending the streak, so a single broken build doesn't reset a
+    long-standing failure's date.
+
+    Returns `{failing_since, failing_since_reports, failing_since_truncated}`:
+    the timestamp of the oldest report in the streak (the current run when the
+    failure is new), how many reports actually recorded the failure (this run
+    plus each past report in the streak — skipped, silent reports are not
+    counted), and whether the streak reaches the oldest retained report — in
+    which case the real start is *at or before* that date (history is pruned
+    after 30 days).
+    """
+    if not isinstance(history, ReportHistory):
+        history = ReportHistory(history)
+    key = failure_key(workflow, suite, test, result)
+    since, reports, truncated = current_ts, 1, False
+    for i in range(len(history) - 1, -1, -1):
+        past = history.at(i)
+        if past is None:
+            continue  # unreadable report: says nothing either way
+        if past.has_failure(key):
+            recorded = past.recorded_since(key)
+            if recorded:
+                # Inherit the date this report already computed and stop.
+                return {"failing_since": recorded["failing_since"],
+                        "failing_since_reports": reports + recorded["failing_since_reports"],
+                        "failing_since_truncated": recorded["failing_since_truncated"]}
+            since = past.ts
+            reports += 1
+            truncated = i == 0
+            continue
+        if past.knows_results(workflow):
+            break  # the test did not fail in this report: the streak starts after it
+        # Otherwise the report is silent about this test — skip it.
+    return {"failing_since": since,
+            "failing_since_reports": reports,
+            "failing_since_truncated": truncated}
+
+
+def _fmt_age(delta: dt.timedelta) -> str:
+    """Coarse human age for a 'failing since' cell: `12d` / `5h` / `new`."""
+    secs = max(0, int(delta.total_seconds()))
+    if secs >= 86400:
+        return f"{secs // 86400}d"
+    if secs >= 3600:
+        return f"{secs // 3600}h"
+    return "new"
+
+
+def fmt_failing_since(rec: dict | None, now_ts: str) -> str:
+    """Render a failing-since record as `2026-07-12 01:26Z (12d, 9 reports)`,
+    prefixed with `\u2265` when the streak runs off the end of the retained
+    history (it started at or before that date). '-' when unknown."""
+    since = (rec or {}).get("failing_since")
+    if not since:
+        return "-"
+    when, now = parse_report_ts(since), parse_report_ts(now_ts)
+    label = when.strftime("%Y-%m-%d %H:%MZ") if when else since
+    bits = []
+    if when and now:
+        bits.append(_fmt_age(now - when))
+    n = rec.get("failing_since_reports") or 0
+    if n:
+        bits.append(f"{n} report{'' if n == 1 else 's'}")
+    out = f"{label} ({', '.join(bits)})" if bits else label
+    return f"\u2265 {out}" if rec.get("failing_since_truncated") else out
+
+
+# ---------------------------------------------------------------------------
 # HTML report
 #
 # A single self-contained file (inline CSS/JS, no external requests) meant to be
@@ -2282,6 +2571,8 @@ tbody tr:nth-child(even){background:var(--row-alt)}
 td.test{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
   white-space:nowrap;max-width:34ch;overflow:hidden;text-overflow:ellipsis}
 td.note{max-width:44ch;color:var(--muted);font-size:12px}
+td.since{white-space:nowrap;font-size:12px;font-variant-numeric:tabular-nums}
+td.since .age{color:var(--muted)}
 .passgrp{margin:2px 0}.passgrp+.passgrp{margin-top:3px;padding-top:3px;border-top:1px dashed var(--border)}
 .muted{color:var(--muted);font-size:12px}
 .chip{display:inline-block;padding:1px 7px;border-radius:2em;font-size:11px;
@@ -2488,6 +2779,18 @@ def _html_pass_groups(passes_on: list[str], axes: dict,
     )
 
 
+def _html_since(rec: dict | None, now_ts: str) -> str:
+    """Failing-since cell: the date, with the age / streak length muted."""
+    text = fmt_failing_since(rec, now_ts)
+    if text == "-":
+        return '<span class="muted">\u2014</span>'
+    head, sep, tail = text.partition(" (")
+    if not sep:
+        return html.escape(text)
+    return (f"{html.escape(head)} "
+            f'<span class=age>({html.escape(tail)}</span>')
+
+
 def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict],
                        used_labels: Counter) -> str:
     esc = html.escape
@@ -2577,7 +2880,7 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
                  f'<span class=count>({n_rows} test/classification rows · '
                  'fails on some workflows, passes on others)</span></h2>')
         h.append("<table><thead><tr><th>test</th><th>classification</th><th>failure axis</th>"
-                 "<th>fails on</th><th>passes on</th></tr></thead><tbody>")
+                 "<th>failing since</th><th>fails on</th><th>passes on</th></tr></thead><tbody>")
         for d in divergences:
             passes_on = d.get("passes_on") or []
             for row in test_failure_rows(d):
@@ -2588,6 +2891,7 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
                     f'<tr class=f><td class=test>{esc(d["test"])}</td>'
                     f'<td>{_html_chip(row["classification"])}</td>'
                     f"<td>{_html_axis_chips(row_axes)}</td>"
+                    f'<td class=since>{_html_since(row.get("failing_since"), run_ts)}</td>'
                     f'<td class=note>{_html_wf_list(row["fails_on"], run_urls=run_urls)}</td>'
                     f'<td class=note>{_html_pass_groups(passes_on, row_axes, run_urls=run_urls)}</td></tr>')
         h.append("</tbody></table>")
@@ -2602,13 +2906,14 @@ def render_html_report(run_ts: str, summary: list[dict], divergences: list[dict]
                      f'<span class=count>\u2014 {len(tests)} failure(s)</span></summary>')
             h.append(f'<div class=meta><a href="{esc(r["run_url"])}" target=_blank>run \u2197</a></div>')
             h.append("<table><thead><tr><th>result</th><th>test</th><th>classification</th>"
-                     "<th>issues</th><th>notes</th></tr></thead><tbody>")
+                     "<th>failing since</th><th>issues</th><th>notes</th></tr></thead><tbody>")
             for t in tests:
                 res = t.get("result", "")
                 h.append(
                     f'<tr class=f><td class="res-{esc(res)}">{esc(res)}</td>'
                     f"<td class=test>{esc(t['test'])}</td>"
                     f"<td>{_html_chip(t.get('classification',''))}</td>"
+                    f"<td class=since>{_html_since(t, run_ts)}</td>"
                     f"<td>{_html_issue_badges(t)}</td>"
                     f'<td class=note>{_html_note(t)}</td></tr>')
             h.append("</tbody></table></details>")
@@ -2621,6 +2926,14 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--otss-root", default=str(pathlib.Path(__file__).resolve().parent.parent / "offload-test-suite"))
     ap.add_argument("--out-root", default=str(pathlib.Path(__file__).resolve().parent / "reports"))
+    ap.add_argument("--history-dir", action="append", default=[], metavar="DIR",
+                    help="extra directory of past reports (<UTC-timestamp>/summary.json "
+                         "children) to date failures against; repeatable. --out-root is "
+                         "always scanned, so locally the sibling reports are used "
+                         "automatically; in CI point this at the accumulated published "
+                         "site (e.g. _site/offload-test-report/reports)")
+    ap.add_argument("--no-history", action="store_true",
+                    help="don't scan past reports; every failure is dated to this run")
     ap.add_argument("--skip-logs", action="store_true", help="don't download logs, only list run statuses")
     ap.add_argument("--no-pass-matrix", action="store_true",
                     help="don't download logs for successful runs (skips cross-GPU divergence analysis)")
@@ -2662,6 +2975,17 @@ def main() -> None:
     run_ts = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
     out_dir = pathlib.Path(args.out_root) / run_ts
     (out_dir / "logs").mkdir(parents=True, exist_ok=True)
+
+    # Past reports, oldest first, used to date each failure ("failing since").
+    # The extra --history-dir roots come first so a report published in CI wins
+    # over a same-timestamp local copy. Only directory names are indexed here;
+    # each summary.json is parsed only if a failure's walk reaches it (usually
+    # just the newest one, whose recorded dates are inherited).
+    history = ReportHistory()
+    if not args.no_history:
+        history = load_report_history([*args.history_dir, args.out_root], exclude=[out_dir])
+    print(f"[{len(history)}] past report(s) available for failing-since dating",
+          file=sys.stderr)
 
     summary: list[dict] = []
     issue_cache: dict = {}
@@ -2729,6 +3053,17 @@ def main() -> None:
             if run["conclusion"] == "failure":
                 row.update(classify_run(log_text, gh, otss_root, issue_cache, wf["name"]))
         summary.append(row)
+
+    # ---- date every failure against the report history ("failing since") ----
+    # Done before the pivot so the divergence rows can carry the dates too.
+    # Keyed on (workflow, base suite, test) — the same identity the pivot uses.
+    since_by_key: dict[tuple[str, str, str], dict] = {}
+    for r in summary:
+        for t in r.get("tests") or []:
+            rec = failing_since(history, r["workflow"], t["suite"], t["test"],
+                                t.get("result", ""), run_ts)
+            t.update(rec)
+            since_by_key[(r["workflow"], *normalize_test_key(t["suite"], t["test"]))] = rec
 
     # ---- cross-workflow pivot: build the test failure summary ----
     # A test's failure MODE (miscompile / crash / unknown) can differ per
@@ -2822,6 +3157,12 @@ def main() -> None:
                         "classifications": sorted(set(fail_cls.values())),
                         "fail_classifications": fail_cls,
                         "axes": axes,
+                        # Per-workflow "failing since" records, so a row can be
+                        # dated by its longest-failing workflow.
+                        "failing_since": {
+                            w: since_by_key[(w, *key)]
+                            for w in fails_on if (w, *key) in since_by_key
+                        },
                         "fails_on": fails_on, "passes_on": passes_on,
                     })
 
@@ -2943,8 +3284,17 @@ def main() -> None:
                "compiler passes — which is the high-confidence case that it's the compiler",
                "and not the backend/driver.",
                "",
-               "| test | classification | failure axis | fails on | passes on |",
-               "|---|---|---|---|---|"]
+               "The **failing since** column dates the failure: the report history is walked",
+               "newest-first and the oldest report of the unbroken streak carrying the same",
+               "failure (same workflow, same test, same FAIL/XPASS result) is reported.",
+               "Reports that can't speak for a workflow (build failure, missing log, run",
+               "still in flight) are skipped rather than counted as a pass, so one broken",
+               "build doesn't reset the date. A `\u2265` prefix means the streak reaches the",
+               "oldest retained report, i.e. it started at or before that date. Each row is",
+               "dated by its longest-failing workflow.",
+               "",
+               "| test | classification | failure axis | failing since | fails on | passes on |",
+               "|---|---|---|---|---|---|"]
         for d in divergences:
             passes_on = d.get("passes_on") or []
             for row in test_failure_rows(d):
@@ -2952,8 +3302,9 @@ def main() -> None:
                 axis_str = "; ".join(f"{k.replace('_pattern','')}: {v}"
                                      for k, v in row_axes.items()) or "-"
                 passes_str = _md_pass_groups(passes_on, row_axes)
+                since_str = fmt_failing_since(row.get("failing_since"), run_ts)
                 md.append(f"| `{d['test']}` | `{row['classification']}` | {axis_str} | "
-                          f"{_md_wf_list(row['fails_on'])} | {passes_str} |")
+                          f"{since_str} | {_md_wf_list(row['fails_on'])} | {passes_str} |")
         md.append("")
 
     tested = [r for r in summary if r.get("tests")]
@@ -2966,8 +3317,8 @@ def main() -> None:
                "",
                f"[run]({r['run_url']})",
                ""]
-        md += ["| result | test | classification | issues | notes |",
-               "|---|---|---|---|---|"]
+        md += ["| result | test | classification | failing since | issues | notes |",
+               "|---|---|---|---|---|---|"]
         for t in tests:
             recs = _issue_records(t)
             issues = "<br>".join(
@@ -2984,7 +3335,8 @@ def main() -> None:
             # Cross-workflow divergences section carries it where it matters.
             notes = "<br>".join(ncell) or "—"
             md.append(f"| {t['result']} | `{t['test']}` | "
-                      f"{t.get('classification','')} | {issues} | {notes} |")
+                      f"{t.get('classification','')} | {fmt_failing_since(t, run_ts)} | "
+                      f"{issues} | {notes} |")
         md += ["", "</details>", ""]
     (out_dir / "summary.md").write_text("\n".join(md))
 
@@ -2995,23 +3347,29 @@ def main() -> None:
     with (out_dir / "summary.csv").open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["workflow", "conclusion", "category", "detail", "result", "suite", "test",
-                    "classification", "passes_on", "fails_on", "linked_issue_url", "linked_issue_state", "run_url"])
+                    "classification", "failing_since", "failing_since_reports",
+                    "failing_since_truncated", "passes_on", "fails_on",
+                    "linked_issue_url", "linked_issue_state", "run_url"])
         for r in summary:
             tests = r.get("tests") or []
             if not tests:
                 w.writerow([r["workflow"], r["conclusion"] or r["status"], r.get("category",""), r.get("detail",""),
-                            "", "", "", "", "", "", "", "", r["run_url"]])
+                            "", "", "", "", "", "", "", "", "", "", "", r["run_url"]])
             for t in tests:
                 li = t.get("linked_issue") or {}
                 all_urls = [d["url"] for d in (t.get("linked_issues") or ([li] if li else []))]
                 w.writerow([r["workflow"], r["conclusion"] or r["status"], r.get("category",""), r.get("detail",""),
                             t["result"], t["suite"], t["test"], t.get("classification",""),
+                            t.get("failing_since",""), t.get("failing_since_reports",""),
+                            int(bool(t.get("failing_since_truncated"))),
                             ";".join(t.get("passes_on") or []), ";".join(t.get("fails_on") or []),
                             ";".join(all_urls), li.get("state",""), r["run_url"]])
 
     print(f"\nReport: {out_dir}", file=sys.stderr)
     print(f"  summary.md / summary.html / summary.json / summary.csv / divergences.json", file=sys.stderr)
     print(f"  {len(divergences)} tests fail-on-some/pass-on-others (test failure summary)", file=sys.stderr)
+    print(f"  failures dated against {len(history)} past report(s) "
+          f"({history.loads} read)", file=sys.stderr)
 
 
 if __name__ == "__main__":

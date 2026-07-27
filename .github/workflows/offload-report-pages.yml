@@ -9,6 +9,11 @@
 # 30 days are pruned. The accumulated site is carried between runs via
 # actions/cache and deployed with the official GitHub Pages pipeline.
 #
+# The retained reports double as the monitor's *history*: it scans them to date
+# every failing test ("failing since"), so the cache is restored before the
+# report is generated. Pruning bounds that history at 30 days — a failure older
+# than the oldest retained report is dated `≥ <that report>`.
+#
 # Persistence note: the cache is keyed uniquely per run (a cache entry is
 # immutable and its save is skipped on an exact-key hit), with a `restore-keys`
 # prefix that pulls the newest previous snapshot. The cache is best-effort
@@ -71,6 +76,23 @@ jobs:
       - name: Clone offload-test-suite
         run: git clone --quiet https://github.com/llvm/offload-test-suite.git offload-test-suite
 
+      # Restore the accumulated site from the newest previous cache entry. The
+      # run-scoped `key` is intentionally always a miss (forcing a fresh save
+      # below); `restore-keys` prefix-matches and returns the most recent
+      # offload-site-* snapshot.
+      #
+      # Restored BEFORE the report is generated: the retained
+      # `reports/<timestamp>/summary.json` files are the report history the
+      # monitor scans to give each failing test a "failing since" date, so they
+      # must be on disk when it runs.
+      - name: Restore accumulated site
+        uses: actions/cache/restore@v4
+        with:
+          path: _site
+          key: offload-site-${{ github.run_id }}
+          restore-keys: |
+            offload-site-
+
       - name: Generate report
         working-directory: offloader-scripts
         env:
@@ -79,19 +101,11 @@ jobs:
         # Don't fail the whole job on a transient monitor error — we still want
         # to republish the existing (carried-forward) reports and landing page.
         continue-on-error: true
-        run: python3 monitor_failures.py
-
-      # Restore the accumulated site from the newest previous cache entry. The
-      # run-scoped `key` is intentionally always a miss (forcing a fresh save
-      # below); `restore-keys` prefix-matches and returns the most recent
-      # offload-site-* snapshot.
-      - name: Restore accumulated site
-        uses: actions/cache/restore@v4
-        with:
-          path: _site
-          key: offload-site-${{ github.run_id }}
-          restore-keys: |
-            offload-site-
+        # --history-dir points at the published reports restored above (path is
+        # relative to offloader-scripts/). Missing on the very first run (or
+        # after a cache eviction) — that's fine, it's simply skipped and every
+        # failure is then dated to this run.
+        run: python3 monitor_failures.py --history-dir ../_site/offload-test-report/reports
 
       # Build into the offload-test-report/ subdir so the site serves at
       # <pages-root>/offload-test-report/. index.html uses relative links, so the

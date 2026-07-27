@@ -7,10 +7,13 @@ Run:  python3 -m unittest discover -s offloader-scripts/tests -v
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import pathlib
+import shutil
 import sys
+import time
 import tempfile
 import urllib.error
 import unittest
@@ -1923,6 +1926,7 @@ class MainSmoke(unittest.TestCase):
         logs = {1: _LOG_A, 2: _LOG_B, 3: _LOG_C}
         argv = ["monitor_failures.py",
                 "--otss-root", str(otss_root), "--out-root", str(out_root)]
+        before = {p for p in out_root.iterdir()} if out_root.is_dir() else set()
         with unittest.mock.patch.object(mf, "load_token", return_value="tok"), \
              unittest.mock.patch.object(mf, "fetch_workflows", return_value=workflows), \
              unittest.mock.patch.object(mf, "latest_scheduled_run",
@@ -1936,7 +1940,7 @@ class MainSmoke(unittest.TestCase):
                  return_value={"state": "closed", "state_reason": "completed", "title": "AMD bug"}), \
              unittest.mock.patch.object(sys, "argv", argv):
             mf.main()
-        out_dirs = [p for p in out_root.iterdir() if p.is_dir()]
+        out_dirs = [p for p in out_root.iterdir() if p.is_dir() and p not in before]
         self.assertEqual(len(out_dirs), 1)
         return out_dirs[0]
 
@@ -2001,7 +2005,7 @@ class MainSmoke(unittest.TestCase):
             self.assertIn("reached the lit test stage", md)  # test_failure
             self.assertIn("llvm-project / clang subtree", md)  # detail clang_llvm
             self.assertIn("[#337](", md)
-            self.assertIn("| result | test | classification | issues | notes |", md)
+            self.assertIn("| result | test | classification | failing since | issues | notes |", md)
             self.assertNotIn("OffloadTest-clang-vk ::", md)  # suite prefix stripped
 
             # HTML: badge with hover title + chip, well-formed close.
@@ -2013,6 +2017,338 @@ class MainSmoke(unittest.TestCase):
             # Log archives written per workflow.
             self.assertTrue((out_dir / "logs").is_dir())
             self.assertTrue(list((out_dir / "logs").glob("*.log.gz")))
+
+            # With no history, every failure is dated to this run.
+            self.assertEqual(a_tests["Feature/Foo/bar.test"]["failing_since"], out_dir.name)
+            self.assertEqual(a_tests["Feature/Foo/bar.test"]["failing_since_reports"], 1)
+            self.assertFalse(a_tests["Feature/Foo/bar.test"]["failing_since_truncated"])
+            self.assertIn("failing since", md)
+
+    def test_failing_since_dates_back_through_history(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            otss = td / "otss"
+            otss.mkdir()
+            out_root = td / "reports"
+
+            def seed(ts: str, rows: list[dict]) -> None:
+                d = out_root / ts
+                d.mkdir(parents=True)
+                (d / "summary.json").write_text(json.dumps(rows))
+
+            wf = "Windows Vulkan AMD Clang"
+            bar = {"result": "FAIL", "suite": "OffloadTest-clang-vk",
+                   "test": "Feature/Foo/bar.test", "classification": "runtime_miscompile"}
+            # oldest: bar passed (a red run whose blocks parsed, listing another test)
+            seed("2026-01-01T00-00-00Z", [{"workflow": wf, "conclusion": "failure",
+                                           "category": "test_failure",
+                                           "tests": [{"result": "FAIL",
+                                                      "suite": "OffloadTest-clang-vk",
+                                                      "test": "Feature/Foo/other.test"}]}])
+            # streak starts here — note the suite differs (platform suffix): the
+            # normalized identity must still match.
+            seed("2026-01-02T00-00-00Z", [{"workflow": wf, "conclusion": "failure",
+                                           "category": "test_failure",
+                                           "tests": [dict(bar, suite="OffloadTest-vk")]}])
+            # a build failure says nothing about the test: must not break the streak
+            seed("2026-01-03T00-00-00Z", [{"workflow": wf, "conclusion": "failure",
+                                           "category": "build_failure", "detail": "dxc"}])
+            seed("2026-01-04T00-00-00Z", [{"workflow": wf, "conclusion": "failure",
+                                           "category": "test_failure", "tests": [bar]}])
+
+            out_dir = self._run_main(out_root, otss)
+            summary = json.loads((out_dir / "summary.json").read_text())
+            tests = {t["test"]: t
+                     for r in summary if r["workflow"] == wf
+                     for t in r.get("tests") or []}
+            got = tests["Feature/Foo/bar.test"]
+            self.assertEqual(got["failing_since"], "2026-01-02T00-00-00Z")
+            # 01-02 + 01-04 + this run; the 01-03 build failure is skipped, not counted.
+            self.assertEqual(got["failing_since_reports"], 3)
+            self.assertFalse(got["failing_since_truncated"])
+            # The XPASS first appears now, so it is dated to this run.
+            self.assertEqual(
+                tests["Feature/StructuredBuffer/inc_counter_array.test"]["failing_since"],
+                out_dir.name)
+
+            # The date reaches the report tables and the divergence rows.
+            self.assertIn("2026-01-02 00:00Z", (out_dir / "summary.md").read_text())
+            self.assertIn("2026-01-02 00:00Z", (out_dir / "summary.html").read_text())
+            divs = json.loads((out_dir / "divergences.json").read_text())
+            bar_div = next(d for d in divs if d["test"] == "Feature/Foo/bar.test")
+            self.assertEqual(bar_div["failing_since"][wf]["failing_since"],
+                             "2026-01-02T00-00-00Z")
+            self.assertIn("failing_since", (out_dir / "summary.csv").read_text())
+
+    def test_failing_since_inherits_the_previous_report_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            otss = td / "otss"
+            otss.mkdir()
+            out_root = td / "reports"
+            wf = "Windows Vulkan AMD Clang"
+
+            def seed(ts: str, rows: list[dict]) -> None:
+                d = out_root / ts
+                d.mkdir(parents=True)
+                (d / "summary.json").write_text(json.dumps(rows))
+
+            # The newest past report already dated the failure to 2026-01-02.
+            # The reports BEHIND it say the test passed — a full re-walk would
+            # therefore date it to 2026-01-04, so seeing 2026-01-02 proves the
+            # recorded date was inherited and the older reports never consulted.
+            for ts in ("2026-01-01T00-00-00Z", "2026-01-03T00-00-00Z"):
+                seed(ts, [{"workflow": wf, "conclusion": "success"}])
+            seed("2026-01-04T00-00-00Z", [{
+                "workflow": wf, "conclusion": "failure", "category": "test_failure",
+                "tests": [{"result": "FAIL", "suite": "OffloadTest-vk",
+                           "test": "Feature/Foo/bar.test",
+                           "failing_since": "2026-01-02T00-00-00Z",
+                           "failing_since_reports": 7,
+                           "failing_since_truncated": False}]}])
+
+            out_dir = self._run_main(out_root, otss)
+            summary = json.loads((out_dir / "summary.json").read_text())
+            got = next(t for r in summary if r["workflow"] == wf
+                       for t in r.get("tests") or []
+                       if t["test"] == "Feature/Foo/bar.test")
+            self.assertEqual(got["failing_since"], "2026-01-02T00-00-00Z")
+            self.assertEqual(got["failing_since_reports"], 8)  # 7 + this run
+
+    def test_failing_since_carries_across_consecutive_runs(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            otss = td / "otss"
+            otss.mkdir()
+            out_root = td / "reports"
+            wf = "Windows Vulkan AMD Clang"
+
+            first = self._run_main(out_root, otss)
+            # Report dirs are second-precision: wait out the current second so
+            # the second run gets its own directory.
+            while _dt.datetime.now(_dt.UTC).strftime(mf.REPORT_TS_FMT) == first.name:
+                time.sleep(0.05)
+            second = self._run_main(out_root, otss)
+
+            def bar(report_dir):
+                summary = json.loads((report_dir / "summary.json").read_text())
+                return next(t for r in summary if r["workflow"] == wf
+                            for t in r.get("tests") or []
+                            if t["test"] == "Feature/Foo/bar.test")
+
+            self.assertEqual(bar(first)["failing_since"], first.name)
+            self.assertEqual(bar(second)["failing_since"], first.name)
+            self.assertEqual(bar(second)["failing_since_reports"], 2)
+
+
+# ---------------------------------------------------------------------------
+# Failing-since history walk
+# ---------------------------------------------------------------------------
+
+
+def _past(ts: str, rows: list[dict]) -> mf.PastReport:
+    return mf.PastReport(ts, rows)
+
+
+def _fail_row(workflow: str, *tests: str, suite: str = "OffloadTest-vk",
+              result: str = "FAIL", since: dict | None = None) -> dict:
+    """A past report's workflow row listing `tests` as failing. `since` attaches
+    the failing-since record a real report would have stored for each test."""
+    entry = dict(since or {})
+    return {"workflow": workflow, "conclusion": "failure", "category": "test_failure",
+            "tests": [{"result": result, "suite": suite, "test": t, **entry} for t in tests]}
+
+
+def _pass_row(workflow: str) -> dict:
+    return {"workflow": workflow, "conclusion": "success"}
+
+
+WF = "Windows Vulkan AMD Clang"
+NOW = "2026-02-10T00-00-00Z"
+
+
+class FailingSince(unittest.TestCase):
+    def _since(self, history, result="FAIL", suite="OffloadTest-clang-vk"):
+        return mf.failing_since(history, WF, suite, "Feature/Foo/bar.test", result, NOW)
+
+    def test_no_history_dates_to_this_run(self):
+        self.assertEqual(self._since([]),
+                         {"failing_since": NOW, "failing_since_reports": 1,
+                          "failing_since_truncated": False})
+
+    def test_streak_stops_at_the_report_that_passed(self):
+        history = [
+            _past("2026-02-01T00-00-00Z", [_fail_row(WF, "Feature/Foo/bar.test")]),
+            _past("2026-02-02T00-00-00Z", [_pass_row(WF)]),
+            _past("2026-02-03T00-00-00Z", [_fail_row(WF, "Feature/Foo/bar.test")]),
+        ]
+        got = self._since(history)
+        # The 02-02 pass ends the streak: only 02-03 counts, not the older 02-01.
+        self.assertEqual(got["failing_since"], "2026-02-03T00-00-00Z")
+        self.assertEqual(got["failing_since_reports"], 2)
+
+    def test_unknown_reports_do_not_break_the_streak(self):
+        for silent in ({"workflow": WF, "conclusion": "failure", "category": "build_failure"},
+                       {"workflow": WF, "conclusion": "failure", "category": "test_failure",
+                        "detail": "unknown_no_blocks"},
+                       {"workflow": WF, "conclusion": "failure", "log_error": "HTTP 404"},
+                       {"workflow": "Some Other Workflow", "conclusion": "success"}):
+            with self.subTest(row=silent):
+                history = [
+                    _past("2026-02-01T00-00-00Z", [_fail_row(WF, "Feature/Foo/bar.test")]),
+                    _past("2026-02-02T00-00-00Z", [silent]),
+                ]
+                self.assertEqual(self._since(history)["failing_since"],
+                                 "2026-02-01T00-00-00Z")
+
+    def test_truncated_when_streak_reaches_oldest_report(self):
+        history = [_past("2026-02-01T00-00-00Z", [_fail_row(WF, "Feature/Foo/bar.test")])]
+        got = self._since(history)
+        self.assertTrue(got["failing_since_truncated"])
+        self.assertEqual(got["failing_since"], "2026-02-01T00-00-00Z")
+
+    def test_result_flip_is_a_different_failure(self):
+        history = [_past("2026-02-01T00-00-00Z", [_fail_row(WF, "Feature/Foo/bar.test")])]
+        self.assertEqual(self._since(history, result="XPASS")["failing_since"], NOW)
+
+    def test_other_workflow_failure_does_not_count(self):
+        history = [_past("2026-02-01T00-00-00Z",
+                         [_fail_row("Windows D3D12 AMD DXC", "Feature/Foo/bar.test")])]
+        self.assertEqual(self._since(history)["failing_since"], NOW)
+
+
+class FailingSinceFastPath(unittest.TestCase):
+    """A report that already recorded a failing-since date ends the walk: it did
+    the older walk itself, so nothing behind it needs to be read."""
+
+    RECORDED = {"failing_since": "2026-01-05T00-00-00Z",
+                "failing_since_reports": 30,
+                "failing_since_truncated": True}
+
+    def _history(self, *rows_per_report) -> mf.ReportHistory:
+        """Build an on-disk history (so lazy loading is really exercised)."""
+        self.dir = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        for n, rows in enumerate(rows_per_report):
+            d = self.dir / f"2026-02-{n + 1:02d}T00-00-00Z"
+            d.mkdir(parents=True)
+            (d / "summary.json").write_text(json.dumps(rows))
+        return mf.load_report_history([self.dir])
+
+    def _since(self, history):
+        return mf.failing_since(history, WF, "OffloadTest-clang-vk",
+                                "Feature/Foo/bar.test", "FAIL", NOW)
+
+    def test_inherits_recorded_date_and_reads_one_report(self):
+        history = self._history(
+            *[[_fail_row(WF, "Feature/Foo/bar.test")] for _ in range(4)],
+            [_fail_row(WF, "Feature/Foo/bar.test", since=self.RECORDED)],
+        )
+        got = self._since(history)
+        self.assertEqual(got["failing_since"], "2026-01-05T00-00-00Z")
+        # This run + the streak the newest report had already accumulated.
+        self.assertEqual(got["failing_since_reports"], 31)
+        self.assertTrue(got["failing_since_truncated"])
+        self.assertEqual(history.loads, 1, "fast path must read only the newest report")
+
+    def test_fast_path_skips_silent_newer_reports(self):
+        history = self._history(
+            [_fail_row(WF, "Feature/Foo/bar.test", since=self.RECORDED)],
+            [{"workflow": WF, "conclusion": "failure", "category": "build_failure"}],
+        )
+        got = self._since(history)
+        self.assertEqual(got["failing_since"], "2026-01-05T00-00-00Z")
+        self.assertEqual(history.loads, 2)
+
+    def test_records_without_a_date_fall_back_to_walking(self):
+        # Reports written before the feature existed carry no record.
+        history = self._history(
+            [_pass_row(WF)],
+            [_fail_row(WF, "Feature/Foo/bar.test")],
+            [_fail_row(WF, "Feature/Foo/bar.test")],
+        )
+        got = self._since(history)
+        self.assertEqual(got["failing_since"], "2026-02-02T00-00-00Z")
+        self.assertEqual(got["failing_since_reports"], 3)
+        self.assertFalse(got["failing_since_truncated"])
+        self.assertEqual(history.loads, 3)
+
+    def test_unreadable_report_does_not_break_the_streak(self):
+        history = self._history(
+            [_fail_row(WF, "Feature/Foo/bar.test", since=self.RECORDED)],
+            [_pass_row(WF)],
+        )
+        # Corrupt the newest report: it can't speak either way, so the walk
+        # continues to the recorded date behind it instead of resetting.
+        (self.dir / "2026-02-02T00-00-00Z" / "summary.json").write_text("{ not json")
+        self.assertEqual(self._since(history)["failing_since"], "2026-01-05T00-00-00Z")
+
+
+class ReportHistoryLoading(unittest.TestCase):
+    def test_indexes_sorted_skips_junk_and_excluded(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td) / "reports"
+            for ts in ("2026-02-03T00-00-00Z", "2026-02-01T00-00-00Z"):
+                d = root / ts
+                d.mkdir(parents=True)
+                (d / "summary.json").write_text(json.dumps([_pass_row(WF)]))
+            (root / "not-a-report").mkdir()          # not a timestamp
+            (root / "2026-02-05T00-00-00Z").mkdir()  # no summary.json
+            broken = root / "2026-02-02T00-00-00Z"
+            broken.mkdir()
+            (broken / "summary.json").write_text("{ not json")
+            current = root / "2026-02-04T00-00-00Z"
+            current.mkdir()
+            (current / "summary.json").write_text(json.dumps([_pass_row(WF)]))
+
+            hist = mf.load_report_history([root], exclude=[current])
+            self.assertEqual(hist.timestamps,
+                             ["2026-02-01T00-00-00Z", "2026-02-02T00-00-00Z",
+                              "2026-02-03T00-00-00Z"])
+            # Indexing parses nothing; a broken report reads as None on access.
+            self.assertEqual(hist.loads, 0)
+            self.assertIsNone(hist.at(1))
+            self.assertIsNotNone(hist.at(0))
+            self.assertEqual(hist.loads, 2)
+
+    def test_first_root_wins_for_a_duplicate_timestamp(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            ts = "2026-02-01T00-00-00Z"
+            for root, rows in ((td / "site", [_fail_row(WF, "Feature/Foo/bar.test")]),
+                               (td / "local", [_pass_row(WF)])):
+                d = root / ts
+                d.mkdir(parents=True)
+                (d / "summary.json").write_text(json.dumps(rows))
+            hist = mf.load_report_history([td / "site", td / "local"])
+            self.assertEqual(len(hist), 1)
+            self.assertTrue(hist.at(0).has_failure(
+                mf.failure_key(WF, "OffloadTest-vk", "Feature/Foo/bar.test", "FAIL")))
+
+    def test_missing_root_is_ignored(self):
+        self.assertEqual(len(mf.load_report_history(["/nonexistent/reports"])), 0)
+
+
+class FormatFailingSince(unittest.TestCase):
+    def test_age_and_streak(self):
+        rec = {"failing_since": "2026-02-01T00-00-00Z", "failing_since_reports": 9,
+               "failing_since_truncated": False}
+        self.assertEqual(mf.fmt_failing_since(rec, NOW),
+                         "2026-02-01 00:00Z (9d, 9 reports)")
+
+    def test_truncated_is_prefixed(self):
+        rec = {"failing_since": "2026-02-09T20-00-00Z", "failing_since_reports": 2,
+               "failing_since_truncated": True}
+        self.assertEqual(mf.fmt_failing_since(rec, NOW),
+                         "\u2265 2026-02-09 20:00Z (4h, 2 reports)")
+
+    def test_new_failure(self):
+        rec = {"failing_since": NOW, "failing_since_reports": 1}
+        self.assertEqual(mf.fmt_failing_since(rec, NOW), "2026-02-10 00:00Z (new, 1 report)")
+
+    def test_unknown(self):
+        self.assertEqual(mf.fmt_failing_since(None, NOW), "-")
+        self.assertEqual(mf.fmt_failing_since({}, NOW), "-")
 
 if __name__ == "__main__":
     unittest.main()
