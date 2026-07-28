@@ -29,6 +29,77 @@ Nix is a powerful package manager and build system. In this project, we use it (
     mask build-dxc
     ```
 
+## Running the Vulkan Offload Tests
+
+The `check-hlsl-vk` and `check-hlsl-clang-vk` suites compile HLSL to SPIR-V and
+then *execute* it, so they need a real Vulkan driver (an "ICD"). The dev shell
+picks one for you.
+
+### Why the shell pins a driver
+
+The Vulkan loader loads **every** ICD manifest it can find and calls into each
+one from `vkEnumeratePhysicalDevices`, so a single broken driver takes down the
+whole process. Under WSL this happens by default: Mesa's `dzn`
+(Vulkan-on-D3D12) driver is installed, fails to create a D3D12 device, and then
+segfaults during enumeration — every test dies before it starts.
+
+This cannot be fixed from `offloader`. Its `-adapter-regex` flag (and lit's
+`OFFLOADTEST_GPU_NAME`, which forwards to it) filters the device list *after*
+enumeration, i.e. after the crash. The only effective lever is the loader's
+`VK_DRIVER_FILES`, which restricts it to an explicit set of manifests.
+
+So the dev shell defaults to **lavapipe**, Mesa's CPU rasterizer: slow, but it
+works everywhere and gives reproducible results. `offload-test-suite`'s
+`lit.cfg.py` already forwards `VK_DRIVER_FILES` into the test environment, so the
+setting reaches `offloader` without any test-suite changes.
+
+### Choosing a driver
+
+```bash
+mask vk-info              # what am I running against right now?
+mask vk-list              # what can I choose?
+mask vk-use system        # switch to the real GPU
+mask vk-use lavapipe      # switch back to the CPU rasterizer
+```
+
+`mask vk-use` records your choice in `.env` (gitignored). direnv watches that
+file, so the change applies on your next prompt — no manual reload. `.env` is
+loaded by `.envrc`, so it is a direnv-only convenience; if you use plain
+`nix develop`, pass the variable explicitly instead:
+
+```bash
+HLSL_VK_DRIVER=system nix develop
+```
+
+Accepted values are `system` (let the loader discover drivers itself — use this
+on a machine with a working native driver), `lavapipe`, any Mesa ICD short name
+from `mask vk-list` (`radeon`, `intel`, `dzn`, …), or an absolute path to an ICD
+manifest. All of it is just a wrapper around the `HLSL_VK_DRIVER` environment
+variable.
+
+For a one-off run you can bypass the shell setting entirely, since lit forwards
+the loader's own variable:
+
+```bash
+VK_DRIVER_FILES=/path/to/some_icd.x86_64.json mask build-llvm check-hlsl-vk
+```
+
+### Running the suites
+
+```bash
+mask build-llvm check-hlsl-vk          # DXC on Vulkan
+mask build-llvm check-hlsl-clang-vk    # Clang on Vulkan
+
+# A single test
+./llvm-project/build/bin/llvm-lit -v \
+    ./llvm-project/build/tools/OffloadTest/test/vk/Feature/HLSLLib/log2.32.test
+```
+
+> **Note:** lavapipe is a software rasterizer and is not fully conformant. It is
+> considerably slower than a GPU, and a test that fails *only* under lavapipe is
+> more likely to be a driver limitation than a compiler bug — confirm on real
+> hardware before filing an issue.
+
 ## Managing Submodules
 
 By default, submodules are cloned with a depth of 2 (`shallow = true` in `.gitmodules`). This is enough for local testing, but it can be restrictive when preparing Pull Requests or checking out old branches.

@@ -65,6 +65,61 @@ else
 fi
 ```
 
+## vk-info
+Shows which Vulkan driver (ICD) the offload test suite will run against, and
+which device that driver actually exposes. Inside the dev shell this should
+report `llvmpipe` (lavapipe) by default, never `dzn`.
+
+```bash
+echo "HLSL_VK_DRIVER = ${HLSL_VK_DRIVER:-lavapipe (default)}"
+echo "VK_DRIVER_FILES = ${VK_DRIVER_FILES:-<unset> -> loader discovers drivers itself}"
+echo
+vulkaninfo --summary 2>/dev/null | sed -n '/^Devices:/,$p' ||
+    echo "vulkaninfo not available; enter the Nix dev shell first"
+```
+
+## vk-list
+Lists the driver names accepted by `mask vk-use`.
+
+```bash
+if [ -z "${HLSL_VK_ICD_DIR:-}" ]; then
+    echo "Not in the Nix dev shell; run 'nix develop' or 'direnv allow' first" >&2
+    exit 1
+fi
+
+echo "system      let the Vulkan loader discover drivers itself (real GPU)"
+echo "lavapipe    Mesa's CPU rasterizer - slow, but always works (default)"
+echo
+echo "Mesa ICDs in $HLSL_VK_ICD_DIR:"
+find "$HLSL_VK_ICD_DIR" -maxdepth 1 -name '*_icd.*.json' -printf '%f\n' |
+    sed -e 's/_icd\..*\.json$//' -e 's/^/    /' | sort
+echo
+echo "An absolute path to any ICD manifest is also accepted."
+```
+
+## vk-use (driver)
+Switches the Vulkan driver used by the offload test suite. The choice is written
+to `.env` (gitignored), which direnv watches, so the shell picks it up on the
+next prompt.
+
+**OPTIONS**
+* driver (required): `system`, `lavapipe`, a Mesa ICD short name (see `mask vk-list`), or a path to an ICD manifest
+
+```bash
+sed -i '/^HLSL_VK_DRIVER=/d' .env 2>/dev/null || true
+echo "HLSL_VK_DRIVER=$driver" >> .env
+
+echo "Set HLSL_VK_DRIVER=$driver in .env"
+if [ -n "${DIRENV_DIR:-}" ]; then
+    echo "direnv will reload on your next prompt; then run 'mask vk-info' to verify."
+else
+    echo
+    echo "NOTE: .env is loaded by .envrc, so it only applies under direnv."
+    echo "Without direnv, pass the variable explicitly instead:"
+    echo "    HLSL_VK_DRIVER=$driver nix develop"
+fi
+```
+
 ## fetch-history (repo)
 Fetches the full commit history of a specific submodule for when you need to rebase, branch off older commits, or create pull requests.
 
