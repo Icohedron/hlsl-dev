@@ -2,6 +2,17 @@ AGENTS.md
 result
 .direnv/
 build/
+build-*/
+install/
+
+# Per-worktree state written by the mask tasks (dependency pins, build locks)
+.hlsl-dev/
+
+# Worktrees created with `wt` sit next to the submodule they belong to
+/llvm-project.*
+/DirectXShaderCompiler.*
+/offload-test-suite.*
+/offload-golden-images.*
 .cache/
 *.o
 *.a

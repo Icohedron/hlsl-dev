@@ -20,14 +20,157 @@ Nix is a powerful package manager and build system. In this project, we use it (
     ```
 
 3.  **Configure and Build the Projects:**
-    Once cloned, use the included tasks to configure and build the compilers:
+    Once cloned, use the included tasks to configure and build the compilers.
+    The tasks act on *the checkout you are standing in*, so `cd` into it first:
     ```bash
-    mask configure-llvm
-    mask build-llvm
-    
-    mask configure-dxc
-    mask build-dxc
+    cd llvm-project && mask configure && mask build
+    cd ../DirectXShaderCompiler && mask configure && mask build
     ```
+    Or drive them from anywhere with `--in`:
+    ```bash
+    mask build --in llvm-project clang
+    mask build --in DirectXShaderCompiler
+    ```
+
+## Worktrees
+
+Every task that touches a checkout works the same way in a `wt` worktree as it
+does in the submodule itself. There is no per-worktree setup: `mask` finds the
+workspace `maskfile.md` from anywhere inside the dev shell, and the tasks work
+out what you mean from the current directory.
+
+```bash
+cd llvm-project && wt switch --create texture-store   # -> llvm-project.texture-store
+mask build                 # builds llvm-project.texture-store/build
+mask lit clang/test/CodeGenHLSL/RootSignature
+```
+
+Build artifacts always live *inside* the worktree they belong to
+(`<worktree>/build`, `<worktree>/build-dist`), so two agents working in two
+worktrees never share a build directory, and `wt remove` takes the artifacts
+with it. Concurrent `mask` invocations that would write to the *same* build
+directory are serialised with a lock rather than corrupting it, and all
+worktrees share one sccache instance, so the second build of the same upstream
+sources is mostly cache hits.
+
+### Seeing what is where
+
+```bash
+mask ls        # every worktree, its branch, whether it is built, its pins
+mask info      # what the current directory resolves to, and against what
+```
+
+### Building across worktrees
+
+A checkout rarely builds alone: an `offload-test-suite` build needs an
+`llvm-project` worktree, and running its suites needs a `dxc`. Every task takes
+the same dependency flags:
+
+```bash
+mask configure --llvm llvm-project.texture-store     # build against that LLVM
+mask test clang-vk --dxc DirectXShaderCompiler.my-fix # run against that DXC
+mask build --in offload-test-suite.my-feature --llvm ../llvm-project.texture-store
+```
+
+A dependency is resolved in this order, first match wins:
+
+1. `--llvm` / `--dxc` / `--offload` / `--golden` on the command line
+2. `$HLSL_LLVM` / `$HLSL_DXC` / `$HLSL_OFFLOAD` / `$HLSL_GOLDEN` in the
+   environment (handy for an agent that wants one setting for a whole session)
+3. a pin recorded by `mask link`, or by the last successful `mask configure`
+4. a worktree of that repository checked out on the **same branch name**
+5. the submodule checkout in the workspace root
+
+Step 3 is what makes the common case terse — configure once with the flags, and
+every later `mask build` / `mask test` in that worktree keeps using them:
+
+```bash
+cd offload-test-suite.my-feature
+mask link --llvm texture-store --dxc DirectXShaderCompiler
+mask build && mask test clang-vk
+```
+
+Pins live in `.hlsl-dev/pins/` at the workspace root, never inside the
+checkouts, so `git status` in a worktree stays clean. `mask unlink` forgets
+them.
+
+A worktree spec can be a path, a directory name
+(`llvm-project.texture-store`), just the suffix (`texture-store`), or a branch
+name. `--dxc` additionally accepts a directory containing `dxc`/`dxv`, or `nix`
+for the compiler that ships with the dev shell.
+
+## Building the offload test suite standalone
+
+Building LLVM with the offload test suite as an external project gives you
+`check-hlsl-*` out of one tree, but it also means every offload change costs an
+LLVM-sized build directory. The suite's *standalone* mode
+(`offload-test-suite/docs/offload-distribution.md`) splits that in two: LLVM is
+built and installed once, and the test suite is then a small top-level CMake
+project that links against it — a ~20 second configure and a ~2 minute build,
+per worktree.
+
+```bash
+# Once per llvm-project worktree: install the distribution
+# (clang, lit tooling, the LLVM libraries the offload tools link against).
+mask dist --in llvm-project          # -> llvm-project/build-dist/install
+
+# Then, in as many offload worktrees as you like:
+cd offload-test-suite.my-feature
+mask configure --llvm llvm-project   # standalone is the default mode
+mask build
+mask test clang-vk
+```
+
+One distribution serves every offload worktree pointed at that llvm worktree.
+After changing Clang, `mask dist` again (it is incremental) and the offload
+builds pick the new toolchain up.
+
+To test a Clang *and* an offload change together, point the offload worktree at
+the llvm worktree that has the Clang change:
+
+```bash
+mask dist --in llvm-project.my-clang-fix
+cd offload-test-suite.my-feature && mask configure --llvm my-clang-fix && mask test clang-d3d12
+```
+
+If you already have a distribution built elsewhere — a shared one, or an
+unpacked CI artifact — point at it instead of building one:
+
+```bash
+mask configure --dist-prefix /path/to/llvm-prefix
+```
+
+The integrated layout is still available for an offload worktree when you want
+to exercise the in-tree build:
+
+```bash
+mask configure --mode integrated --llvm llvm-project.texture-store
+```
+
+In that mode the offload worktree has no build directory of its own: the llvm
+worktree's build tree is configured to pull it in as `OffloadTest`, and
+`mask build` / `mask test` operate there. Only one offload worktree can occupy
+an llvm build tree at a time, which is why standalone is the default.
+
+## Running tests
+
+```bash
+mask test                       # the whole check-hlsl umbrella
+mask test clang-vk              # one suite, through its ninja target
+mask test clang-vk Feature/HLSLLib          # a subdirectory
+mask test clang-vk Feature/HLSLLib/log2.32.test
+mask test clang-vk 'log2.*'     # anything that is not a path becomes a lit --filter
+
+mask lit clang/test/CodeGenHLSL/some_test.hlsl   # any lit test, from an llvm worktree
+mask build check-clang                            # or the usual ninja targets
+```
+
+Extra lit arguments go through `--lit-args`; use `=` when the value itself
+starts with a dash: `mask test clang-vk Feature --lit-args=--time-tests`.
+
+Switching DXC does not require a rebuild — `DXC_DIR` only feeds the lit
+configuration, so `mask test <suite> --dxc <worktree>` regenerates the build
+tree in seconds and compiles nothing.
 
 ## Running the Vulkan Offload Tests
 
@@ -81,18 +224,17 @@ For a one-off run you can bypass the shell setting entirely, since lit forwards
 the loader's own variable:
 
 ```bash
-VK_DRIVER_FILES=/path/to/some_icd.x86_64.json mask build-llvm check-hlsl-vk
+VK_DRIVER_FILES=/path/to/some_icd.x86_64.json mask test vk
 ```
 
 ### Running the suites
 
 ```bash
-mask build-llvm check-hlsl-vk          # DXC on Vulkan
-mask build-llvm check-hlsl-clang-vk    # Clang on Vulkan
+mask test vk                # DXC on Vulkan
+mask test clang-vk          # Clang on Vulkan
 
 # A single test
-./llvm-project/build/bin/llvm-lit -v \
-    ./llvm-project/build/tools/OffloadTest/test/vk/Feature/HLSLLib/log2.32.test
+mask test clang-vk Feature/HLSLLib/log2.32.test
 ```
 
 > **Note:** lavapipe is a software rasterizer and is not fully conformant. It is
@@ -135,3 +277,42 @@ mask truncate-history llvm-project
 ## Adding / Fixing Submodule URLs
 
 If the placeholder URLs for `offload-test-suite` or `offload-golden-images` in `.gitmodules` are incorrect, edit the `.gitmodules` file with the correct repository URLs, then run `git submodule sync` and `mask setup`.
+
+## How the tasks are put together
+
+| Where | What |
+|---|---|
+| `maskfile.md` | the task surface: `ls`, `info`, `link`, `configure`, `build`, `dist`, `test`, `lit`, `clean`, … |
+| `scripts/hlsl-dev.sh` | worktree detection, dependency resolution, pins, locks, and the CMake invocations |
+| `flake.nix` | the dev shell, and the CMake flag *templates* for each build flavour |
+
+The flag lists in `flake.nix` are templates: placeholders such as
+`$HD_LLVM_SRC`, `$HD_DXC_BIN_DIR` or `$HD_OFFLOAD_SRC` are left unexpanded in
+the environment and filled in per invocation, once the tasks have resolved
+which worktrees a command applies to. That is what lets one flag list serve
+every worktree of a repository instead of a single hard-coded checkout — tune
+build options in `flake.nix`, and every worktree picks them up on its next
+configure.
+
+`mask` itself is wrapped in the dev shell so that it finds this `maskfile.md`
+from any directory (a `maskfile.md` in the current directory, or an explicit
+`--maskfile`, still wins).
+
+### Useful environment variables
+
+| Variable | Effect |
+|---|---|
+| `HLSL_WT` | act on this worktree, as if `--in` had been passed |
+| `HLSL_LLVM`, `HLSL_DXC`, `HLSL_OFFLOAD`, `HLSL_GOLDEN` | default dependencies for this shell |
+| `HLSL_MODE` | `standalone` or `integrated` for offload worktrees |
+| `HLSL_BUILD_TYPE`, `HLSL_BUILD_DIR` | build type / build directory |
+| `HLSL_DIST_PREFIX` | an already-installed LLVM distribution to build against |
+| `HLSL_VK_DRIVER` | Vulkan ICD selection (see above) |
+
+They are the same knobs as the flags, which makes them convenient for an agent
+that wants one setting to apply to a whole session:
+
+```bash
+export HLSL_LLVM=llvm-project.texture-store
+mask build && mask test clang-vk        # both use that LLVM
+```

@@ -59,12 +59,39 @@
           ]
         );
 
+        # ----------------------------------------------------------------------
+        # `mask` wrapper
+        # ----------------------------------------------------------------------
+        # `mask` only looks for a maskfile.md in the *current* directory, but
+        # the tasks are meant to be run from inside any worktree
+        # (llvm-project.my-feature/, offload-test-suite.my-feature/, ...),
+        # possibly outside the workspace root entirely. This wrapper points
+        # mask at the workspace maskfile whenever the current directory does
+        # not have one of its own, so `mask build` works everywhere.
+        maskWrapper = pkgs.writeShellScriptBin "mask" ''
+          real=${pkgs.mask}/bin/mask
+          # An explicit --maskfile, or a maskfile.md in the current directory,
+          # always wins: never surprise a caller who knows what they want.
+          for arg in "$@"; do
+            if [ "$arg" = "--maskfile" ]; then
+              exec "$real" "$@"
+            fi
+          done
+          if [ ! -f ./maskfile.md ] &&
+             [ -n "''${HLSL_DEV_ROOT:-}" ] &&
+             [ -f "$HLSL_DEV_ROOT/maskfile.md" ]; then
+            exec "$real" --maskfile "$HLSL_DEV_ROOT/maskfile.md" "$@"
+          fi
+          exec "$real" "$@"
+        '';
+
         # All packages exposed to the Nix shell environment.
         devShellPackages = with pkgs; [
           # Build tools
           cmake
           ninja
           sccache
+          util-linux # flock, used to serialise builds of the same build dir
 
           # Required libraries & headers
           zlib
@@ -82,6 +109,7 @@
           cvise
           directx-shader-compiler
           clang-tools
+          maskWrapper # Must precede `mask` so it wins on PATH
           mask # Used for task automation
           nodejs_22 # Required for Compiler Explorer (pinned to v22 LTS)
         ];
@@ -89,45 +117,103 @@
         # ----------------------------------------------------------------------
         # CMake Configurations
         # ----------------------------------------------------------------------
-        # These are defined as functions of a root directory so that the
-        # shellHook can materialise them with the real workspace path.
+        # These lists are *templates*: the `$HD_...` placeholders are left
+        # unexpanded in the environment and are filled in per invocation by
+        # scripts/hlsl-dev.sh, once it has worked out which worktrees the
+        # command applies to. That is what lets one flag list serve every
+        # worktree of a repository instead of one hard-coded checkout.
+        #
+        #   HD_BUILD_TYPE      CMake build type for this build directory
+        #   HD_INSTALL_PREFIX  install prefix for this build directory
+        #   HD_LLVM_SRC        llvm-project worktree
+        #   HD_LLVM_CMAKE_DIR  <llvm distribution prefix>/lib/cmake/llvm
+        #   HD_DXC_SRC         DirectXShaderCompiler worktree
+        #   HD_DXC_BIN_DIR     directory containing dxc/dxv
+        #   HD_OFFLOAD_SRC     offload-test-suite worktree
+        #   HD_GOLDEN_DIR      offload-golden-images worktree
+        #
+        # Keep the placeholders free of spaces and shell metacharacters; the
+        # expander rejects anything fancier on purpose.
 
-        mkLLVMCMakeFlags = root: [
-          # Base LLVM build options
+        # Shared by every build we drive.
+        commonCMakeFlags = [
           "-G Ninja"
-          "-DLLVM_ENABLE_ASSERTIONS=ON"
-          "-DLLVM_ENABLE_LLD=ON"
-          "-DLLVM_INCLUDE_SPIRV_TOOLS_TESTS=ON"
-          "-DLLVM_INCLUDE_DXIL_TESTS=ON"
-          "-DLLVM_OPTIMIZED_TABLEGEN=OFF" # Turn ON only for Debug configurations to save time
-          "-DCMAKE_INSTALL_PREFIX=${root}/llvm-project/build/install"
+          "-DCMAKE_BUILD_TYPE=$HD_BUILD_TYPE"
 
-          # Sccache integration for faster rebuilds
+          # Sccache integration for faster rebuilds. The cache is shared by
+          # every worktree (see SCCACHE_DIR below), so a second agent building
+          # the same sources in its own worktree mostly hits the cache.
           "-DCMAKE_C_COMPILER_LAUNCHER=${pkgs.sccache}/bin/sccache"
           "-DCMAKE_CXX_COMPILER_LAUNCHER=${pkgs.sccache}/bin/sccache"
 
           # Tooling support
           "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" # Generates compile_commands.json for clangd
+        ];
 
-          # Offload Test Suite & DXC Integration
+        # The integrated build: LLVM + Clang with the offload test suite pulled
+        # in as an external project. Provides check-clang, check-llvm and the
+        # check-hlsl-* suites out of a single build tree.
+        llvmCMakeFlags = commonCMakeFlags ++ [
+          "-DLLVM_ENABLE_ASSERTIONS=ON"
+          "-DLLVM_ENABLE_LLD=ON"
+          "-DLLVM_INCLUDE_SPIRV_TOOLS_TESTS=ON"
+          "-DLLVM_INCLUDE_DXIL_TESTS=ON"
+          "-DLLVM_OPTIMIZED_TABLEGEN=OFF" # Turn ON only for Debug configurations to save time
+          "-DCMAKE_INSTALL_PREFIX=$HD_INSTALL_PREFIX"
+
+          # Offload Test Suite & DXC Integration. DXC_EXECUTABLE/DXV_EXECUTABLE
+          # are spelled out so that `mask test --dxc <worktree>` can retarget an
+          # existing build tree at another DXC without a fresh configure.
           "-DLLVM_EXTERNAL_PROJECTS=OffloadTest"
-          "-DLLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR=${root}/offload-test-suite"
-          "-DGOLDENIMAGE_DIR=${root}/offload-golden-images"
+          "-DLLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR=$HD_OFFLOAD_SRC"
+          "-DGOLDENIMAGE_DIR=$HD_GOLDEN_DIR"
           "-DOFFLOADTEST_TEST_CLANG=ON"
-          "-DDXC_DIR=${root}/DirectXShaderCompiler/build/bin"
+          "-DDXC_DIR=$HD_DXC_BIN_DIR"
+          "-DDXC_EXECUTABLE=$HD_DXC_BIN_DIR/dxc"
+          "-DDXV_EXECUTABLE=$HD_DXC_BIN_DIR/dxv"
           "-DOFFLOADTEST_USE_CLANG_TIDY=ON"
           "-DHLSL_ENABLE_OFFLOAD_DISTRIBUTION=ON"
 
-          # HLSL cache
-          "-C ${root}/llvm-project/clang/cmake/caches/HLSL.cmake"
+          # HLSL cache. Must come last: the cache script reads the values set
+          # by the -D flags above (see offload-test-suite/docs/offload-distribution.md).
+          "-C $HD_LLVM_SRC/clang/cmake/caches/HLSL.cmake"
         ];
 
-        mkDXCCMakeFlags = root: [
-          # DirectXShaderCompiler build options
-          "-C ${root}/DirectXShaderCompiler/cmake/caches/PredefinedParams.cmake"
-          "-G Ninja"
-          "-DHLSL_DISABLE_SOURCE_GENERATION=ON"
+        # The LLVM half of the "Standalone Build Distribution" flow from
+        # offload-test-suite/docs/offload-distribution.md: Clang, the lit
+        # testing tools and the LLVM libraries the offload tools link against,
+        # installed into a prefix that standalone offload builds consume.
+        llvmDistCMakeFlags = commonCMakeFlags ++ [
+          "-DLLVM_ENABLE_ASSERTIONS=ON"
+          "-DLLVM_ENABLE_LLD=ON"
+          "-DLLVM_OPTIMIZED_TABLEGEN=OFF"
+          "-DCMAKE_INSTALL_PREFIX=$HD_INSTALL_PREFIX"
+          "-C $HD_OFFLOAD_SRC/cmake/caches/StandaloneDistribution.cmake"
         ];
+
+        # A standalone offload-test-suite build: the test suite is the
+        # top-level CMake project and links against an installed LLVM
+        # distribution, which makes configure+build a matter of minutes.
+        offloadCMakeFlags = commonCMakeFlags ++ [
+          "-DCMAKE_PREFIX_PATH=$HD_LLVM_CMAKE_DIR"
+          "-DLLVM_MAIN_SRC_DIR=$HD_LLVM_SRC/llvm"
+          "-DCMAKE_INSTALL_PREFIX=$HD_INSTALL_PREFIX"
+          "-DOFFLOADTEST_TEST_CLANG=On"
+          "-DGOLDENIMAGE_DIR=$HD_GOLDEN_DIR"
+          "-DDXC_DIR=$HD_DXC_BIN_DIR"
+          "-DDXC_EXECUTABLE=$HD_DXC_BIN_DIR/dxc"
+          "-DDXV_EXECUTABLE=$HD_DXC_BIN_DIR/dxv"
+          # clang-tidy is shipped by the distribution, but running it on every
+          # translation unit defeats the point of the fast standalone loop.
+          "-DOFFLOADTEST_USE_CLANG_TIDY=OFF"
+        ];
+
+        dxcCMakeFlags = commonCMakeFlags ++ [
+          "-DHLSL_DISABLE_SOURCE_GENERATION=ON"
+          "-C $HD_DXC_SRC/cmake/caches/PredefinedParams.cmake"
+        ];
+
+        flagsToString = builtins.concatStringsSep " ";
 
       in
       {
@@ -154,9 +240,27 @@
               # Resolve project paths to absolute paths at shell entry time
               # and export CMake flag variables for `mask` tasks.
               shellHook = ''
-                export LLVMCMakeFlags="${builtins.concatStringsSep " " (mkLLVMCMakeFlags "\$PWD")}"
-                export DXCCMakeFlags="${builtins.concatStringsSep " " (mkDXCCMakeFlags "\$PWD")}"
-                export DXC_LIBS_DIR="$PWD/DirectXShaderCompiler/build/lib"
+                # --- Workspace layout ------------------------------------------
+                # Everything downstream is expressed relative to the workspace
+                # root rather than to $PWD, so tasks behave identically when run
+                # from a worktree several directories away.
+                export HLSL_DEV_ROOT="$PWD"
+
+                # CMake flag templates; see the "CMake Configurations" section
+                # above. Single-quoted so the $HD_* placeholders survive into
+                # the environment unexpanded.
+                export HLSL_CMAKE_FLAGS_LLVM='${flagsToString llvmCMakeFlags}'
+                export HLSL_CMAKE_FLAGS_LLVM_DIST='${flagsToString llvmDistCMakeFlags}'
+                export HLSL_CMAKE_FLAGS_OFFLOAD='${flagsToString offloadCMakeFlags}'
+                export HLSL_CMAKE_FLAGS_DXC='${flagsToString dxcCMakeFlags}'
+
+                # Fallback compiler for offload runs when no DirectXShaderCompiler
+                # worktree has been built yet (`--dxc nix` selects it explicitly).
+                export HLSL_DXC_PREBUILT_DIR="${pkgs.directx-shader-compiler}/bin"
+
+                # One compilation cache for all worktrees: parallel agents
+                # building the same upstream sources share the hits.
+                export SCCACHE_DIR="''${SCCACHE_DIR:-$HLSL_DEV_ROOT/.sccache}"
 
                 # --- Vulkan runtime -------------------------------------------
                 # Pick the Vulkan driver (ICD) that the offload test suite runs
