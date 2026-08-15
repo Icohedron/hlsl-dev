@@ -216,7 +216,7 @@ hd_resolve() {
             printf '%s\n' "$wt"
             return 0
         fi
-    done < <(hd_worktrees "$kind")
+    done <<< "$(hd_worktrees "$kind")"
 
     printf 'error: no %s worktree matches '\''%s'\''. Known worktrees:\n' \
         "$(hd_kind_label "$kind")" "$spec" >&2
@@ -302,7 +302,7 @@ hd_dep() {
                     printf '%s\n' "$wt"
                     return 0
                 fi
-            done < <(hd_worktrees "$kind")
+            done <<< "$(hd_worktrees "$kind")"
         fi
     fi
 
@@ -486,7 +486,7 @@ hd_resolve_any() {
                 printf '%s\n' "$wt"
                 return 0
             fi
-        done < <(hd_worktrees "$kind")
+        done <<< "$(hd_worktrees "$kind")"
     done
     hd_die "no worktree matches '$spec' (see 'mask ls')"
 }
@@ -552,12 +552,17 @@ hd_expand_flags() {
 }
 
 # hd_cmake_flags <template var name> -> populates the HD_FLAGS array
+# The read loops in this file feed from a here-string rather than a process
+# substitution: some sandboxed/container shells (toolbox, seccomp-mediated
+# shells) do not resolve /dev/fd/<n>, and bash then fails `< <(...)` with
+# "/dev/fd/63: No such file or directory". A here-string keeps the loop in the
+# current shell (so assignments survive) without needing /dev/fd.
 hd_cmake_flags() {
     local line
     HD_FLAGS=()
     while IFS= read -r line; do
         [ -n "$line" ] && HD_FLAGS+=("$line")
-    done < <(hd_expand_flags "${!1}")
+    done <<< "$(hd_expand_flags "${!1}")"
 }
 
 # ---------------------------------------------------------------------------
