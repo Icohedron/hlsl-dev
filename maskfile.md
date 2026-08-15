@@ -64,7 +64,7 @@ for kind in llvm dxc offload golden; do
 
         printf '%s%-46s %-22s %-24s %s\n' \
             "$marker" "${wt#"$HD_ROOT"/}" "$(hd_branch "$wt")" "$state" "$pins"
-    done < <(hd_worktrees "$kind")
+    done <<< "$(hd_worktrees "$kind")"
     printf '\n'
 done
 ```
