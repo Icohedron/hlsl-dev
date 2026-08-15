@@ -528,6 +528,28 @@ hd_lock() {
             hd_die "timed out waiting for the build lock on $dir"
     fi
     HD_LOCKED="${HD_LOCKED:-} $dir"
+    HD_LOCK_FDS="${HD_LOCK_FDS:-} $HD_LOCK_FD"
+}
+
+# hd_run <command> [args...] -- run an external command with the build-lock
+# file descriptors closed.
+#
+# `exec {fd}>lock` descriptors are not close-on-exec, so every process the
+# build spawns inherits them. That is harmless for short-lived children, but a
+# daemon that survives the build (sccache's server, started by the first
+# compile) keeps the flock alive long after mask has exited, and the next
+# invocation then blocks on a lock nobody is using. Only this shell needs to
+# hold the lock, so hand children a clean set of descriptors.
+hd_run() {
+    local fd redirs=""
+    if [ -z "${HD_LOCK_FDS:-}" ]; then
+        "$@"
+        return
+    fi
+    for fd in $HD_LOCK_FDS; do
+        redirs="$redirs $fd>&-"
+    done
+    eval '"$@"'"$redirs"
 }
 
 # ---------------------------------------------------------------------------
@@ -633,7 +655,7 @@ hd_configure_llvm() {
     hd_prepare_build_dir "$build"
     hd_lock "$build"
     hd_cmake_flags HLSL_CMAKE_FLAGS_LLVM
-    cmake -S "$wt/llvm" -B "$build" "${HD_FLAGS[@]}"
+    hd_run cmake -S "$wt/llvm" -B "$build" "${HD_FLAGS[@]}"
 
     hd_record "$wt" BUILD_DIR "$build" BUILD_TYPE "$HD_BUILD_TYPE" \
         OFFLOAD "$offload" GOLDEN "$golden" DXC "$dxcbin"
@@ -656,7 +678,7 @@ hd_configure_dxc() {
     hd_prepare_build_dir "$build"
     hd_lock "$build"
     hd_cmake_flags HLSL_CMAKE_FLAGS_DXC
-    cmake -S "$wt" -B "$build" "${HD_FLAGS[@]}"
+    hd_run cmake -S "$wt" -B "$build" "${HD_FLAGS[@]}"
 
     hd_record "$wt" BUILD_DIR "$build" BUILD_TYPE "$HD_BUILD_TYPE"
 }
@@ -718,7 +740,7 @@ hd_configure_offload() {
     hd_prepare_build_dir "$build"
     hd_lock "$build"
     hd_cmake_flags HLSL_CMAKE_FLAGS_OFFLOAD
-    cmake -S "$wt" -B "$build" "${HD_FLAGS[@]}"
+    hd_run cmake -S "$wt" -B "$build" "${HD_FLAGS[@]}"
 
     hd_record "$wt" BUILD_DIR "$build" BUILD_TYPE "$HD_BUILD_TYPE" MODE standalone \
         LLVM "$llvm" GOLDEN "$golden" DXC "$dxcbin"
@@ -765,8 +787,8 @@ hd_dist() {
     hd_prepare_build_dir "$build"
     hd_lock "$build"
     hd_cmake_flags HLSL_CMAKE_FLAGS_LLVM_DIST
-    cmake -S "$wt/llvm" -B "$build" "${HD_FLAGS[@]}"
-    cmake --build "$build" --target install-distribution
+    hd_run cmake -S "$wt/llvm" -B "$build" "${HD_FLAGS[@]}"
+    hd_run cmake --build "$build" --target install-distribution
 
     hd_pin_set "$wt" DIST_PREFIX "$prefix"
     hd_log "installed distribution: $prefix"
@@ -807,10 +829,10 @@ hd_build() {
     hd_lock "$build"
     if [ "$#" -gt 0 ] && [ -n "$1" ]; then
         hd_log "building $* in $build"
-        cmake --build "$build" --target "$@"
+        hd_run cmake --build "$build" --target "$@"
     else
         hd_log "building in $build"
-        cmake --build "$build"
+        hd_run cmake --build "$build"
     fi
 }
 
@@ -848,7 +870,7 @@ hd_sync_dxc() {
     current=$(hd_cache_get "$build" DXC_DIR)
     [ "$current" = "$dxcbin" ] && return 0
     hd_log "switching this build tree to dxc from $dxcbin (was ${current:-unset})"
-    cmake -S "$(hd_cache_get "$build" CMAKE_HOME_DIRECTORY)" -B "$build" \
+    hd_run cmake -S "$(hd_cache_get "$build" CMAKE_HOME_DIRECTORY)" -B "$build" \
         -DDXC_DIR="$dxcbin" \
         -DDXC_EXECUTABLE="$dxcbin/dxc" \
         -DDXV_EXECUTABLE="$dxcbin/dxv" \
@@ -862,5 +884,5 @@ hd_lit() {
     local lit="$build/bin/llvm-lit"
     [ -x "$lit" ] || hd_die "$lit not found; run 'mask build' first"
     hd_log "$lit $*"
-    "$lit" "$@"
+    hd_run "$lit" "$@"
 }
