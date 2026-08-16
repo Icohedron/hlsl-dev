@@ -820,20 +820,134 @@ hd_ensure_configured() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Sandbox symlink guard
+# ---------------------------------------------------------------------------
+#
+# Many build steps publish a tool into <build>/bin as a symlink and recreate
+# it with `cmake -E create_symlink` / `cmake -E cmake_symlink_executable`:
+# the spirv-tools wrappers and dxil-dis (always-run custom targets), and every
+# llvm_add_tool_symlink alias such as bin/clang -> clang-24, bin/llvm-strip,
+# bin/llvm-readelf. All of them unlink the destination before recreating it.
+#
+# Inside a sandboxed agent shell (pi's landstrip) unlink() on a *symlink*
+# deletes the file the link points at and leaves the link behind. The build
+# therefore destroys the binary it just published and then dies with
+#
+#     CMake Error: failed to create symbolic link '.../bin/spirv-as': File exists
+#     CMake Error: cmake_symlink_executable: System Error: File exists
+#
+# For clang that means the 1.4 GB clang-24 is deleted immediately after being
+# linked, and every retry deletes it again. For the spirv tools it also leaves
+# the tree wedged, because the ExternalProject stamps still claim the tools
+# are built. Creating a symlink whose name does not exist yet is unaffected,
+# so clearing the destinations before the build keeps the normal build graph
+# -- SPIRVTools ExternalProject included -- completely intact.
+#
+# Deleting the link itself is only safe once it dangles, so a live link is
+# cleared by moving its target aside, deleting the now-dangling link, and
+# moving the target back. Anything the build did not recreate is restored
+# afterwards, so a partial build can never leave a tool alias missing.
+
+# Extra fragile symlinks outside <build>/bin, relative to the build directory.
+# Everything directly under <build>/bin is discovered automatically.
+HD_FRAGILE_SYMLINKS="lib/libpng.a"
+HD_CLEARED_SYMLINKS=()
+
+# True when unlink() on a symlink destroys the target instead of the link,
+# i.e. when we are running under a sandbox that rewrites path syscalls.
+hd_unlink_follows_symlinks() {
+    local d rc=1
+    d=$(mktemp -d) || return 1
+    : >"$d/target"
+    ln -s "$d/target" "$d/link"
+    rm -f "$d/link" 2>/dev/null
+    [ -e "$d/target" ] || rc=0
+    rm -rf "$d" 2>/dev/null
+    return $rc
+}
+
+# Every build-created symlink the next build may republish. Anything directly
+# under bin/ qualifies: those are all tool aliases produced by
+# llvm_add_tool_symlink / cmake_symlink_executable / create_symlink.
+hd_fragile_symlinks() {
+    local build=$1 rel
+    find "$build/bin" -maxdepth 1 -type l -print 2>/dev/null
+    for rel in $HD_FRAGILE_SYMLINKS; do
+        [ -L "$build/$rel" ] && printf '%s\n' "$build/$rel"
+    done
+    return 0
+}
+
+hd_clear_fragile_symlinks() {
+    local build=$1 link text target tmp list
+    HD_CLEARED_SYMLINKS=()
+    hd_unlink_follows_symlinks || return 0
+    # A pipeline would run the loop in a subshell and lose the array, and
+    # process substitution needs /dev/fd, which a sandbox may not provide.
+    list=$(hd_fragile_symlinks "$build")
+    [ -n "$list" ] || return 0
+    while IFS= read -r link; do
+        [ -L "$link" ] || continue
+        text=$(readlink "$link") || continue
+        if [ -e "$link" ]; then
+            target=$(readlink -f "$link") || continue
+            # Only touch links whose target we own. A link into a read-only
+            # tree such as /nix/store can be neither moved nor deleted here.
+            case $target in
+            "$build"/*) ;;
+            *) continue ;;
+            esac
+            # Make the link dangle first: renaming a regular file is safe,
+            # deleting a dangling link is safe, deleting a live one is not.
+            tmp=$target.hd-symlink-guard.$$
+            mv "$target" "$tmp" 2>/dev/null || continue
+            rm -f "$link"
+            mv "$tmp" "$target"
+        else
+            rm -f "$link" || continue
+        fi
+        HD_CLEARED_SYMLINKS+=("$link"$'\t'"$text")
+    done <<<"$list"
+    [ "${#HD_CLEARED_SYMLINKS[@]}" -gt 0 ] &&
+        hd_log "cleared ${#HD_CLEARED_SYMLINKS[@]} sandbox-fragile symlink(s) under $build"
+    return 0
+}
+
+# Recreate anything the build did not republish itself, so that building an
+# unrelated target cannot leave a tool alias missing.
+hd_restore_fragile_symlinks() {
+    local entry link text resolved
+    for entry in ${HD_CLEARED_SYMLINKS+"${HD_CLEARED_SYMLINKS[@]}"}; do
+        link=${entry%%$'\t'*}
+        text=${entry#*$'\t'}
+        if [ -e "$link" ] || [ -L "$link" ]; then continue; fi
+        case $text in
+        /*) resolved=$text ;;
+        *) resolved=$(dirname "$link")/$text ;;
+        esac
+        [ -e "$resolved" ] || continue
+        ln -s "$text" "$link" 2>/dev/null
+    done
+    HD_CLEARED_SYMLINKS=()
+}
 # hd_build <worktree> [target...]
 hd_build() {
-    local wt=$1 build
+    local wt=$1 build rc=0
     shift
     hd_ensure_configured "$wt"
     build=$(hd_effective_build "$wt")
     hd_lock "$build"
+    hd_clear_fragile_symlinks "$build"
     if [ "$#" -gt 0 ] && [ -n "$1" ]; then
         hd_log "building $* in $build"
-        hd_run cmake --build "$build" --target "$@"
+        hd_run cmake --build "$build" --target "$@" || rc=$?
     else
         hd_log "building in $build"
-        hd_run cmake --build "$build"
+        hd_run cmake --build "$build" || rc=$?
     fi
+    hd_restore_fragile_symlinks "$build"
+    return $rc
 }
 
 # ---------------------------------------------------------------------------
