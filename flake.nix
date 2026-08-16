@@ -105,6 +105,7 @@
           mesa # provides the lavapipe (lvp) software Vulkan ICD
 
           # Development / utility tools
+          worktrunk
           pythonDeps
           cvise
           directx-shader-compiler
