@@ -49,6 +49,23 @@
         vulkanLayerPath = "${pkgs.vulkan-validation-layers}/share/vulkan/explicit_layer.d";
 
         # ----------------------------------------------------------------------
+        # lit / multiprocessing start method
+        # ----------------------------------------------------------------------
+        # Python 3.14 changed the default multiprocessing start method on Linux
+        # from "fork" to "forkserver". forkserver bootstraps itself by binding an
+        # AF_UNIX socket under $TMPDIR, which sandboxes blocking Unix sockets deny.
+        #
+        # This is delivered as a .pth file rather than a sitecustomize.py: only
+        # the first sitecustomize on sys.path is imported, and nixpkgs already
+        # ships one that processes NIX_PYTHONPATH and fixes up sys.executable /
+        # sys.prefix, so shadowing it would break module resolution. .pth files
+        # are executed by site.addsitedir(), which nixpkgs' sitecustomize calls
+        # for every NIX_PYTHONPATH entry, so this composes with it instead.
+        litForkShim = pkgs.writeTextDir "zz-multiprocessing-fork.pth" ''
+          import multiprocessing; multiprocessing.set_start_method("fork", force=True)
+        '';
+
+        # ----------------------------------------------------------------------
         # Build Dependencies
         # ----------------------------------------------------------------------
         # Python with necessary packages for LLVM's lit testing framework and scripts.
@@ -262,6 +279,11 @@
                 # One compilation cache for all worktrees: parallel agents
                 # building the same upstream sources share the hits.
                 export SCCACHE_DIR="''${SCCACHE_DIR:-$HLSL_DEV_ROOT/.sccache}"
+
+                # Force multiprocessing's "fork" start method for lit; see the
+                # litForkShim comment above. Prepended so it still applies if
+                # something else already populated NIX_PYTHONPATH.
+                export NIX_PYTHONPATH="${litForkShim}''${NIX_PYTHONPATH:+:''${NIX_PYTHONPATH}}"
 
                 # --- Vulkan runtime -------------------------------------------
                 # Pick the Vulkan driver (ICD) that the offload test suite runs
