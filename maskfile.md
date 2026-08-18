@@ -756,3 +756,13 @@ EOF
 echo "Generated $HLSL_LOCAL"
 cd "$MASKFILE_DIR/compiler-explorer" && make dev EXTRA_ARGS="--language hlsl"
 ```
+
+## start-sccache
+
+Starts the sccache server with no timeout. Convenient for agents running bash
+in sandboxes where it is inappropriate or disallowed for them to start the
+sccache server themselves.
+
+```bash
+SCCACHE_IDLE_TIMEOUT=0 sccache --start-server
+```
