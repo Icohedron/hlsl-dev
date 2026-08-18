@@ -532,6 +532,119 @@ build=$(hd_effective_build "$wt")
 hd_lit "$build" ${lit_args:--v} "$path"
 ```
 
+## codegraph
+Builds or refreshes the [CodeGraph](https://github.com/colbymchenry/codegraph)
+index of a worktree, so that codegraph-aware agents can answer structural
+questions about it. Works on `llvm-project`, `DirectXShaderCompiler` and
+`offload-test-suite` checkouts.
+
+Each repository has its own scope, in `scripts/codegraph-<kind>.json`, copied
+into the worktree as `codegraph.json`:
+
+| repository | indexed | left out |
+| --- | --- | --- |
+| llvm-project | `clang/`, `llvm/` | `test/` corpora, docs, bindings, the other 20 subprojects |
+| DirectXShaderCompiler | `lib/`, `include/`, `tools/`, `utils/`, `projects/`, `unittests/` | `test/`, `tools/clang/test/`, `external/`, docs, CI |
+| offload-test-suite | everything | `third-party/`, docs, CI |
+
+A worktree that has no index yet starts from a copy of another worktree's
+database and then re-parses only what its branch changed -- seconds instead of
+the several minutes a cold index takes. Both `codegraph.json` and `.codegraph/`
+are added to the clone's `info/exclude`, so they never show up in `git status`
+and are never committed.
+
+The one exception is `.gitignore`, which is tracked upstream. CodeGraph's
+built-in ignore list drops every directory called `target` or `coverage`
+(case-insensitively), which would hide all of `llvm/lib/Target` -- the DirectX
+and SPIR-V backends included -- and nothing in `codegraph.json` can override a
+built-in default; only a negation in the root `.gitignore` can. So this task
+appends a small marked block there and marks the file `skip-worktree`, which
+keeps the edit out of `git status` and out of every commit.
+
+That hidden edit has exactly one failure mode: a `git checkout`, `rebase` or
+`pull` that wants to change `.gitignore` *itself* will refuse to run, with
+`Your local changes to the following files would be overwritten by checkout:
+.gitignore` (or, from a merge/rebase, `Entry '.gitignore' not uptodate. Cannot
+merge.`). **That** is what `--restore-gitignore` is for -- it puts the file
+back exactly as git has it and unhides it, so the git operation goes through:
+
+```bash
+mask codegraph --restore-gitignore   # .gitignore is now pristine and visible again
+git rebase origin/main               # ... the operation git was refusing
+mask codegraph                       # re-applies the block, refreshes the index
+```
+
+It is not needed in day-to-day work, and it does not touch the index.
+
+```
+mask codegraph                                  # index/refresh the current worktree
+mask codegraph --in llvm-project.my-feature     # ... or a named one
+mask codegraph --in DirectXShaderCompiler       # dxc and the offload suite work too
+mask codegraph --fresh                          # rebuild from scratch
+mask codegraph --all                            # every worktree of every repository
+mask codegraph --restore-gitignore              # unblock a git op that wants .gitignore
+```
+
+**OPTIONS**
+* in
+    * flags: --in
+    * type: string
+    * desc: Worktree to index; defaults to the current directory
+* from
+    * flags: --from
+    * type: string
+    * desc: Worktree to seed a missing index from; must be the same repository (default: whichever worktree of that repository already has one)
+* fresh
+    * flags: --fresh
+    * desc: Rebuild the index from scratch instead of seeding/syncing
+* all
+    * flags: --all
+    * desc: Index every llvm-project, DirectXShaderCompiler and offload-test-suite worktree
+* restore_gitignore
+    * flags: --restore-gitignore
+    * desc: Put .gitignore back exactly as git has it, and stop hiding it; use this if a checkout or rebase refuses to touch .gitignore
+
+```bash
+set -eo pipefail
+source "$MASKFILE_DIR/scripts/hlsl-dev.sh"
+hd_init
+
+# Every repository the index knows how to scope: one codegraph-<kind>.json each.
+kinds="llvm dxc offload"
+
+if [ -n "${restore_gitignore:-}" ]; then
+    if [ -n "${all:-}" ]; then
+        for kind in $kinds; do
+            while IFS= read -r wt; do
+                [ -n "$wt" ] || continue
+                hd_codegraph_ungitignore "$wt"
+            done <<< "$(hd_worktrees "$kind")"
+        done
+    else
+        hd_codegraph_ungitignore "$(hd_target $kinds)"
+    fi
+    exit 0
+fi
+if [ -n "${all:-}" ]; then
+    [ -z "${from:-}" ] ||
+        hd_die "--from names one worktree of one repository; it cannot be combined with --all"
+    for kind in $kinds; do
+        # Each repository seeds its own worktrees from the first index in it.
+        donor=""
+        while IFS= read -r wt; do
+            [ -n "$wt" ] || continue
+            hd_codegraph "$wt" "$donor"
+            [ -n "$donor" ] || donor=$wt
+        done <<< "$(hd_worktrees "$kind")"
+    done
+else
+    wt=$(hd_target $kinds)
+    donor=""
+    [ -z "${from:-}" ] || donor=$(hd_resolve "$(hd_kind "$wt")" "$from")
+    hd_codegraph "$wt" "$donor"
+fi
+```
+
 ## clean
 Removes the build directory of a worktree (and, with `--dist`, the standalone
 distribution build and install prefix of an llvm worktree).

@@ -99,6 +99,64 @@ A worktree spec can be a path, a directory name
 name. `--dxc` additionally accepts a directory containing `dxc`/`dxv`, or `nix`
 for the compiler that ships with the dev shell.
 
+### Code intelligence (CodeGraph)
+
+[CodeGraph](https://github.com/colbymchenry/codegraph) gives agents a symbol
+graph of a checkout — callers, callees, impact radius — instead of grepping
+2 GB of source. One index per worktree, for `llvm-project`,
+`DirectXShaderCompiler` and `offload-test-suite` alike:
+
+```bash
+mask codegraph                                # index/refresh the current worktree
+mask codegraph --in llvm-project.my-feature   # ... or a named one
+mask codegraph --all                          # every worktree of every repository
+mask codegraph --fresh                        # rebuild from scratch
+```
+
+Each repository has its own scope, in `scripts/codegraph-<kind>.json`:
+
+| repository | indexed | left out | files |
+| --- | --- | --- | --- |
+| llvm-project | `clang/`, `llvm/` | the `test/` corpora, docs, bindings, the other 20 subprojects | ~11,400 of 116k |
+| DirectXShaderCompiler | `lib/`, `include/`, `tools/`, `utils/`, `projects/`, `unittests/` | `test/`, `tools/clang/test/`, `external/`, docs, CI | ~3,700 of 18k |
+| offload-test-suite | everything | `third-party/`, docs, CI | ~90 of 1.7k |
+
+**Sharing between worktrees.** The index stores project-root-*relative* paths
+and records no absolute root, so it is portable between checkouts of the same
+repository: a worktree that has no index yet is seeded from a copy of another
+worktree's database and then re-parses only what its branch changed — seconds
+instead of the ~4 minutes a cold index takes. It is *not* shareable in place
+(no symlinking `.codegraph/` between worktrees): the database is a live SQLite
+WAL file that the indexer and its background daemon rewrite to match the tree
+it sits in, so two worktrees on different branches would thrash it and fight
+over the daemon lock.
+
+**Nothing lands in git.** `.codegraph/` and `codegraph.json` are added to the
+clone's `info/exclude`, which is shared by every worktree of the submodule and
+is never committed. The one file CodeGraph forces us to touch is the tracked
+`.gitignore`: its built-in ignore list drops every directory named `target` or
+`coverage` case-insensitively — which would silently hide all of
+`llvm/lib/Target` (the DirectX and SPIR-V backends included) and DXC's
+`include/llvm/Target` — and only a root `.gitignore` negation overrides a
+built-in default. `mask codegraph` appends a
+marked block for that and marks the file `skip-worktree`, so it stays out of
+`git status` and out of commits. The offload test suite has no such directory,
+so its `.gitignore` is never touched.
+
+The only time you have to think about that hidden edit is when a git operation
+wants to change `.gitignore` itself — a `checkout`, `rebase` or `pull` will
+then stop with `Your local changes to the following files would be overwritten
+by checkout: .gitignore` (or `Entry '.gitignore' not uptodate. Cannot merge.`).
+That is what `mask codegraph --restore-gitignore` is for: it restores the file to its
+committed state and unhides it, so the git operation goes through. Re-run `mask
+codegraph` afterwards to put the block back.
+
+```bash
+mask codegraph --restore-gitignore
+git rebase origin/main
+mask codegraph
+```
+
 ## Building the offload test suite standalone
 
 Building LLVM with the offload test suite as an external project gives you

@@ -504,9 +504,196 @@ hd_git_exclude() {
     f="$common/info/exclude"
     mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
     [ -f "$f" ] || : >"$f"
-    for pat in '/build*/' '/install*/' '/compile_commands.json'; do
+    for pat in '/build*/' '/install*/' '/compile_commands.json' \
+        '/.codegraph/' '/.codegraph-*/' '/codegraph.json'; do
         grep -qxF "$pat" "$f" 2>/dev/null || printf '%s\n' "$pat" >>"$f"
     done
+}
+
+# ---------------------------------------------------------------------------
+# CodeGraph index
+# ---------------------------------------------------------------------------
+# One index per worktree, kept out of git by hd_git_exclude above.
+#
+# The index (.codegraph/codegraph.db) stores project-root-RELATIVE paths and
+# records no absolute root, so it is portable between checkouts of the same
+# repository -- a fresh worktree can start from a copy of another worktree's
+# database and then re-parse only the files its branch actually changed.
+#
+# It is NOT shareable in place: the database is a live SQLite WAL file that the
+# indexer rewrites to match the tree it sits in, so a symlink shared by two
+# worktrees on different branches would thrash the index and fight over the
+# daemon lock. Copy-then-sync gets the cheap start without that.
+
+hd_codegraph_dir() { printf '%s\n' "$1/.codegraph"; }
+
+# Which parts of a checkout to index, one shared pattern list per repository
+# kind (scripts/codegraph-<kind>.json), copied into the worktree as
+# codegraph.json. Only the subtrees we actually work in reach the index: for
+# llvm-project that is clang/ and llvm/ minus their lit test corpora, ~11k files
+# instead of ~116k; for DXC it drops the two test corpora and external/; for the
+# offload suite it drops third-party/.
+hd_codegraph_template() { printf '%s/scripts/codegraph-%s.json\n' "$HD_ROOT" "$1"; }
+
+hd_codegraph_config() {
+    local wt=$1 template
+    template=$(hd_codegraph_template "$(hd_kind "$wt")")
+    [ -f "$template" ] || hd_die "no CodeGraph scope for $wt (expected $template)"
+    cmp -s "$template" "$wt/codegraph.json" || cp "$template" "$wt/codegraph.json"
+}
+
+# CodeGraph ignores any directory called "target" (the Rust build directory) or
+# "coverage" by default, case-INsensitively, and that built-in list beats both
+# `exclude` and `include` in codegraph.json. In llvm-project that silently drops
+# all 2,954 files of llvm/lib/Target -- the DirectX and SPIR-V backends
+# included; in DXC it drops include/llvm/Target. The one lever that overrides a
+# built-in default is a negation in the project root's .gitignore, which
+# CodeGraph merges *after* its own patterns. The offload test suite has no such
+# directory, so its .gitignore is left untouched (see hd_codegraph_needs_block).
+#
+# .gitignore is a tracked upstream file, so the block below is marked
+# skip-worktree: it stays on disk for CodeGraph, out of `git status`, and out of
+# any commit. The one thing it costs: a checkout/rebase/pull that wants to
+# change .gitignore itself refuses to run ("local changes would be overwritten",
+# or "Entry '.gitignore' not uptodate"). Then run
+# `mask codegraph --restore-gitignore` in that worktree, redo the git
+# operation, and run `mask codegraph` again to put the block back.
+HD_CG_MARK_BEGIN='# >>> codegraph: local index scope, not committed >>>'
+HD_CG_MARK_END='# <<< codegraph <<<'
+
+hd_sed_escape() { printf '%s\n' "$1" | sed 's/[.[\*^$\/]/\\&/g'; }
+
+# Does this repository kind own source under a directory CodeGraph ignores by
+# default? llvm-project (llvm/lib/Target, llvm/include/llvm/Target, the coverage
+# libraries) and DXC (include/llvm/Target) do; the offload test suite does not,
+# so its committed .gitignore is never touched.
+hd_codegraph_needs_block() {
+    case "$1" in
+    llvm | dxc) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
+# The block's exact text, so an outdated one is rewritten rather than kept.
+hd_codegraph_block() {
+    cat <<EOF
+$HD_CG_MARK_BEGIN
+# CodeGraph's built-in ignore list drops every directory called "target" (the
+# Rust build dir) or "coverage", case-insensitively. Here that hides
+# lib/Target and include/llvm/Target -- in llvm-project the DirectX and SPIR-V
+# backends included -- along with their unittests and the coverage libraries.
+# Only a root .gitignore negation overrides a built-in default. Managed by
+# 'mask codegraph'; 'mask codegraph --restore-gitignore' takes it back out.
+!**/Target/
+!**/Target/**
+!**/Coverage/
+!**/Coverage/**
+$HD_CG_MARK_END
+EOF
+}
+
+hd_codegraph_gitignore() {
+    local wt=$1 f current
+    f="$wt/.gitignore"
+    hd_codegraph_needs_block "$(hd_kind "$wt")" || return 0
+    [ -f "$f" ] || return 0
+    current=$(sed -n "/^$(hd_sed_escape "$HD_CG_MARK_BEGIN")\$/,/^$(hd_sed_escape "$HD_CG_MARK_END")\$/p" "$f")
+    if [ "$current" != "$(hd_codegraph_block)" ]; then
+        hd_codegraph_ungitignore "$wt"
+        hd_log "re-including Target/ sources in $wt/.gitignore (kept local with skip-worktree)"
+        printf '\n%s\n' "$(hd_codegraph_block)" >>"$f"
+    fi
+    git -C "$wt" update-index --skip-worktree .gitignore 2>/dev/null || true
+}
+
+hd_codegraph_ungitignore() {
+    local wt=$1 f
+    f="$wt/.gitignore"
+    git -C "$wt" update-index --no-skip-worktree .gitignore 2>/dev/null || true
+    { [ -f "$f" ] && grep -qxF "$HD_CG_MARK_BEGIN" "$f"; } || return 0
+    hd_log "removing the codegraph block from $wt/.gitignore"
+    sed -i "/^$(hd_sed_escape "$HD_CG_MARK_BEGIN")\$/,/^$(hd_sed_escape "$HD_CG_MARK_END")\$/d" "$f"
+    # Collapse the blank line the block was appended after.
+    sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$f"
+}
+
+# hd_codegraph_donor <worktree> -> another worktree OF THE SAME REPOSITORY with
+# an index to seed from, preferring the submodule checkout, then the largest
+# (most complete) database. Never crosses repositories: the file paths in an
+# index only mean anything inside the repository they came from.
+hd_codegraph_donor() {
+    local self=$1 kind base wt db best="" bestsize=0 size
+    kind=$(hd_kind "$self")
+    base="$HD_ROOT/$(hd_repo_name "$kind")"
+    if [ "$self" != "$base" ] && [ -f "$(hd_codegraph_dir "$base")/codegraph.db" ]; then
+        printf '%s\n' "$base"
+        return 0
+    fi
+    while IFS= read -r wt; do
+        [ -n "$wt" ] && [ "$wt" != "$self" ] || continue
+        db="$(hd_codegraph_dir "$wt")/codegraph.db"
+        [ -f "$db" ] || continue
+        size=$(stat -c %s "$db" 2>/dev/null || echo 0)
+        if [ "$size" -gt "$bestsize" ]; then best=$wt; bestsize=$size; fi
+    done <<< "$(hd_worktrees "$kind")"
+    # Never fail: "nothing to seed from" is an ordinary answer (the first index
+    # of a repository), and the caller runs under `set -e`.
+    [ -n "$best" ] && printf '%s\n' "$best"
+    return 0
+}
+
+# hd_codegraph <worktree> [donor] -- build or refresh the index of a worktree.
+# Set HD_OPT_FRESH (mask --fresh) to rebuild from scratch instead of seeding.
+hd_codegraph() {
+    local wt=$1 donor=${2:-} dir db
+    command -v codegraph >/dev/null 2>&1 ||
+        hd_die "codegraph is not on PATH (see https://github.com/colbymchenry/codegraph)"
+
+    dir=$(hd_codegraph_dir "$wt")
+    db="$dir/codegraph.db"
+
+    hd_git_exclude "$wt"
+    hd_codegraph_config "$wt"
+    hd_codegraph_gitignore "$wt"
+
+    if [ -n "${HD_OPT_FRESH:-}" ]; then
+        hd_log "rebuilding the index of $wt from scratch"
+        rm -rf "$dir"
+        hd_run codegraph init "$wt"
+        return
+    fi
+
+    if [ ! -f "$db" ]; then
+        if [ -n "$donor" ] && [ "$(hd_kind "$donor")" != "$(hd_kind "$wt")" ]; then
+            hd_die "cannot seed $(hd_kind_label "$(hd_kind "$wt")") from $donor;
+       an index only means anything inside the repository it came from"
+        fi
+        [ -n "$donor" ] || donor=$(hd_codegraph_donor "$wt")
+        if [ -n "$donor" ]; then
+            hd_log "seeding the index of $wt from $donor"
+            mkdir -p "$dir"
+            cp "$(hd_codegraph_dir "$donor")/codegraph.db" "$db"
+            rm -f "$dir/codegraph.db-wal" "$dir/codegraph.db-shm"
+        else
+            hd_log "no existing index to seed from; indexing $wt from scratch"
+            hd_run codegraph init "$wt"
+            return
+        fi
+    fi
+
+    rm -f "$dir/codegraph.lock"
+    # A seeded index whose donor sat on a widely diverged branch can overflow
+    # the syncer on the first (very large) batch; the retry resumes from what
+    # it committed, and a full index is the backstop.
+    if ! hd_run codegraph sync "$wt"; then
+        hd_warn "sync failed; retrying"
+        rm -f "$dir/codegraph.lock"
+        if ! hd_run codegraph sync "$wt"; then
+            hd_warn "sync failed twice; rebuilding from scratch"
+            rm -rf "$dir"
+            hd_run codegraph init "$wt"
+        fi
+    fi
 }
 
 # Serialise concurrent mask invocations that target the same build directory.

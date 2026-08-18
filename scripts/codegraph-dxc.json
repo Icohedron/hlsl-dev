@@ -1,0 +1,17 @@
+{
+  "exclude": [
+    "/.github/",
+    "/azure-pipelines/",
+    "/gcp-pipelines/",
+    "/autoconf/",
+    "/build/",
+    "/docs/",
+    "/external/",
+    "/resources/",
+    "/test/",
+    "/tools/clang/test/",
+    "/tools/clang/docs/",
+    "/tools/clang/bindings/",
+    "/tools/clang/www/"
+  ]
+}
