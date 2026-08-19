@@ -1409,6 +1409,211 @@ class BlamePrefixByMode(unittest.TestCase):
         self.assertEqual(whole, "runtime_driver_suspected")
 
 
+class UpgradeClassification(unittest.TestCase):
+    """The single refinement a base classification gets from the pass matrix."""
+
+    def test_shader_compile_deblamed_when_same_compiler_passes(self):
+        # Another clang workflow built the identical test -> clang isn't at fault.
+        per_wf = {"Windows Vulkan AMD Clang": "FAIL",
+                  "Windows D3D12 AMD Clang": "PASS"}
+        self.assertEqual(
+            mf.upgrade_classification("shader_compile_clang", per_wf, {}),
+            "shader_compile_clang_env_suspected")
+
+    def test_shader_compile_keeps_blame_when_only_other_compiler_passes(self):
+        # Only DXC passes; no clang workflow builds it -> blame stays on clang.
+        per_wf = {"Windows Vulkan AMD Clang": "FAIL",
+                  "Windows Vulkan AMD DXC": "PASS"}
+        self.assertEqual(
+            mf.upgrade_classification("shader_compile_clang", per_wf, {}),
+            "shader_compile_clang")
+
+    def test_runtime_base_takes_the_mode_cluster_prefix(self):
+        self.assertEqual(
+            mf.upgrade_classification(
+                "runtime_miscompile", {},
+                {"runtime_miscompile": "api_backend_suspected"}),
+            "api_backend_suspected_miscompile")
+
+    def test_labels_without_an_upgrade_are_returned_unchanged(self):
+        # xpass and runtime_pipeline_error have no upgrade suffix, and an unknown
+        # or empty label must never be mangled into a bogus one.
+        for cls in ("xpass", "runtime_pipeline_error", "", "something_new"):
+            with self.subTest(cls=cls):
+                self.assertEqual(
+                    mf.upgrade_classification(
+                        cls, {"Windows Vulkan AMD Clang": "PASS"},
+                        {cls: "api_backend_suspected"}),
+                    cls)
+
+
+class PivotTestFailures(unittest.TestCase):
+    """The cross-workflow pivot that feeds the report's Test failure summary.
+
+    Regression guard: the pivot used to `continue` on shader_compile_* and to
+    admit only `runtime_*` / `xpass` labels, so a shader that failed to compile
+    on one workflow while a sibling compiled it fine never appeared in the
+    summary at all — including the `shader_compile_*_env_suspected` rows, whose
+    whole meaning is 'it built elsewhere'.
+    """
+
+    SUITE = "OffloadTest-clang-vk"
+    TEST = "Feature/HLSLLib/log2.test"
+
+    def pivot(self, failing: dict, results: dict):
+        """Pivot one test. `failing` maps workflow -> base classification (the
+        runs that produced a failure block); `results` maps workflow -> matrix
+        result for every completed run."""
+        summary = [{"workflow": w,
+                    "tests": [{"suite": self.SUITE, "test": self.TEST,
+                               "result": "FAIL", "classification": cls}]}
+                   for w, cls in failing.items()]
+        key = mf.normalize_test_key(self.SUITE, self.TEST)
+        divergences = mf.pivot_test_failures(summary, {key: dict(results)})
+        by_wf = {r["workflow"]: r["tests"][0] for r in summary}
+        return by_wf, divergences
+
+    def test_shader_compile_env_suspected_reaches_the_summary(self):
+        # THE BUG: clang failed to compile here but compiled the same test on
+        # another clang workflow -> de-blamed, and it must still be listed.
+        by_wf, divs = self.pivot(
+            {"Windows Vulkan AMD Clang": "shader_compile_clang"},
+            {"Windows Vulkan AMD Clang": "FAIL",
+             "Windows D3D12 AMD Clang": "PASS",
+             "Windows Vulkan AMD DXC": "PASS"},
+        )
+        self.assertEqual(len(divs), 1)
+        d = divs[0]
+        self.assertEqual(d["test"], self.TEST)
+        self.assertEqual(d["classifications"],
+                         ["shader_compile_clang_env_suspected"])
+        self.assertEqual(d["fails_on"], ["Windows Vulkan AMD Clang"])
+        self.assertEqual(d["passes_on"],
+                         ["Windows D3D12 AMD Clang", "Windows Vulkan AMD DXC"])
+        # ... and the per-workflow row agrees with the summary row.
+        self.assertEqual(by_wf["Windows Vulkan AMD Clang"]["classification"],
+                         "shader_compile_clang_env_suspected")
+
+    def test_shader_compile_still_blamed_is_also_listed(self):
+        # No clang workflow builds it (blame stays on clang), but it passes on
+        # DXC — still a fails-here/passes-there split, so still a summary row.
+        _, divs = self.pivot(
+            {"Windows Vulkan AMD Clang": "shader_compile_clang",
+             "Windows D3D12 AMD Clang": "shader_compile_clang"},
+            {"Windows Vulkan AMD Clang": "FAIL",
+             "Windows D3D12 AMD Clang": "FAIL",
+             "Windows Vulkan AMD DXC": "PASS",
+             "Windows D3D12 AMD DXC": "PASS"},
+        )
+        self.assertEqual(len(divs), 1)
+        self.assertEqual(divs[0]["classifications"], ["shader_compile_clang"])
+        # Two alike failures -> the descriptive axis is populated.
+        self.assertEqual(divs[0]["axes"].get("compiler_pattern"), "clang-only")
+
+    def test_shader_compile_dxc_env_suspected_reaches_the_summary(self):
+        by_wf, divs = self.pivot(
+            {"Windows Vulkan AMD DXC": "shader_compile_dxc"},
+            {"Windows Vulkan AMD DXC": "FAIL",
+             "Windows D3D12 AMD DXC": "PASS"},
+        )
+        self.assertEqual([d["classifications"] for d in divs],
+                         [["shader_compile_dxc_env_suspected"]])
+        self.assertEqual(by_wf["Windows Vulkan AMD DXC"]["classification"],
+                         "shader_compile_dxc_env_suspected")
+
+    def test_no_divergence_when_the_test_passes_nowhere(self):
+        by_wf, divs = self.pivot(
+            {"Windows Vulkan AMD Clang": "shader_compile_clang",
+             "Windows D3D12 AMD Clang": "shader_compile_clang"},
+            {"Windows Vulkan AMD Clang": "FAIL",
+             "Windows D3D12 AMD Clang": "FAIL"},
+        )
+        self.assertEqual(divs, [])
+        # Blame kept (nothing compiled it) and no axes recorded.
+        self.assertEqual(by_wf["Windows Vulkan AMD Clang"]["classification"],
+                         "shader_compile_clang")
+        self.assertNotIn("axes", by_wf["Windows Vulkan AMD Clang"])
+
+    def test_runtime_divergence_still_upgraded(self):
+        # Unchanged behaviour: a Vulkan-aligned miscompile is blamed on the API
+        # backend, and the row lands in the summary as before.
+        by_wf, divs = self.pivot(
+            {"Windows Vulkan AMD Clang": "runtime_miscompile",
+             "Windows Vulkan QC Clang": "runtime_miscompile"},
+            {"Windows Vulkan AMD Clang": "FAIL",
+             "Windows Vulkan QC Clang": "FAIL",
+             "Windows D3D12 AMD Clang": "PASS",
+             "Windows D3D12 QC Clang": "PASS"},
+        )
+        self.assertEqual(len(divs), 1)
+        self.assertEqual(divs[0]["classifications"],
+                         ["api_backend_suspected_miscompile"])
+        self.assertEqual(by_wf["Windows Vulkan AMD Clang"]["classification"],
+                         "api_backend_suspected_miscompile")
+
+    def test_xpass_divergence_still_listed_unchanged(self):
+        _, divs = self.pivot(
+            {"Windows Vulkan AMD Clang": "xpass"},
+            {"Windows Vulkan AMD Clang": "XPASS",
+             "Windows D3D12 AMD Clang": "PASS"},
+        )
+        self.assertEqual([d["classifications"] for d in divs], [["xpass"]])
+
+    def test_mixed_modes_get_one_row_each_and_agree_per_workflow(self):
+        # A compile failure on clang/Vulkan and a miscompile on D3D12/QC are
+        # unrelated bugs on the same test: both must be listed, each refined
+        # exactly as its own per-workflow row is.
+        by_wf, divs = self.pivot(
+            {"Windows Vulkan AMD Clang": "shader_compile_clang",
+             "Windows D3D12 QC DXC": "runtime_miscompile"},
+            {"Windows Vulkan AMD Clang": "FAIL",
+             "Windows D3D12 QC DXC": "FAIL",
+             "Windows D3D12 AMD Clang": "PASS",
+             "Windows Vulkan AMD DXC": "PASS"},
+        )
+        self.assertEqual(len(divs), 1)
+        d = divs[0]
+        self.assertEqual(
+            d["fail_classifications"],
+            {"Windows Vulkan AMD Clang": "shader_compile_clang_env_suspected",
+             "Windows D3D12 QC DXC": "runtime_driver_suspected_miscompile"})
+        # The breakdown must match what each workflow's own row shows.
+        for wf, cls in d["fail_classifications"].items():
+            self.assertEqual(by_wf[wf]["classification"], cls)
+        # One display row per classification.
+        rows = mf.test_failure_rows(d)
+        self.assertEqual([r["classification"] for r in rows],
+                         ["runtime_driver_suspected_miscompile",
+                          "shader_compile_clang_env_suspected"])
+
+    def test_each_test_yields_at_most_one_divergence(self):
+        # The same test failing on two workflows is one summary entry.
+        _, divs = self.pivot(
+            {"Windows Vulkan AMD Clang": "runtime_miscompile",
+             "Windows Vulkan QC Clang": "runtime_miscompile"},
+            {"Windows Vulkan AMD Clang": "FAIL",
+             "Windows Vulkan QC Clang": "FAIL",
+             "Windows D3D12 AMD Clang": "PASS"},
+        )
+        self.assertEqual(len(divs), 1)
+
+    def test_failing_since_records_are_carried_over(self):
+        summary = [{"workflow": "Windows Vulkan AMD Clang",
+                    "tests": [{"suite": self.SUITE, "test": self.TEST,
+                               "result": "FAIL",
+                               "classification": "shader_compile_clang"}]}]
+        key = mf.normalize_test_key(self.SUITE, self.TEST)
+        matrix = {key: {"Windows Vulkan AMD Clang": "FAIL",
+                        "Windows D3D12 AMD Clang": "PASS"}}
+        rec = {"failing_since": "2024-05-01T00-00-00Z", "failing_since_reports": 3}
+        divs = mf.pivot_test_failures(
+            summary, matrix, {("Windows Vulkan AMD Clang", *key): rec})
+        self.assertEqual(divs[0]["failing_since"],
+                         {"Windows Vulkan AMD Clang": rec})
+        # test_failure_rows dates the row from it.
+        self.assertEqual(mf.test_failure_rows(divs[0])[0]["failing_since"], rec)
+
+
 class CompactWorkflow(unittest.TestCase):
     CASES = [
         ("Windows Vulkan AMD DXC",        "AMD/Vulkan/DXC"),

@@ -2236,6 +2236,156 @@ def blame_prefix_by_mode(
     }
 
 
+# Base `shader_compile_*` label -> the compiler it blames. Used to de-blame that
+# label to `..._env_suspected` when a workflow using the SAME compiler built the
+# identical test fine.
+_SHADER_COMPILE_COMPILER = {
+    "shader_compile_clang": "clang",
+    "shader_compile_dxc": "dxc",
+}
+
+
+def upgrade_classification(cls: str, per_wf: dict[str, str],
+                           prefix_by_mode: dict[str, str]) -> str:
+    """Refine one base classification with what the cross-workflow matrix shows.
+
+    Two independent refinements, both reading the same evidence (how the very
+    same test fared on the other workflows):
+
+      * `shader_compile_<kind>` -> `shader_compile_<kind>_env_suspected` when a
+        workflow using the SAME compiler PASSED this test: that compiler
+        demonstrably can build it, so the failure is a per-workflow toolchain /
+        environment difference, not a compiler defect.
+      * a runtime base in `_RUNTIME_UPGRADE_SUFFIX` -> `<blame prefix>_<mode>`
+        when its failure-mode cluster aligns on an axis (see
+        `blame_prefix_by_mode`).
+
+    Anything else — `xpass`, `runtime_pipeline_error`, an empty or unrecognised
+    label — is returned unchanged.
+
+    Pure and total, so both the per-workflow rows and a divergence's
+    per-workflow breakdown can be derived from it and can never disagree (they
+    used to be computed separately, which left the breakdown showing the
+    un-refined `shader_compile_*` label).
+    """
+    comp = _SHADER_COMPILE_COMPILER.get(cls)
+    if comp:
+        return f"{cls}_env_suspected" if same_compiler_passes(per_wf, comp) else cls
+    prefix = prefix_by_mode.get(cls, "")
+    suffix = _RUNTIME_UPGRADE_SUFFIX.get(cls)
+    return f"{prefix}_{suffix}" if prefix and suffix else cls
+
+
+def pivot_test_failures(summary: list[dict], matrix: dict,
+                        since_by_key: dict | None = None) -> list[dict]:
+    """Cross-workflow pivot: refine every failing test and collect the divergences.
+
+    `matrix` maps a normalized (base_suite, test) key to {workflow -> result},
+    covering every completed run (failing and passing), so it can say where else
+    the same test ran and how it fared.
+
+    Mutates each test entry in `summary` in place, adding `passes_on` /
+    `fails_on` (and, for a divergence, `axes`) and upgrading `classification`
+    via `upgrade_classification`. Returns one divergence record per test that
+    fails on some workflows and passes on others — the report's "Test failure
+    summary".
+
+    A test's failure MODE (miscompile / crash / unknown) can differ per workflow
+    — e.g. a driver crash on one GPU but a value mismatch on others — and each
+    mode gets its own axis-derived blame prefix, so a test can carry several
+    distinct classifications at once. Each workflow's BASE classification is
+    therefore captured up front, before any upgrade, so the mode clustering and
+    the per-workflow breakdown both work off unrefined labels.
+
+    EVERY divergent test is reported, whatever its classification. What makes a
+    row worth showing is the split itself (identical test source, passes here,
+    fails there); the label only says who is suspected. Filtering on the label
+    used to silently drop the `shader_compile_*` rows — including the
+    `_env_suspected` ones, which are *precisely* the pass-here/fail-there case —
+    from the summary.
+    """
+    since_by_key = since_by_key or {}
+
+    base_modes: dict[tuple[str, str], dict[str, str]] = defaultdict(dict)
+    for r in summary:
+        for t in r.get("tests") or []:
+            base_modes[normalize_test_key(t["suite"], t["test"])][r["workflow"]] = \
+                t.get("classification", "")
+
+    seen_div: set[tuple[str, str]] = set()
+    divergences: list[dict] = []
+    for r in summary:
+        for t in r.get("tests") or []:
+            key = normalize_test_key(t["suite"], t["test"])
+            per_wf = matrix.get(key, {})
+            passes_on = sorted(w for w, res in per_wf.items() if res == "PASS")
+            fails_on = sorted(w for w, res in per_wf.items() if res in ("FAIL", "XPASS"))
+            t["passes_on"] = passes_on
+            t["fails_on"] = fails_on
+            cls = t.get("classification", "")
+
+            # Blame is decided from the stricter contrast/clean-partition
+            # attribution, per failure-MODE cluster rather than over the whole
+            # mixed failing set: a test can fail by different mechanisms on
+            # disjoint config subsets (e.g. an unrelated pipeline error on
+            # Lavapipe AND a miscompile on D3D12/QC), and blaming over the union
+            # would dilute an otherwise-clean axis. The chosen prefix names the
+            # suspected layer:
+            #   * gpu+api pair -> that vendor's driver for ONE API
+            #     (gpu_api_driver_suspected)
+            #   * compiler+api pair -> that compiler's codegen backend for ONE
+            #     target, DXIL or SPIR-V (compiler_backend_suspected)
+            #   * gpu-aligned -> per-vendor driver (runtime_driver_suspected)
+            #   * api-aligned -> API/backend layer  (api_backend_suspected)
+            #   * compiler-aligned -> the compiler (compiler_suspected), only on
+            #     a clean partition (every workflow on that compiler failed, none
+            #     passed, the OTHER compiler passed) — the high-confidence case;
+            #     a backend/driver fault would let the same compiler pass on
+            #     another backend.
+            #   * none of the above -> environment-dependent
+            #     (runtime_driver_suspected)
+            # Upgrades stay 'suspected', never 'confirmed'.
+            mode_of = base_modes[key]
+            prefix_by_mode = blame_prefix_by_mode(fails_on, passes_on, mode_of)
+            new_cls = upgrade_classification(cls, per_wf, prefix_by_mode)
+            if new_cls != cls:
+                t["classification"] = new_cls
+
+            if not (passes_on and fails_on):
+                continue
+            # Descriptive failure axis for the report: what the failing workflows
+            # have in common (does NOT assign blame). So a test can show
+            # `compiler: clang-only` as its failure axis yet not be blamed on
+            # clang, because it passes elsewhere.
+            axes = failure_axes(fails_on)
+            t["axes"] = axes
+            if key in seen_div:
+                continue
+            seen_div.add(key)
+            # Per-workflow classification, refined exactly like the per-workflow
+            # row above: both the failure mode and the blame layer come from that
+            # workflow's own mode cluster.
+            fail_cls: dict[str, str] = {
+                w: (upgrade_classification(mode_of.get(w, ""), per_wf,
+                                           prefix_by_mode) or "unknown")
+                for w in fails_on
+            }
+            divergences.append({
+                "suite": normalize_suite(t["suite"]), "test": t["test"],
+                "classifications": sorted(set(fail_cls.values())),
+                "fail_classifications": fail_cls,
+                "axes": axes,
+                # Per-workflow "failing since" records, so a row can be dated by
+                # its longest-failing workflow.
+                "failing_since": {
+                    w: since_by_key[(w, *key)]
+                    for w in fails_on if (w, *key) in since_by_key
+                },
+                "fails_on": fails_on, "passes_on": passes_on,
+            })
+    return divergences
+
+
 def _fmt_commits(commits: dict) -> str:
     """Compact `llvm <sha> · dxc <sha> · offload <sha>` for the summary table
     (each part omitted if that repo's commit is unknown)."""
@@ -3066,105 +3216,9 @@ def main() -> None:
             since_by_key[(r["workflow"], *normalize_test_key(t["suite"], t["test"]))] = rec
 
     # ---- cross-workflow pivot: build the test failure summary ----
-    # A test's failure MODE (miscompile / crash / unknown) can differ per
-    # workflow — e.g. a driver crash on one GPU but a value mismatch on others —
-    # and each mode gets its own axis-derived blame prefix (see the cluster logic
-    # below), so a test can carry several distinct classifications at once.
-    # Capture each failing workflow's base classification up front so the
-    # divergence row can report the per-workflow breakdown rather than one
-    # arbitrary label.
-    base_modes: dict[tuple[str, str], dict[str, str]] = defaultdict(dict)
-    for r in summary:
-        for t in r.get("tests") or []:
-            base_modes[normalize_test_key(t["suite"], t["test"])][r["workflow"]] = \
-                t.get("classification", "")
-
-    seen_div: set[tuple[str, str]] = set()
-    divergences: list[dict] = []
-    for r in summary:
-        for t in r.get("tests") or []:
-            key = normalize_test_key(t["suite"], t["test"])
-            per_wf = matrix.get(key, {})
-            passes_on = sorted(w for w, res in per_wf.items() if res == "PASS")
-            fails_on = sorted(w for w, res in per_wf.items() if res in ("FAIL", "XPASS"))
-            t["passes_on"] = passes_on
-            t["fails_on"] = fails_on
-            cls = t.get("classification", "")
-
-            # Shader-compile de-blame. `shader_compile_<kind>` blames the compiler
-            # that failed to build the shader. Keep that blame only when NO
-            # workflow using the same compiler passed this test; a same-compiler
-            # pass proves the compiler CAN build it, so this failure is a
-            # per-workflow toolchain/env difference, not a compiler defect.
-            if cls in ("shader_compile_clang", "shader_compile_dxc"):
-                comp = "clang" if cls == "shader_compile_clang" else "dxc"
-                if same_compiler_passes(per_wf, comp):
-                    t["classification"] = f"{cls}_env_suspected"
-                continue
-            # Include in the test failure summary any test that fails on some
-            # workflows and passes on others: runtime failures (which may be
-            # upgraded to a suspected layer below) and xpasses (a stale XFAIL —
-            # the test passed where it was annotated to fail). xpass is never in
-            # _RUNTIME_UPGRADE_SUFFIX, so the upgrade logic leaves it as `xpass`.
-            if passes_on and fails_on and (cls.startswith("runtime_") or cls == "xpass"):
-                # Descriptive failure axis for the report: what the failing
-                # workflows have in common (does not assign blame).
-                axes = failure_axes(fails_on)
-                t["axes"] = axes
-                # Blame is decided separately, from the stricter contrast/clean-
-                # partition attribution, and names the suspected layer:
-                #   * gpu+api pair -> that vendor's driver for ONE API
-                #     (gpu_api_driver_suspected)
-                #   * compiler+api pair -> that compiler's codegen backend for ONE
-                #     target, DXIL or SPIR-V (compiler_backend_suspected)
-                #   * gpu-aligned -> per-vendor driver (runtime_driver_suspected)
-                #   * api-aligned -> API/backend layer  (api_backend_suspected)
-                #   * compiler-aligned -> the compiler (compiler_suspected), only
-                #     on a clean partition (every workflow on that compiler
-                #     failed, none passed, the OTHER compiler passed) — the
-                #     high-confidence case; a backend/driver fault would let the
-                #     same compiler pass on another backend.
-                #   * none of the above -> environment-dependent
-                #     (runtime_driver_suspected)
-                # So a test can show `compiler: clang-only` as a failure axis yet
-                # not be blamed on clang (it passes elsewhere). Upgrades stay
-                # 'suspected', never 'confirmed'.
-                # Attribute blame per failure-MODE cluster, not over the whole
-                # mixed failing set: a test can fail by different mechanisms on
-                # disjoint config subsets (e.g. an unrelated pipeline error on
-                # Lavapipe AND a miscompile on D3D12/QC), and blaming over the
-                # union would dilute an otherwise-clean axis.
-                mode_of = base_modes[key]
-                prefix_by_mode = blame_prefix_by_mode(fails_on, passes_on, mode_of)
-                prefix = prefix_by_mode.get(cls, "")
-                suffix = _RUNTIME_UPGRADE_SUFFIX.get(cls)
-                if prefix and suffix:
-                    t["classification"] = f"{prefix}_{suffix}"
-                if key not in seen_div:
-                    seen_div.add(key)
-                    # Per-workflow classification: both the failure mode (suffix)
-                    # and the blame layer (prefix) come from that workflow's own
-                    # mode cluster.
-                    fail_cls: dict[str, str] = {}
-                    for w in fails_on:
-                        base = mode_of.get(w, "")
-                        sfx = _RUNTIME_UPGRADE_SUFFIX.get(base)
-                        wpre = prefix_by_mode.get(base, "")
-                        fail_cls[w] = (f"{wpre}_{sfx}" if (wpre and sfx)
-                                       else (base or "unknown"))
-                    divergences.append({
-                        "suite": normalize_suite(t["suite"]), "test": t["test"],
-                        "classifications": sorted(set(fail_cls.values())),
-                        "fail_classifications": fail_cls,
-                        "axes": axes,
-                        # Per-workflow "failing since" records, so a row can be
-                        # dated by its longest-failing workflow.
-                        "failing_since": {
-                            w: since_by_key[(w, *key)]
-                            for w in fails_on if (w, *key) in since_by_key
-                        },
-                        "fails_on": fails_on, "passes_on": passes_on,
-                    })
+    # Refines every failing test's classification against the pass matrix and
+    # returns the tests that fail on some workflows and pass on others.
+    divergences = pivot_test_failures(summary, matrix, since_by_key)
 
     # ---- write outputs ----
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
@@ -3254,8 +3308,10 @@ def main() -> None:
     if divergences:
         md += ["## Test failure summary", "",
                "Tests that fail on some workflows but pass on others, one row per",
-               "(test, classification) — including **xpass** (a test annotated XFAIL that",
-               "passed, i.e. a stale XFAIL for the workflows it 'fails on'). The same",
+               "(test, classification) — every classification is listed, including",
+               "**xpass** (a test annotated XFAIL that passed, i.e. a stale XFAIL for the",
+               "workflows it 'fails on') and `shader_compile_*` (the shader didn't build",
+               "here but did elsewhere). The same",
                "test source runs everywhere, so the",
                "split points at something configuration-specific: a per-vendor driver",
                "bug, an API/backend bug, a compiler (DXC vs clang) codegen",
