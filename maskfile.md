@@ -793,6 +793,62 @@ Truncates the commit history of a specific submodule back to a shallow depth of 
 cd "$MASKFILE_DIR/$repo" && git fetch --depth 2 && git reflog expire --expire=now --all && git gc --prune=now
 ```
 
+## fetch-refspec [username]
+Sets `remote.origin.fetch` of the checkout you are standing in (or `--in
+<worktree>`) so that `origin` tracks `main` plus, if a username is given, that
+user's `users/<username>/*` branches.
+
+Submodules are cloned single-branch, so `origin` only ever fetches
+`refs/heads/main`; anything referring to `origin/users/...` (for example `gh
+stack checkout` on a pull request whose branch lives in the upstream repository)
+then fails with *not a valid object name*. Widening the refspec fixes that
+without pulling in the thousands of other branches these repositories carry.
+
+Without a username the refspec is reset to `main` only. Git worktrees share the
+configuration of their repository, so this applies to every worktree of that
+submodule.
+
+**OPTIONS**
+* in
+    * flags: --in
+    * type: string
+    * desc: Worktree whose `origin` to reconfigure; defaults to the current directory
+* fetch
+    * flags: --fetch
+    * desc: Fetch from `origin` afterwards, so the new refs are available right away
+
+```bash
+set -eo pipefail
+source "$MASKFILE_DIR/scripts/hlsl-dev.sh"
+hd_init
+
+wt=$(hd_target)
+
+case "${username:-}" in
+*[!A-Za-z0-9._-]*) hd_die "invalid username '$username'" ;;
+esac
+
+# --unset-all exits 5 when there is nothing to unset; that is not an error here.
+git -C "$wt" config --unset-all remote.origin.fetch || true
+git -C "$wt" config --add remote.origin.fetch \
+    '+refs/heads/main:refs/remotes/origin/main'
+if [ -n "${username:-}" ]; then
+    git -C "$wt" config --add remote.origin.fetch \
+        "+refs/heads/users/$username/*:refs/remotes/origin/users/$username/*"
+fi
+
+echo "remote.origin.fetch for $wt:"
+git -C "$wt" config --get-all remote.origin.fetch | sed 's/^/    /'
+
+if [ -n "${fetch:-}" ]; then
+    echo
+    git -C "$wt" fetch --prune origin
+else
+    echo
+    echo "Run 'git fetch origin' in the checkout to pick the new refs up."
+fi
+```
+
 ## update-submodules
 Updates all submodules to the latest commits on their respective default remote branches (e.g., main or master).
 
