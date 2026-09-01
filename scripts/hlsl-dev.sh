@@ -1136,6 +1136,123 @@ hd_restore_fragile_symlinks() {
     done
     HD_CLEARED_SYMLINKS=()
 }
+
+# hd_clear_test_scratch_symlinks <build dir>
+#
+# The same sandbox unlink() behaviour bites lit, not just the build. Tests
+# assemble fake toolchain trees under <build>/**/Output and populate them with
+# links to the tools under test:
+#
+#     clang/test/Driver/no-canonical-prefixes.c:  ln -sf %clang test-clang
+#
+# `ln -sf` and `rm -f` unlink the destination first, and unlink() here walks
+# the whole chain -- test-clang -> bin/clang -> bin/clang-24 -- and deletes the
+# regular file at the end of it. So a link left behind by an earlier run turns
+# the next lit run into a 1.4 GB delete of clang-24, after which every
+# remaining test fails with "couldn't find 'clang' program". clang/test/Driver
+# and ClangScanDeps together leave ~18 such links pointing at bin/clang-24.
+#
+# Creating a link whose name is free is unaffected, so clearing the leftovers
+# before lit runs is enough; each test recreates what it needs. This is a
+# one-way sweep -- unlike hd_restore_fragile_symlinks there is nothing to put
+# back, because these are scratch files owned by the tests.
+#
+# Only links resolving to a regular file inside the build tree are touched: a
+# link into /nix/store is not ours to move, and a link to a directory is
+# harmless because unlink() on it fails with EISDIR.
+hd_clear_test_scratch_symlinks() {
+    local build=$1 link target tmp list n=0
+    [ -n "$build" ] && [ -d "$build" ] || return 0
+    hd_unlink_follows_symlinks || return 0
+
+    # Same subshell/process-substitution constraints as hd_clear_fragile_symlinks.
+    list=$(find "$build" -path '*/Output/*' -type l -print 2>/dev/null)
+    [ -n "$list" ] || return 0
+
+    while IFS= read -r link; do
+        [ -L "$link" ] || continue
+        target=$(readlink -f "$link" 2>/dev/null) || continue
+        [ -f "$target" ] || continue
+        case $target in
+        "$build"/*) ;;
+        *) continue ;;
+        esac
+        # Make the link dangle before deleting it. rename() resolves symlinks
+        # here too, so moving the link itself is not an option -- only moving
+        # the regular file at the end of the chain is safe.
+        tmp=$target.hd-symlink-guard.$$
+        mv "$target" "$tmp" 2>/dev/null || continue
+        rm -f "$link"
+        mv "$tmp" "$target"
+        n=$((n + 1))
+    done <<<"$list"
+
+    [ "$n" -gt 0 ] && hd_log "cleared $n stale lit scratch symlink(s)"
+    return 0
+}
+
+# Hard-link snapshot of <build>/bin
+# --------------------------------
+#
+# Clearing stale links is not sufficient on its own, because a lit run also
+# creates and destroys links to the tools *within itself*. About twenty
+# clang/test/Driver tests build a fake toolchain out of symlinks:
+#
+#     rm -rf %t.dir/testroot-gcc
+#     ln -s %clang %t.dir/testroot-gcc/bin/x86_64-w64-mingw32-gcc
+#
+# The `rm -rf` on the next run -- or on a later RUN line -- walks into that
+# tree and unlinks a link to bin/clang, which under this sandbox deletes
+# clang-24 instead. There is no ordering we can impose from outside that
+# prevents it.
+#
+# A hard link is the cheap insurance. It shares the inode, so it costs no data
+# even for a 1.4 GB binary, and unlink() removes a directory entry rather than
+# the inode: as long as a second entry exists the file survives whichever entry
+# a test destroys, and relinking it afterwards is a metadata operation.
+#
+# This does not make such a test *pass* -- anything running between the delete
+# and the restore still fails -- but the tree is never left needing a rebuild,
+# and the log says plainly that it happened.
+HD_BIN_GUARD_DIR=.hd-bin-guard
+
+hd_snapshot_bin() {
+    local build=$1 dir f
+    [ -n "$build" ] && [ -d "$build/bin" ] || return 0
+    hd_unlink_follows_symlinks || return 0
+    dir=$build/$HD_BIN_GUARD_DIR
+    rm -rf "$dir" 2>/dev/null
+    mkdir -p "$dir" 2>/dev/null || return 0
+    for f in "$build"/bin/*; do
+        # Regular files only: the symlink aliases are rebuilt from these, and
+        # hard-linking one would resolve through it here anyway.
+        [ -f "$f" ] && [ ! -L "$f" ] || continue
+        ln -f "$f" "$dir/${f##*/}" 2>/dev/null
+    done
+    return 0
+}
+
+hd_restore_bin() {
+    local build=$1 dir f name lost="" n=0
+    [ -n "$build" ] || return 0
+    dir=$build/$HD_BIN_GUARD_DIR
+    [ -d "$dir" ] || return 0
+    for f in "$dir"/*; do
+        [ -f "$f" ] || continue
+        name=${f##*/}
+        [ -e "$build/bin/$name" ] && continue
+        ln "$f" "$build/bin/$name" 2>/dev/null || continue
+        lost="$lost $name"
+        n=$((n + 1))
+    done
+    rm -rf "$dir" 2>/dev/null
+    if [ "$n" -gt 0 ]; then
+        hd_warn "the test run deleted$lost from $build/bin; restored from the"
+        hd_warn "hard-link snapshot. Results from this run are unreliable --"
+        hd_warn "anything that ran after the deletion could not find the tool."
+    fi
+    return 0
+}
 # hd_build <worktree> [target...]
 hd_build() {
     local wt=$1 build rc=0
@@ -1198,10 +1315,16 @@ hd_sync_dxc() {
 
 # hd_lit <build dir> [args...]
 hd_lit() {
-    local build=$1
+    local build=$1 rc=0
     shift
     local lit="$build/bin/llvm-lit"
     [ -x "$lit" ] || hd_die "$lit not found; run 'mask build' first"
+    hd_clear_test_scratch_symlinks "$build"
+    hd_snapshot_bin "$build"
     hd_log "$lit $*"
-    hd_run "$lit" "$@"
+    # Never let a failing suite skip the restore: lit exits non-zero whenever
+    # any test fails, and the caller runs under `set -e`.
+    hd_run "$lit" "$@" || rc=$?
+    hd_restore_bin "$build"
+    return $rc
 }
