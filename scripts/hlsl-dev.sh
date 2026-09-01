@@ -950,7 +950,7 @@ hd_configure() {
 # standalone offload distribution (clang, lit tools, LLVM libraries and CMake
 # exports). Shared by every offload worktree that points at this llvm worktree.
 hd_dist() {
-    local wt=$1 build prefix offload
+    local wt=$1 build prefix offload rc=0
     build=$(hd_dist_build_dir "$wt")
     prefix=$(hd_dist_prefix "$wt")
     offload=$(hd_dep offload "$wt")
@@ -975,7 +975,13 @@ hd_dist() {
     hd_lock "$build"
     hd_cmake_flags HLSL_CMAKE_FLAGS_LLVM_DIST
     hd_run cmake -S "$wt/llvm" -B "$build" "${HD_FLAGS[@]}"
-    hd_run cmake --build "$build" --target install-distribution
+    # install-distribution republishes the tool aliases (clang, clang++,
+    # clang-dxc, ...) in the build tree *and* under the prefix, so both trees
+    # have to be guarded or the install destroys the binary it just wrote.
+    hd_clear_fragile_symlinks "$build" "$prefix"
+    hd_run cmake --build "$build" --target install-distribution || rc=$?
+    hd_restore_fragile_symlinks
+    [ "$rc" -eq 0 ] || return "$rc"
 
     hd_pin_set "$wt" DIST_PREFIX "$prefix"
     hd_log "installed distribution: $prefix"
@@ -1031,6 +1037,11 @@ hd_ensure_configured() {
 # so clearing the destinations before the build keeps the normal build graph
 # -- SPIRVTools ExternalProject included -- completely intact.
 #
+# Install prefixes need the same treatment: `install-distribution` copies the
+# real binary into <prefix>/bin and then republishes the same aliases there, so
+# an unguarded install destroys the binary it has just written. hd_dist guards
+# the build tree and the prefix together.
+#
 # Deleting the link itself is only safe once it dangles, so a live link is
 # cleared by moving its target aside, deleting the now-dangling link, and
 # moving the target back. Anything the build did not recreate is restored
@@ -1066,38 +1077,45 @@ hd_fragile_symlinks() {
     return 0
 }
 
+# hd_clear_fragile_symlinks <root>...
+# Each root is searched independently, so a task can guard a build tree and the
+# prefix it installs into in one call.
 hd_clear_fragile_symlinks() {
-    local build=$1 link text target tmp list
+    local root link text target tmp list
     HD_CLEARED_SYMLINKS=()
     hd_unlink_follows_symlinks || return 0
-    # A pipeline would run the loop in a subshell and lose the array, and
-    # process substitution needs /dev/fd, which a sandbox may not provide.
-    list=$(hd_fragile_symlinks "$build")
-    [ -n "$list" ] || return 0
-    while IFS= read -r link; do
-        [ -L "$link" ] || continue
-        text=$(readlink "$link") || continue
-        if [ -e "$link" ]; then
+    for root in "$@"; do
+        [ -n "$root" ] && [ -d "$root" ] || continue
+        # A pipeline would run the loop in a subshell and lose the array, and
+        # process substitution needs /dev/fd, which a sandbox may not provide.
+        list=$(hd_fragile_symlinks "$root")
+        [ -n "$list" ] || continue
+        while IFS= read -r link; do
+            [ -L "$link" ] || continue
+            text=$(readlink "$link") || continue
             target=$(readlink -f "$link") || continue
             # Only touch links whose target we own. A link into a read-only
-            # tree such as /nix/store can be neither moved nor deleted here.
+            # tree such as /nix/store can be neither moved nor deleted here,
+            # and a dangling one is not ours to drop either.
             case $target in
-            "$build"/*) ;;
+            "$root"/*) ;;
             *) continue ;;
             esac
-            # Make the link dangle first: renaming a regular file is safe,
-            # deleting a dangling link is safe, deleting a live one is not.
-            tmp=$target.hd-symlink-guard.$$
-            mv "$target" "$tmp" 2>/dev/null || continue
-            rm -f "$link"
-            mv "$tmp" "$target"
-        else
-            rm -f "$link" || continue
-        fi
-        HD_CLEARED_SYMLINKS+=("$link"$'\t'"$text")
-    done <<<"$list"
+            if [ -e "$link" ]; then
+                # Make the link dangle first: renaming a regular file is safe,
+                # deleting a dangling link is safe, deleting a live one is not.
+                tmp=$target.hd-symlink-guard.$$
+                mv "$target" "$tmp" 2>/dev/null || continue
+                rm -f "$link"
+                mv "$tmp" "$target"
+            else
+                rm -f "$link" || continue
+            fi
+            HD_CLEARED_SYMLINKS+=("$link"$'\t'"$text")
+        done <<<"$list"
+    done
     [ "${#HD_CLEARED_SYMLINKS[@]}" -gt 0 ] &&
-        hd_log "cleared ${#HD_CLEARED_SYMLINKS[@]} sandbox-fragile symlink(s) under $build"
+        hd_log "cleared ${#HD_CLEARED_SYMLINKS[@]} sandbox-fragile symlink(s)"
     return 0
 }
 
