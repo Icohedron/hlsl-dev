@@ -1,10 +1,12 @@
 # shellcheck shell=bash
 #
-# hlsl-dev.sh -- worktree-aware resolution helpers shared by maskfile.md tasks.
+# hlsl-dev.sh -- worktree-aware resolution helpers shared by the task scripts
+# in scripts/tasks/, which devenv exposes on PATH as `hlsl-<task>`.
 #
 # Every task that touches a checkout starts with:
 #
-#     source "$MASKFILE_DIR/scripts/hlsl-dev.sh"
+#     source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../hlsl-dev.sh"
+#     hd_parse "$@"
 #     hd_init
 #
 # The library answers three questions for a task:
@@ -76,60 +78,224 @@ hd_kind() {
 # Workspace root
 # ---------------------------------------------------------------------------
 
+# The workspace root is the directory holding devenv.nix. Inside the developer
+# environment devenv exports DEVENV_ROOT for exactly this purpose (and it is
+# the project directory, not $PWD, so it stays correct in a subdirectory);
+# HLSL_DEV_ROOT, set by enterShell, is kept as the overridable spelling.
 hd_find_root() {
-    if [ -n "${HLSL_DEV_ROOT:-}" ] && [ -f "$HLSL_DEV_ROOT/maskfile.md" ]; then
+    if [ -n "${HLSL_DEV_ROOT:-}" ] && [ -f "$HLSL_DEV_ROOT/devenv.nix" ]; then
         printf '%s\n' "$HLSL_DEV_ROOT"
         return 0
     fi
-    if [ -n "${MASKFILE_DIR:-}" ] && [ -f "$MASKFILE_DIR/maskfile.md" ]; then
-        (cd "$MASKFILE_DIR" && pwd -P)
+    if [ -n "${DEVENV_ROOT:-}" ] && [ -f "$DEVENV_ROOT/devenv.nix" ]; then
+        (cd "$DEVENV_ROOT" && pwd -P)
         return 0
     fi
     local d
     d=$(pwd -P)
     while [ "$d" != "/" ]; do
-        if [ -f "$d/maskfile.md" ] && [ -f "$d/flake.nix" ]; then
+        if [ -f "$d/devenv.nix" ] && [ -f "$d/scripts/hlsl-dev.sh" ]; then
             printf '%s\n' "$d"
             return 0
         fi
         d=$(dirname "$d")
     done
-    hd_die "cannot find the workspace root (maskfile.md + flake.nix); set HLSL_DEV_ROOT"
+    hd_die "cannot find the workspace root (devenv.nix); set HLSL_DEV_ROOT"
 }
 
 hd_state_dir() { printf '%s\n' "${HLSL_DEV_STATE:-$HD_ROOT/.hlsl-dev}"; }
 
 # ---------------------------------------------------------------------------
+# Command-line parsing
+# ---------------------------------------------------------------------------
+# The tasks are plain executables that devenv puts on PATH as `hlsl-<task>`,
+# so option parsing lives here: one implementation, one spelling of each flag,
+# and one place that documents them.
+#
+# A task declares what it accepts, then parses:
+#
+#     HD_TASK_ARGS="[target]"                # positional arguments, for --help
+#     HD_TASK_DESC="Build the worktree ..."  # one or more lines
+#     HD_TASK_OPTS="in= llvm= fresh"         # `name=` takes a value, `name` is a switch
+#     hd_parse "$@"
+#
+# and afterwards reads each option from the variable of the same name ($in,
+# $llvm, $fresh, ...) and the positional arguments from the HD_ARGV array. An
+# option name is its flag with dashes turned into underscores, so --build-type
+# sets $build_type. Every task also gets --help for free.
+
+# The shared option catalogue: a flag means the same thing in every task, so
+# every task's --help describes it the same way.
+hd_opt_desc() {
+    # shellcheck disable=SC2016 # `nix` is a literal option value, not an expansion
+    case "$1" in
+    in) printf 'Worktree to act on: path, directory name, suffix or branch (default: the current directory)' ;;
+    llvm) printf 'llvm-project worktree to build/test against' ;;
+    dxc) printf 'DirectXShaderCompiler worktree, a directory holding dxc/dxv, or `nix`' ;;
+    offload) printf 'offload-test-suite worktree an llvm build includes as OffloadTest' ;;
+    dist_prefix) printf 'Install prefix of an LLVM standalone distribution (e.g. an unpacked CI artifact)' ;;
+    build_type) printf 'CMake build type: Debug, Release, RelWithDebInfo, MinSizeRel' ;;
+    fresh) printf 'Start from scratch instead of reusing what is already there' ;;
+    forget) printf 'Forget this worktree'"'"'s remembered dependencies before applying the flags' ;;
+    dry_run) printf 'Print what would be built and configured, and stop' ;;
+    no_auto) printf 'Fail instead of building a missing prerequisite (LLVM distribution, dxc)' ;;
+    lit_args) printf 'Extra arguments for llvm-lit (default -v); use --lit-args=-x for a value starting with a dash' ;;
+    dist) printf 'Also act on the standalone distribution build and install prefix' ;;
+    all) printf 'Act on every worktree of every repository' ;;
+    from) printf 'Worktree to seed a missing index from (default: any worktree of that repository that has one)' ;;
+    restore_gitignore) printf 'Restore .gitignore exactly as git has it, and stop hiding it' ;;
+    fetch) printf 'Fetch from origin afterwards' ;;
+    since) printf 'Compare against this revision instead of looking at what is staged' ;;
+    diff) printf 'Print the patch instead of a summary' ;;
+    fix) printf 'Apply the change instead of reporting it' ;;
+    install_hooks) printf 'Install the clang-format pre-commit hook in every checkout that has a .clang-format' ;;
+    uninstall_hooks) printf 'Remove the hook again' ;;
+    check_hooks) printf 'Exit non-zero when a hook is missing or out of date, and print nothing' ;;
+    quiet) printf 'Say nothing when there is nothing to report' ;;
+    *) printf '(no description)' ;;
+    esac
+}
+
+# hd_opt_kind <name> -> value | switch | "" (not accepted by this task)
+hd_opt_kind() {
+    local entry
+    for entry in ${HD_TASK_OPTS:-}; do
+        case "$entry" in
+        "$1=") printf 'value\n'; return 0 ;;
+        "$1") printf 'switch\n'; return 0 ;;
+        esac
+    done
+}
+
+hd_usage() {
+    local entry name flag
+    printf 'usage: %s%s%s\n' "$HD_TASK_NAME" \
+        "${HD_TASK_OPTS:+ [options]}" "${HD_TASK_ARGS:+ $HD_TASK_ARGS}"
+    [ -z "${HD_TASK_DESC:-}" ] || printf '\n%s\n' "$HD_TASK_DESC"
+    if [ -n "${HD_TASK_OPTS:-}" ]; then
+        printf '\noptions:\n'
+        for entry in $HD_TASK_OPTS; do
+            name=${entry%=}
+            flag="--${name//_/-}"
+            [ "$entry" = "$name" ] || flag="$flag <value>"
+            printf '  %-24s %s\n' "$flag" "$(hd_opt_desc "$name")"
+        done
+    fi
+    printf '  %-24s %s\n' "--help" "Show this message"
+    [ -z "${HD_TASK_HELP:-}" ] || printf '\n%s\n' "$HD_TASK_HELP"
+}
+
+hd_parse() {
+    local entry name kind
+
+    # devenv's wrapper passes the command name in; a direct run of the file
+    # falls back to its own name.
+    HD_TASK_NAME=${HD_TASK_NAME:-$(basename "$0" .sh)}
+    HD_ARGV=()
+
+    # Start every declared option empty: a task reads plain variable names, and
+    # a stray `mode`/`from`/`all` inherited from the caller's environment must
+    # not be mistaken for a flag. The HLSL_* defaults are applied by hd_init.
+    for entry in ${HD_TASK_OPTS:-}; do
+        printf -v "${entry%=}" '%s' ''
+    done
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        -h | --help)
+            hd_usage
+            exit 0
+            ;;
+        --)
+            shift
+            while [ $# -gt 0 ]; do
+                HD_ARGV+=("$1")
+                shift
+            done
+            ;;
+        --*=*)
+            name=${1%%=*}
+            name=${name#--}
+            name=${name//-/_}
+            [ -n "$(hd_opt_kind "$name")" ] ||
+                hd_die "unknown option '${1%%=*}' (try '$HD_TASK_NAME --help')"
+            printf -v "$name" '%s' "${1#*=}"
+            shift
+            ;;
+        --*)
+            name=${1#--}
+            name=${name//-/_}
+            kind=$(hd_opt_kind "$name")
+            case "$kind" in
+            switch)
+                printf -v "$name" '%s' 'true'
+                shift
+                ;;
+            value)
+                [ $# -ge 2 ] || hd_die "option '$1' needs a value"
+                printf -v "$name" '%s' "$2"
+                shift 2
+                ;;
+            *) hd_die "unknown option '$1' (try '$HD_TASK_NAME --help')" ;;
+            esac
+            ;;
+        *)
+            HD_ARGV+=("$1")
+            shift
+            ;;
+        esac
+    done
+}
+
+# hd_need_args <count> -- fail with the usage message when a required
+# positional argument is missing.
+hd_need_args() {
+    [ "${#HD_ARGV[@]}" -ge "$1" ] && return 0
+    hd_usage >&2
+    exit 2
+}
+
+# ---------------------------------------------------------------------------
 # Initialisation
 # ---------------------------------------------------------------------------
-# Copies the option variables that `mask` injects into the task environment
-# into namespaced HD_OPT_* variables, so that helper functions have a single
-# place to look and task-local names cannot collide with them.
+# Copies the parsed options into namespaced HD_OPT_* variables, applying the
+# HLSL_* environment defaults, so that helper functions have a single place to
+# look and task-local names cannot collide with them.
 
-hd_init() {
+# Just the workspace root: for tasks that need the layout but not a build
+# environment (vk-use, setup, update-submodules, ...).
+hd_init_root() {
     HD_ROOT=$(hd_find_root)
     export HD_ROOT
+}
+
+hd_init() {
+    hd_init_root
 
     HD_OPT_IN=${in:-${HLSL_WT:-}}
     HD_OPT_LLVM=${llvm:-${HLSL_LLVM:-}}
     HD_OPT_DXC=${dxc:-${HLSL_DXC:-}}
     HD_OPT_OFFLOAD=${offload:-${HLSL_OFFLOAD:-}}
-    HD_OPT_GOLDEN=${golden:-${HLSL_GOLDEN:-}}
-    HD_OPT_MODE=${mode:-${HLSL_MODE:-}}
-    HD_OPT_BUILD_DIR=${build_dir:-${HLSL_BUILD_DIR:-}}
+    HD_OPT_GOLDEN=${HLSL_GOLDEN:-}
+    HD_OPT_BUILD_DIR=${HLSL_BUILD_DIR:-}
     HD_OPT_BUILD_TYPE=${build_type:-${HLSL_BUILD_TYPE:-}}
     HD_OPT_DIST_PREFIX=${dist_prefix:-${HLSL_DIST_PREFIX:-}}
     HD_OPT_FRESH=${fresh:-}
 
-    case "${HD_OPT_MODE:-}" in
-    "" | standalone | integrated) ;;
-    *) hd_die "--mode must be 'standalone' or 'integrated' (got '$HD_OPT_MODE')" ;;
-    esac
+    # A missing prerequisite is built rather than reported, unless the caller
+    # says otherwise. --dry-run implies it: a plan never builds anything.
+    HD_DRY_RUN=${dry_run:-}
+    HD_AUTO=1
+    if [ -n "${no_auto:-}" ] || [ "${HLSL_AUTO:-1}" = "0" ]; then HD_AUTO=""; fi
 
     if [ -z "${HLSL_CMAKE_FLAGS_LLVM:-}" ]; then
         hd_die "CMake flag templates are missing from the environment;
-       enter the dev shell first ('nix develop', or 'direnv allow')"
+       enter the developer environment first ('devenv shell')"
     fi
+
+    # Every task runs against the Vulkan driver chosen *now*, so switching it
+    # takes effect on the next command instead of the next shell.
+    hd_vk_export
 }
 
 # ---------------------------------------------------------------------------
@@ -250,6 +416,7 @@ hd_pin_get() {
 # hd_pin_set <worktree> <KEY> <value>   (empty value removes the pin)
 hd_pin_set() {
     local f tmp
+    [ -z "${HD_DRY_RUN:-}" ] || return 0
     f=$(hd_pin_file "$1")
     mkdir -p "$(dirname "$f")"
     tmp=$(mktemp "$f.XXXXXX")
@@ -265,13 +432,136 @@ hd_pin_clear() {
 }
 
 # ---------------------------------------------------------------------------
+# Workspace settings
+# ---------------------------------------------------------------------------
+# Choices that belong to the machine rather than to a checkout -- which Vulkan
+# driver to run against, whether to build D3D12 support. They live in one
+# key=value file next to the pins, so a change applies to the next command
+# rather than to the next shell.
+
+hd_settings_file() { printf '%s\n' "$(hd_state_dir)/settings.env"; }
+
+hd_setting_get() {
+    local f
+    f=$(hd_settings_file)
+    [ -f "$f" ] || return 0
+    sed -n "s/^$1=//p" "$f" | tail -n 1
+}
+
+# hd_setting_set <KEY> <value>   (an empty value removes it)
+hd_setting_set() {
+    local f tmp
+    [ -z "${HD_DRY_RUN:-}" ] || return 0
+    f=$(hd_settings_file)
+    mkdir -p "$(dirname "$f")"
+    tmp=$(mktemp "$f.XXXXXX")
+    if [ -f "$f" ]; then grep -v "^$1=" "$f" >"$tmp" || true; fi
+    [ -n "$2" ] && printf '%s=%s\n' "$1" "$2" >>"$tmp"
+    mv "$tmp" "$f"
+}
+
+# ---------------------------------------------------------------------------
+# Vulkan driver (ICD)
+# ---------------------------------------------------------------------------
+# The vk / clang-vk suites execute SPIR-V, so the loader has to be pointed at a
+# driver. It loads *every* manifest it can find and calls into each one from
+# vkEnumeratePhysicalDevices, so one broken driver takes down the process --
+# under WSL, Mesa's dzn segfaults there and no test can run. VK_DRIVER_FILES is
+# the only lever that helps, because it replaces the discovery entirely, and
+# offload-test-suite/test/lit.cfg.py already forwards it into the tests.
+#
+# One resolver serves all of it: hd_init exports the result for every task, and
+# the shell hook exports it once via `hlsl-vk --export` so that a manual
+# vulkaninfo or offloader run in the shell is covered too.
+
+# hd_vk_driver -> the name in effect: $HLSL_VK_DRIVER, else the saved choice,
+# else lavapipe (Mesa's CPU rasterizer: slow, but it works everywhere).
+hd_vk_driver() {
+    if [ -n "${HLSL_VK_DRIVER:-}" ]; then
+        printf '%s\n' "$HLSL_VK_DRIVER"
+        return 0
+    fi
+    printf '%s\n' "$(hd_setting_get VK_DRIVER)"
+}
+
+# hd_vk_icd -> the manifest to pin the loader to, empty to let it discover
+# drivers itself ("system"). Unknown names resolve to a Mesa ICD by convention:
+# radeon -> radeon_icd.<arch>.json.
+hd_vk_icd() {
+    local driver
+    driver=$(hd_vk_driver)
+    case "${driver:-lavapipe}" in
+    system) ;;
+    lavapipe | lvp) printf '%s/lvp_icd.%s.json\n' "${HLSL_VK_ICD_DIR:-}" "$(uname -m)" ;;
+    /*) printf '%s\n' "$driver" ;;
+    *) printf '%s/%s_icd.%s.json\n' "${HLSL_VK_ICD_DIR:-}" "$driver" "$(uname -m)" ;;
+    esac
+}
+
+# Point the loader at that manifest, or take it out of the way for "system".
+# VK_DRIVER_FILES is honoured by loader >= 1.3.207; VK_ICD_FILENAMES is the
+# legacy name, kept for older loaders.
+hd_vk_export() {
+    local icd
+    icd=$(hd_vk_icd)
+    if [ -z "$icd" ]; then
+        unset VK_DRIVER_FILES VK_ICD_FILENAMES
+        return 0
+    fi
+    if [ ! -e "$icd" ]; then
+        hd_warn "the Vulkan driver '$(hd_vk_driver)' resolves to a missing manifest
+         ($icd); run 'hlsl-vk --list' to see what is available"
+        return 0
+    fi
+    export VK_DRIVER_FILES="$icd"
+    export VK_ICD_FILENAMES="$icd"
+}
+
+# ---------------------------------------------------------------------------
+# D3D12
+# ---------------------------------------------------------------------------
+# offload-test-suite detects D3D12 at configure time and there is no switch of
+# its own: on Windows through find_package(D3D12), on Linux only under WSL,
+# where find_package(D3D12_WSL) picks up the host driver from /usr/lib/wsl/lib
+# plus the two static libraries DirectX-Headers ships. Whatever it finds
+# decides whether the d3d12 / clang-d3d12 suites exist in the build tree.
+#
+# CMake's own CMAKE_DISABLE_FIND_PACKAGE_<name> is the supported way to take
+# that decision back, so "off" is expressed with those, and "on" spells them
+# out as OFF so a build tree that was configured off can be turned back on
+# without a fresh configure.
+
+hd_d3d12() {
+    local saved
+    saved=$(hd_setting_get D3D12)
+    printf '%s\n' "${saved:-on}"
+}
+
+# True when the platform can offer D3D12 at all (WSL's driver, or Windows).
+hd_d3d12_available() {
+    case "$(uname -s)" in
+    *NT* | MINGW* | MSYS* | CYGWIN*) return 0 ;;
+    esac
+    [ -e "/usr/lib/wsl/lib/libd3d12.so" ]
+}
+
+# The flags every configure passes, so the choice is never left to whatever the
+# last configure happened to cache.
+hd_d3d12_flags() {
+    local off=OFF
+    [ "$(hd_d3d12)" = "off" ] && off=ON
+    printf '%s\n' "-DCMAKE_DISABLE_FIND_PACKAGE_D3D12=$off"
+    printf '%s\n' "-DCMAKE_DISABLE_FIND_PACKAGE_D3D12_WSL=$off"
+}
+
+# ---------------------------------------------------------------------------
 # Dependency resolution
 # ---------------------------------------------------------------------------
 # Resolution order for "which <kind> checkout should <worktree> build against":
 #
 #   1. --llvm / --dxc / --offload / --golden on the command line
 #   2. $HLSL_LLVM / $HLSL_DXC / $HLSL_OFFLOAD / $HLSL_GOLDEN in the environment
-#   3. a pin recorded by `mask link` or by the last successful `mask configure`
+#   3. a pin recorded by `hlsl-link` or by the last successful `hlsl-configure`
 #   4. a worktree of that repository checked out on the *same branch name*
 #   5. the submodule checkout in the workspace root
 
@@ -306,9 +596,10 @@ hd_dep() {
         fi
     fi
 
-    local base="$HD_ROOT/$(hd_repo_name "$kind")"
+    local base
+    base="$HD_ROOT/$(hd_repo_name "$kind")"
     [ -d "$base" ] ||
-        hd_die "no $(hd_kind_label "$kind") checkout found; run 'mask setup'"
+        hd_die "no $(hd_kind_label "$kind") checkout found; run 'hlsl-setup'"
     hd_abs "$base"
 }
 
@@ -322,21 +613,17 @@ hd_dep() {
 #   <llvm worktree>/build-dist/install
 #                                   the prefix offload standalone builds consume
 #
-# --build-dir (or $HLSL_BUILD_DIR) overrides the first one for the *target*
-# worktree only; the choice is pinned so that dependent worktrees can find it.
+# $HLSL_BUILD_DIR overrides the first one for the *target* worktree. It is a
+# session variable rather than a flag on purpose: every command in that session
+# then agrees on where the build tree is, with nothing to remember between them.
 
 hd_build_dir() {
-    local wt=$1 pinned
+    local wt=$1
     if [ -n "$HD_OPT_BUILD_DIR" ] && [ "$wt" = "${HD_WT:-}" ]; then
         case "$HD_OPT_BUILD_DIR" in
         /*) printf '%s\n' "${HD_OPT_BUILD_DIR%/}" ;;
         *) printf '%s\n' "$wt/${HD_OPT_BUILD_DIR%/}" ;;
         esac
-        return 0
-    fi
-    pinned=$(hd_pin_get "$wt" BUILD_DIR)
-    if [ -n "$pinned" ]; then
-        printf '%s\n' "$pinned"
         return 0
     fi
     printf '%s/%s\n' "$wt" "${HLSL_BUILD_DIR_NAME:-build}"
@@ -377,17 +664,6 @@ hd_build_type() {
     printf '%s\n' "${cached:-RelWithDebInfo}"
 }
 
-# hd_mode <offload worktree> -> standalone|integrated
-hd_mode() {
-    local pinned
-    if [ -n "$HD_OPT_MODE" ]; then
-        printf '%s\n' "$HD_OPT_MODE"
-        return 0
-    fi
-    pinned=$(hd_pin_get "$1" MODE)
-    printf '%s\n' "${pinned:-standalone}"
-}
-
 # hd_cache_get <build dir> <variable> -> cached value (empty if unset)
 hd_cache_get() {
     [ -f "$1/CMakeCache.txt" ] || return 0
@@ -398,10 +674,17 @@ hd_cache_get() {
 # DXC binary directory
 # ---------------------------------------------------------------------------
 # --dxc accepts a worktree spec, a directory containing dxc/dxv, or the literal
-# "nix" for the prebuilt compiler from the dev shell.
+# "nix" for the prebuilt compiler from the environment.
+#
+# hd_dxc_bin_dir <from worktree> [ensure]
+#
+# With "ensure", a worktree that was asked for by name but has not been built
+# is built here instead of being reported: the caller is about to need dxc, and
+# the command it would otherwise print is the one we would run anyway. Callers
+# that only *report* (hlsl-info, hlsl-ls) leave it off, so they never build.
 
 hd_dxc_bin_dir() {
-    local from=${1:-} spec=$HD_OPT_DXC explicit=1 wt bin
+    local from=${1:-} ensure=${2:-} spec=$HD_OPT_DXC explicit=1 wt bin
 
     if [ -z "$spec" ] && [ -n "$from" ]; then
         spec=$(hd_pin_get "$from" DXC)
@@ -428,14 +711,70 @@ hd_dxc_bin_dir() {
         return 0
     fi
     if [ "$explicit" = 1 ]; then
-        hd_die "$wt has no built dxc ($bin/dxc);
-       build it first:  mask build --in $(basename "$wt")"
+        [ -n "$ensure" ] ||
+            hd_die "$wt has no built dxc ($bin/dxc);
+       build it first:  hlsl-build --in $(basename "$wt")"
+        hd_provide "dxc for $(basename "$wt")" || return 1
+        if [ -n "${HD_DRY_RUN:-}" ]; then
+            printf '%s\n' "$bin"
+            return 0
+        fi
+        ( HD_WT=$wt; hd_build "$wt" ) || hd_die "could not build dxc in $wt"
+        [ -x "$bin/dxc" ] || hd_die "$wt built, but $bin/dxc still does not exist"
+        printf '%s\n' "$bin"
+        return 0
     fi
     [ -n "${HLSL_DXC_PREBUILT_DIR:-}" ] ||
         hd_die "no dxc available: neither $bin/dxc nor a dev-shell dxc exists"
     hd_warn "$(basename "$wt") has no built dxc yet, using the dev shell's prebuilt one
-         (build it with 'mask build --in $(basename "$wt")', or pass --dxc <worktree>)"
+         (build it with 'hlsl-build --in $(basename "$wt")', or pass --dxc <worktree>)"
     printf '%s\n' "$HLSL_DXC_PREBUILT_DIR"
+}
+
+# ---------------------------------------------------------------------------
+# Prerequisites
+# ---------------------------------------------------------------------------
+# A checkout cannot always be built from itself: a standalone offload build
+# needs an installed LLVM distribution, and running its suites needs a dxc
+# binary. Both used to stop with the exact command to type next; they are built
+# instead, because typing back what we just printed is not a decision.
+#
+#   --dry-run   report the plan and build nothing
+#   --no-auto   restore the old behaviour: fail, and say what is missing
+#               (also $HLSL_AUTO=0, for a whole session)
+
+# hd_provide <what> -- true when the caller should go ahead and build it.
+hd_provide() {
+    if [ -n "${HD_DRY_RUN:-}" ]; then
+        hd_log "would build: $1"
+        return 0
+    fi
+    if [ -z "${HD_AUTO:-}" ]; then
+        hd_die "missing prerequisite: $1
+       build it first, or drop --no-auto / \$HLSL_AUTO=0 to have it built here"
+    fi
+    hd_log "missing prerequisite: $1 -- building it now"
+    return 0
+}
+
+# hd_ensure_dist <llvm worktree> -> the distribution prefix, installing it if
+# it is not there yet. `hlsl-dist` stays the way to refresh an existing one
+# after a Clang change; nothing here decides that an install is out of date.
+hd_ensure_dist() {
+    local llvm=$1 dist
+    dist=$(hd_dist_prefix "$llvm")
+    if [ ! -f "$dist/lib/cmake/llvm/LLVMConfig.cmake" ]; then
+        if [ -n "${HD_OPT_DIST_PREFIX:-}" ]; then
+            hd_die "no LLVM distribution at $dist (--dist-prefix / \$HLSL_DIST_PREFIX)"
+        fi
+        hd_provide "the LLVM distribution for $(basename "$llvm") -- the expensive one" || return 1
+        if [ -z "${HD_DRY_RUN:-}" ]; then
+            ( HD_WT=$llvm; hd_dist "$llvm" ) || hd_die "could not build the LLVM distribution for $llvm"
+            [ -f "$dist/lib/cmake/llvm/LLVMConfig.cmake" ] ||
+                hd_die "$llvm installed a distribution, but $dist has no LLVMConfig.cmake"
+        fi
+    fi
+    printf '%s\n' "$dist"
 }
 
 # ---------------------------------------------------------------------------
@@ -450,7 +789,7 @@ hd_target() {
     else
         wt=$(hd_wt_from "$PWD")
         [ -n "$wt" ] || hd_die "not inside a known worktree.
-       cd into one, or pass --in <worktree> (see 'mask ls')"
+       cd into one, or pass --in <worktree> (see 'hlsl-ls')"
     fi
     kind=$(hd_kind "$wt")
     if [ "$#" -gt 0 ]; then
@@ -488,7 +827,7 @@ hd_resolve_any() {
             fi
         done <<< "$(hd_worktrees "$kind")"
     done
-    hd_die "no worktree matches '$spec' (see 'mask ls')"
+    hd_die "no worktree matches '$spec' (see 'hlsl-ls')"
 }
 
 # ---------------------------------------------------------------------------
@@ -500,6 +839,7 @@ hd_resolve_any() {
 # per-clone and never committed, so this is invisible to the upstream repo.
 hd_git_exclude() {
     local common f pat
+    [ -z "${HD_DRY_RUN:-}" ] || return 0
     common=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
     f="$common/info/exclude"
     mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
@@ -507,6 +847,122 @@ hd_git_exclude() {
     for pat in '/build*/' '/install*/' '/compile_commands.json' \
         '/.codegraph/' '/.codegraph-*/' '/codegraph.json'; do
         grep -qxF "$pat" "$f" 2>/dev/null || printf '%s\n' "$pat" >>"$f"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# clang-format pre-commit hook
+# ---------------------------------------------------------------------------
+# A warning, not a gate: `git clang-format` reformats only the lines a commit
+# touches, so the hook reports what it would change and lets the commit
+# through. Upstream reviewers ask for formatted diffs; a workspace that blocks
+# commits over it would be making a policy these repositories do not have.
+#
+# It is installed per *clone*, in the common git directory, so every `wt`
+# worktree of a submodule shares one hook, and nothing lands in the checkout
+# where it could be committed by accident. `hlsl-format` installs, removes and
+# runs it; the hlsl:hooks task keeps it in place.
+
+HD_HOOK_MARKER="hlsl-dev clang-format hook"
+
+# hd_hook_path <worktree> -> the pre-commit hook shared by every worktree of
+# that clone (empty if the directory is not a git checkout).
+hd_hook_path() {
+    local common
+    common=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
+    printf '%s/hooks/pre-commit\n' "$common"
+}
+
+# The hook is a stub: it works out where the workspace is, sets up just enough
+# to find its tools -- a commit from an editor or a bare terminal is not in the
+# developer environment -- and hands over to the task, which is where the logic
+# lives and can be edited without reinstalling anything.
+#
+# It finds the workspace by walking up from itself rather than having the path
+# written in. The same clone is reached through different paths by different
+# machines -- /workspaces/... inside the dev container, somewhere else on the
+# host, and they share these files through the bind mount -- and a hook with a
+# path baked in gets rewritten by whichever one ran last, forever.
+hd_hook_body() {
+    cat <<EOF
+#!/usr/bin/env bash
+# $HD_HOOK_MARKER
+EOF
+    cat <<'EOF'
+#
+# Warns when the staged changes do not match .clang-format. It never blocks a
+# commit. Remove it with 'hlsl-format --uninstall-hooks', or just delete it.
+root=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd -P)
+while [ "$root" != "/" ]; do
+    [ -f "$root/devenv.nix" ] && [ -x "$root/scripts/tasks/format.sh" ] && break
+    root=$(dirname "$root")
+done
+[ "$root" != "/" ] || exit 0   # not in the workspace any more; nothing to say
+export HLSL_DEV_ROOT="$root"
+export PATH="$root/.devenv/profile/bin:$PATH"
+# --quiet: a hook that speaks on every clean commit is a hook people remove.
+HD_TASK_NAME=hlsl-format "$root/scripts/tasks/format.sh" --quiet || true
+exit 0
+EOF
+}
+
+# 0 when the hook is ours and current, 1 when it is missing or out of date,
+# 2 when something else owns the file and we must not touch it.
+hd_hook_ok() {
+    local hook
+    hook=$(hd_hook_path "$1")
+    [ -n "$hook" ] || return 0
+    [ -f "$hook" ] || return 1
+    grep -qF "$HD_HOOK_MARKER" "$hook" 2>/dev/null || return 2
+    [ "$(cat "$hook")" = "$(hd_hook_body)" ] || return 1
+    return 0
+}
+
+hd_hook_install() {
+    local hook rc=0
+    hook=$(hd_hook_path "$1")
+    [ -n "$hook" ] || return 0
+    hd_hook_ok "$1" || rc=$?
+    case "$rc" in
+    0) return 0 ;;
+    2)
+        hd_warn "$(basename "$1") already has a pre-commit hook that is not ours; leaving it alone
+         ($hook)"
+        return 2
+        ;;
+    esac
+    [ -z "${HD_DRY_RUN:-}" ] || { hd_log "would install $hook"; return 0; }
+    mkdir -p "$(dirname "$hook")"
+    hd_hook_body >"$hook"
+    chmod +x "$hook"
+    return 1
+}
+
+hd_hook_remove() {
+    local hook
+    hook=$(hd_hook_path "$1")
+    [ -n "$hook" ] && [ -f "$hook" ] || return 0
+    grep -qF "$HD_HOOK_MARKER" "$hook" 2>/dev/null || return 2
+    [ -z "${HD_DRY_RUN:-}" ] || { hd_log "would remove $hook"; return 0; }
+    rm -f "$hook"
+    return 1
+}
+
+# Every clone the hook applies to: the repositories with a .clang-format, one
+# entry per clone rather than per worktree, since they share the hook.
+hd_hook_repos() {
+    local kind wt common seen=""
+    for kind in llvm dxc offload; do
+        while IFS= read -r wt; do
+            [ -n "$wt" ] || continue
+            [ -f "$wt/.clang-format" ] || continue
+            common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || continue
+            case " $seen " in
+            *" $common "*) continue ;;
+            esac
+            seen="$seen $common"
+            printf '%s\n' "$wt"
+        done <<< "$(hd_worktrees "$kind")"
     done
 }
 
@@ -556,8 +1012,8 @@ hd_codegraph_config() {
 # any commit. The one thing it costs: a checkout/rebase/pull that wants to
 # change .gitignore itself refuses to run ("local changes would be overwritten",
 # or "Entry '.gitignore' not uptodate"). Then run
-# `mask codegraph --restore-gitignore` in that worktree, redo the git
-# operation, and run `mask codegraph` again to put the block back.
+# `hlsl-codegraph --restore-gitignore` in that worktree, redo the git
+# operation, and run `hlsl-codegraph` again to put the block back.
 HD_CG_MARK_BEGIN='# >>> codegraph: local index scope, not committed >>>'
 HD_CG_MARK_END='# <<< codegraph <<<'
 
@@ -583,7 +1039,7 @@ $HD_CG_MARK_BEGIN
 # lib/Target and include/llvm/Target -- in llvm-project the DirectX and SPIR-V
 # backends included -- along with their unittests and the coverage libraries.
 # Only a root .gitignore negation overrides a built-in default. Managed by
-# 'mask codegraph'; 'mask codegraph --restore-gitignore' takes it back out.
+# 'hlsl-codegraph'; 'hlsl-codegraph --restore-gitignore' takes it back out.
 !**/Target/
 !**/Target/**
 !**/Coverage/
@@ -643,7 +1099,7 @@ hd_codegraph_donor() {
 }
 
 # hd_codegraph <worktree> [donor] -- build or refresh the index of a worktree.
-# Set HD_OPT_FRESH (mask --fresh) to rebuild from scratch instead of seeding.
+# Set HD_OPT_FRESH (--fresh) to rebuild from scratch instead of seeding.
 hd_codegraph() {
     local wt=$1 donor=${2:-} dir db
     command -v codegraph >/dev/null 2>&1 ||
@@ -696,12 +1152,13 @@ hd_codegraph() {
     fi
 }
 
-# Serialise concurrent mask invocations that target the same build directory.
+# Serialise concurrent task invocations that target the same build directory.
 # Different worktrees have different build directories, so agents working in
 # parallel never wait on each other. Re-locking a directory this process
 # already holds is a no-op (flock would otherwise deadlock against itself).
 hd_lock() {
     local dir=$1 lock
+    [ -z "${HD_DRY_RUN:-}" ] || return 0
     command -v flock >/dev/null 2>&1 || return 0
     case " ${HD_LOCKED:-} " in
     *" $dir "*) return 0 ;;
@@ -710,7 +1167,7 @@ hd_lock() {
     lock="$(hd_state_dir)/locks/$(hd_key "$dir").lock"
     exec {HD_LOCK_FD}>"$lock"
     if ! flock -n "$HD_LOCK_FD"; then
-        hd_log "waiting for another mask invocation to release $dir"
+        hd_log "waiting for another invocation to release $dir"
         flock -w "${HLSL_LOCK_TIMEOUT:-7200}" "$HD_LOCK_FD" ||
             hd_die "timed out waiting for the build lock on $dir"
     fi
@@ -724,11 +1181,15 @@ hd_lock() {
 # `exec {fd}>lock` descriptors are not close-on-exec, so every process the
 # build spawns inherits them. That is harmless for short-lived children, but a
 # daemon that survives the build (sccache's server, started by the first
-# compile) keeps the flock alive long after mask has exited, and the next
+# compile) keeps the flock alive long after the task has exited, and the next
 # invocation then blocks on a lock nobody is using. Only this shell needs to
 # hold the lock, so hand children a clean set of descriptors.
 hd_run() {
     local fd redirs=""
+    if [ -n "${HD_DRY_RUN:-}" ]; then
+        hd_log "would run: $*"
+        return 0
+    fi
     if [ -z "${HD_LOCK_FDS:-}" ]; then
         "$@"
         return
@@ -742,7 +1203,7 @@ hd_run() {
 # ---------------------------------------------------------------------------
 # CMake flag templates
 # ---------------------------------------------------------------------------
-# flake.nix exports the flag lists with $HD_* placeholders left unexpanded;
+# devenv.nix exports the flag lists with $HD_* placeholders left unexpanded;
 # they are filled in here once the paths above have been resolved.
 
 hd_no_spaces() {
@@ -754,6 +1215,7 @@ hd_no_spaces() {
 # hd_expand_flags <template> -> flags, one per line
 hd_expand_flags() {
     local t=$1
+    # shellcheck disable=SC2016 # matching the literal placeholder syntax
     case "$t" in
     *'`'* | *'$('* | *';'*) hd_die "refusing to expand a CMake flag template containing shell metacharacters" ;;
     esac
@@ -801,6 +1263,10 @@ hd_record() {
 
 hd_prepare_build_dir() {
     local build=$1
+    if [ -n "${HD_DRY_RUN:-}" ]; then
+        [ -n "$HD_OPT_FRESH" ] && [ -d "$build" ] && hd_log "would remove $build (--fresh)"
+        return 0
+    fi
     if [ -n "$HD_OPT_FRESH" ] && [ -d "$build" ]; then
         hd_log "removing $build (--fresh)"
         rm -rf "$build"
@@ -813,11 +1279,11 @@ hd_prepare_build_dir() {
 # The integrated build: LLVM + Clang + OffloadTest as an external project, i.e.
 # the tree that provides check-clang, check-llvm and the check-hlsl-* suites.
 hd_configure_llvm() {
-    local wt=$1 build offload golden dxcbin
+    local wt=$1 build offload golden dxcbin flag
     build=$(hd_build_dir "$wt")
     offload=$(hd_dep offload "$wt")
     golden=$(hd_dep golden "$wt")
-    dxcbin=$(hd_dxc_bin_dir "$wt")
+    dxcbin=$(hd_dxc_bin_dir "$wt" ensure)
 
     export HD_LLVM_SRC=$wt
     export HD_OFFLOAD_SRC=$offload
@@ -842,10 +1308,10 @@ hd_configure_llvm() {
     hd_prepare_build_dir "$build"
     hd_lock "$build"
     hd_cmake_flags HLSL_CMAKE_FLAGS_LLVM
+    while IFS= read -r flag; do HD_FLAGS+=("$flag"); done <<< "$(hd_d3d12_flags)"
     hd_run cmake -S "$wt/llvm" -B "$build" "${HD_FLAGS[@]}"
 
-    hd_record "$wt" BUILD_DIR "$build" BUILD_TYPE "$HD_BUILD_TYPE" \
-        OFFLOAD "$offload" GOLDEN "$golden" DXC "$dxcbin"
+    hd_record "$wt" BUILD_TYPE "$HD_BUILD_TYPE" OFFLOAD "$offload" DXC "$dxcbin"
 }
 
 # hd_configure_dxc <dxc worktree>
@@ -867,40 +1333,26 @@ hd_configure_dxc() {
     hd_cmake_flags HLSL_CMAKE_FLAGS_DXC
     hd_run cmake -S "$wt" -B "$build" "${HD_FLAGS[@]}"
 
-    hd_record "$wt" BUILD_DIR "$build" BUILD_TYPE "$HD_BUILD_TYPE"
+    hd_record "$wt" BUILD_TYPE "$HD_BUILD_TYPE"
 }
 
 # hd_configure_offload <offload worktree>
 #
-# standalone: this worktree is the top-level CMake project and links against an
-#             already-installed LLVM distribution (see hd_dist). Configures in
-#             seconds and builds in a couple of minutes.
-# integrated: no build of its own -- the llvm worktree's build tree is
-#             configured to pull this source directory in as OffloadTest.
+# The suite is the top-level CMake project and links against an installed LLVM
+# distribution (see hd_dist): configures in seconds, builds in a couple of
+# minutes, and any number of offload worktrees can share one distribution.
+#
+# To build the suite *inside* an llvm build tree instead -- the in-tree layout
+# upstream CI uses -- configure that llvm worktree against these sources:
+#
+#     hlsl-configure --in llvm-project.my-feature --offload offload-test-suite.mine
 hd_configure_offload() {
-    local wt=$1 mode build llvm dist golden dxcbin
-    mode=$(hd_mode "$wt")
+    local wt=$1 build llvm dist golden dxcbin flag
     llvm=$(hd_dep llvm "$wt")
-
-    if [ "$mode" = "integrated" ]; then
-        hd_log "offload worktree $wt is in integrated mode; configuring $llvm against it"
-        HD_OPT_OFFLOAD=$wt
-        hd_pin_set "$wt" MODE integrated
-        hd_pin_set "$wt" LLVM "$llvm"
-        hd_configure_llvm "$llvm"
-        return
-    fi
-
+    dist=$(hd_ensure_dist "$llvm")
     build=$(hd_build_dir "$wt")
-    dist=$(hd_dist_prefix "$llvm")
     golden=$(hd_dep golden "$wt")
-    dxcbin=$(hd_dxc_bin_dir "$wt")
-
-    if [ ! -f "$dist/lib/cmake/llvm/LLVMConfig.cmake" ]; then
-        hd_die "no LLVM distribution installed for $(basename "$llvm") (looked in $dist).
-       Build one with:  mask dist --in $(basename "$llvm")
-       or point this worktree at another one:  mask configure --llvm <worktree>"
-    fi
+    dxcbin=$(hd_dxc_bin_dir "$wt" ensure)
 
     export HD_OFFLOAD_SRC=$wt
     export HD_LLVM_SRC=$llvm
@@ -927,10 +1379,10 @@ hd_configure_offload() {
     hd_prepare_build_dir "$build"
     hd_lock "$build"
     hd_cmake_flags HLSL_CMAKE_FLAGS_OFFLOAD
+    while IFS= read -r flag; do HD_FLAGS+=("$flag"); done <<< "$(hd_d3d12_flags)"
     hd_run cmake -S "$wt" -B "$build" "${HD_FLAGS[@]}"
 
-    hd_record "$wt" BUILD_DIR "$build" BUILD_TYPE "$HD_BUILD_TYPE" MODE standalone \
-        LLVM "$llvm" GOLDEN "$golden" DXC "$dxcbin"
+    hd_record "$wt" BUILD_TYPE "$HD_BUILD_TYPE" LLVM "$llvm" DXC "$dxcbin"
     if [ -n "${HD_OPT_DIST_PREFIX:-}" ]; then
         hd_pin_set "$llvm" DIST_PREFIX "$dist"
     fi
@@ -938,6 +1390,7 @@ hd_configure_offload() {
 
 # hd_configure <worktree> -- dispatches on the kind of checkout.
 hd_configure() {
+    [ -z "${forget:-}" ] || hd_pin_clear "$1"
     case "$(hd_kind "$1")" in
     llvm) hd_configure_llvm "$1" ;;
     dxc) hd_configure_dxc "$1" ;;
@@ -950,7 +1403,7 @@ hd_configure() {
 # standalone offload distribution (clang, lit tools, LLVM libraries and CMake
 # exports). Shared by every offload worktree that points at this llvm worktree.
 hd_dist() {
-    local wt=$1 build prefix offload rc=0
+    local wt=$1 build prefix offload
     build=$(hd_dist_build_dir "$wt")
     prefix=$(hd_dist_prefix "$wt")
     offload=$(hd_dep offload "$wt")
@@ -975,13 +1428,7 @@ hd_dist() {
     hd_lock "$build"
     hd_cmake_flags HLSL_CMAKE_FLAGS_LLVM_DIST
     hd_run cmake -S "$wt/llvm" -B "$build" "${HD_FLAGS[@]}"
-    # install-distribution republishes the tool aliases (clang, clang++,
-    # clang-dxc, ...) in the build tree *and* under the prefix, so both trees
-    # have to be guarded or the install destroys the binary it just wrote.
-    hd_clear_fragile_symlinks "$build" "$prefix"
-    hd_run cmake --build "$build" --target install-distribution || rc=$?
-    hd_restore_fragile_symlinks
-    [ "$rc" -eq 0 ] || return "$rc"
+    hd_run cmake --build "$build" --target install-distribution
 
     hd_pin_set "$wt" DIST_PREFIX "$prefix"
     hd_log "installed distribution: $prefix"
@@ -991,295 +1438,48 @@ hd_dist() {
 # Build
 # ---------------------------------------------------------------------------
 
-# hd_effective_build <worktree> -> the build directory that actually compiles
-# this worktree's sources. Everything is built in place except an
-# offload-test-suite worktree in integrated mode, which is built by the llvm
-# worktree that includes it.
-hd_effective_build() {
-    local wt=$1 llvm
-    if [ "$(hd_kind "$wt")" = "offload" ] && [ "$(hd_mode "$wt")" = "integrated" ]; then
-        llvm=$(hd_dep llvm "$wt")
-        hd_build_dir "$llvm"
-        return 0
-    fi
-    hd_build_dir "$wt"
-}
-
+# Configure <worktree> unless it already is. Worktrees configured earlier in
+# this process are remembered: hlsl-test asks for one and then hands over to
+# hd_build, which asks again, and a dry run would otherwise report the same
+# configure twice (it creates nothing for the second check to find).
 hd_ensure_configured() {
     local wt=$1 build
-    build=$(hd_effective_build "$wt")
+    case " ${HD_CONFIGURED:-} " in
+    *" $wt "*) return 0 ;;
+    esac
+    HD_CONFIGURED="${HD_CONFIGURED:-} $wt"
+    build=$(hd_build_dir "$wt")
     if [ ! -f "$build/build.ninja" ] && [ ! -f "$build/Makefile" ]; then
         hd_configure "$wt"
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Sandbox symlink guard
-# ---------------------------------------------------------------------------
-#
-# Many build steps publish a tool into <build>/bin as a symlink and recreate
-# it with `cmake -E create_symlink` / `cmake -E cmake_symlink_executable`:
-# the spirv-tools wrappers and dxil-dis (always-run custom targets), and every
-# llvm_add_tool_symlink alias such as bin/clang -> clang-24, bin/llvm-strip,
-# bin/llvm-readelf. All of them unlink the destination before recreating it.
-#
-# Inside a sandboxed agent shell (pi's landstrip) unlink() on a *symlink*
-# deletes the file the link points at and leaves the link behind. The build
-# therefore destroys the binary it just published and then dies with
-#
-#     CMake Error: failed to create symbolic link '.../bin/spirv-as': File exists
-#     CMake Error: cmake_symlink_executable: System Error: File exists
-#
-# For clang that means the 1.4 GB clang-24 is deleted immediately after being
-# linked, and every retry deletes it again. For the spirv tools it also leaves
-# the tree wedged, because the ExternalProject stamps still claim the tools
-# are built. Creating a symlink whose name does not exist yet is unaffected,
-# so clearing the destinations before the build keeps the normal build graph
-# -- SPIRVTools ExternalProject included -- completely intact.
-#
-# Install prefixes need the same treatment: `install-distribution` copies the
-# real binary into <prefix>/bin and then republishes the same aliases there, so
-# an unguarded install destroys the binary it has just written. hd_dist guards
-# the build tree and the prefix together.
-#
-# Deleting the link itself is only safe once it dangles, so a live link is
-# cleared by moving its target aside, deleting the now-dangling link, and
-# moving the target back. Anything the build did not recreate is restored
-# afterwards, so a partial build can never leave a tool alias missing.
-
-# Extra fragile symlinks outside <build>/bin, relative to the build directory.
-# Everything directly under <build>/bin is discovered automatically.
-HD_FRAGILE_SYMLINKS="lib/libpng.a"
-HD_CLEARED_SYMLINKS=()
-
-# True when unlink() on a symlink destroys the target instead of the link,
-# i.e. when we are running under a sandbox that rewrites path syscalls.
-hd_unlink_follows_symlinks() {
-    local d rc=1
-    d=$(mktemp -d) || return 1
-    : >"$d/target"
-    ln -s "$d/target" "$d/link"
-    rm -f "$d/link" 2>/dev/null
-    [ -e "$d/target" ] || rc=0
-    rm -rf "$d" 2>/dev/null
-    return $rc
-}
-
-# Every build-created symlink the next build may republish. Anything directly
-# under bin/ qualifies: those are all tool aliases produced by
-# llvm_add_tool_symlink / cmake_symlink_executable / create_symlink.
-hd_fragile_symlinks() {
-    local build=$1 rel
-    find "$build/bin" -maxdepth 1 -type l -print 2>/dev/null
-    for rel in $HD_FRAGILE_SYMLINKS; do
-        [ -L "$build/$rel" ] && printf '%s\n' "$build/$rel"
-    done
-    return 0
-}
-
-# hd_clear_fragile_symlinks <root>...
-# Each root is searched independently, so a task can guard a build tree and the
-# prefix it installs into in one call.
-hd_clear_fragile_symlinks() {
-    local root link text target tmp list
-    HD_CLEARED_SYMLINKS=()
-    hd_unlink_follows_symlinks || return 0
-    for root in "$@"; do
-        [ -n "$root" ] && [ -d "$root" ] || continue
-        # A pipeline would run the loop in a subshell and lose the array, and
-        # process substitution needs /dev/fd, which a sandbox may not provide.
-        list=$(hd_fragile_symlinks "$root")
-        [ -n "$list" ] || continue
-        while IFS= read -r link; do
-            [ -L "$link" ] || continue
-            text=$(readlink "$link") || continue
-            target=$(readlink -f "$link") || continue
-            # Only touch links whose target we own. A link into a read-only
-            # tree such as /nix/store can be neither moved nor deleted here,
-            # and a dangling one is not ours to drop either.
-            case $target in
-            "$root"/*) ;;
-            *) continue ;;
-            esac
-            if [ -e "$link" ]; then
-                # Make the link dangle first: renaming a regular file is safe,
-                # deleting a dangling link is safe, deleting a live one is not.
-                tmp=$target.hd-symlink-guard.$$
-                mv "$target" "$tmp" 2>/dev/null || continue
-                rm -f "$link"
-                mv "$tmp" "$target"
-            else
-                rm -f "$link" || continue
-            fi
-            HD_CLEARED_SYMLINKS+=("$link"$'\t'"$text")
-        done <<<"$list"
-    done
-    [ "${#HD_CLEARED_SYMLINKS[@]}" -gt 0 ] &&
-        hd_log "cleared ${#HD_CLEARED_SYMLINKS[@]} sandbox-fragile symlink(s)"
-    return 0
-}
-
-# Recreate anything the build did not republish itself, so that building an
-# unrelated target cannot leave a tool alias missing.
-hd_restore_fragile_symlinks() {
-    local entry link text resolved
-    for entry in ${HD_CLEARED_SYMLINKS+"${HD_CLEARED_SYMLINKS[@]}"}; do
-        link=${entry%%$'\t'*}
-        text=${entry#*$'\t'}
-        if [ -e "$link" ] || [ -L "$link" ]; then continue; fi
-        case $text in
-        /*) resolved=$text ;;
-        *) resolved=$(dirname "$link")/$text ;;
-        esac
-        [ -e "$resolved" ] || continue
-        ln -s "$text" "$link" 2>/dev/null
-    done
-    HD_CLEARED_SYMLINKS=()
-}
-
-# hd_clear_test_scratch_symlinks <build dir>
-#
-# The same sandbox unlink() behaviour bites lit, not just the build. Tests
-# assemble fake toolchain trees under <build>/**/Output and populate them with
-# links to the tools under test:
-#
-#     clang/test/Driver/no-canonical-prefixes.c:  ln -sf %clang test-clang
-#
-# `ln -sf` and `rm -f` unlink the destination first, and unlink() here walks
-# the whole chain -- test-clang -> bin/clang -> bin/clang-24 -- and deletes the
-# regular file at the end of it. So a link left behind by an earlier run turns
-# the next lit run into a 1.4 GB delete of clang-24, after which every
-# remaining test fails with "couldn't find 'clang' program". clang/test/Driver
-# and ClangScanDeps together leave ~18 such links pointing at bin/clang-24.
-#
-# Creating a link whose name is free is unaffected, so clearing the leftovers
-# before lit runs is enough; each test recreates what it needs. This is a
-# one-way sweep -- unlike hd_restore_fragile_symlinks there is nothing to put
-# back, because these are scratch files owned by the tests.
-#
-# Only links resolving to a regular file inside the build tree are touched: a
-# link into /nix/store is not ours to move, and a link to a directory is
-# harmless because unlink() on it fails with EISDIR.
-hd_clear_test_scratch_symlinks() {
-    local build=$1 link target tmp list n=0
-    [ -n "$build" ] && [ -d "$build" ] || return 0
-    hd_unlink_follows_symlinks || return 0
-
-    # Same subshell/process-substitution constraints as hd_clear_fragile_symlinks.
-    list=$(find "$build" -path '*/Output/*' -type l -print 2>/dev/null)
-    [ -n "$list" ] || return 0
-
-    while IFS= read -r link; do
-        [ -L "$link" ] || continue
-        target=$(readlink -f "$link" 2>/dev/null) || continue
-        [ -f "$target" ] || continue
-        case $target in
-        "$build"/*) ;;
-        *) continue ;;
-        esac
-        # Make the link dangle before deleting it. rename() resolves symlinks
-        # here too, so moving the link itself is not an option -- only moving
-        # the regular file at the end of the chain is safe.
-        tmp=$target.hd-symlink-guard.$$
-        mv "$target" "$tmp" 2>/dev/null || continue
-        rm -f "$link"
-        mv "$tmp" "$target"
-        n=$((n + 1))
-    done <<<"$list"
-
-    [ "$n" -gt 0 ] && hd_log "cleared $n stale lit scratch symlink(s)"
-    return 0
-}
-
-# Hard-link snapshot of <build>/bin
-# --------------------------------
-#
-# Clearing stale links is not sufficient on its own, because a lit run also
-# creates and destroys links to the tools *within itself*. About twenty
-# clang/test/Driver tests build a fake toolchain out of symlinks:
-#
-#     rm -rf %t.dir/testroot-gcc
-#     ln -s %clang %t.dir/testroot-gcc/bin/x86_64-w64-mingw32-gcc
-#
-# The `rm -rf` on the next run -- or on a later RUN line -- walks into that
-# tree and unlinks a link to bin/clang, which under this sandbox deletes
-# clang-24 instead. There is no ordering we can impose from outside that
-# prevents it.
-#
-# A hard link is the cheap insurance. It shares the inode, so it costs no data
-# even for a 1.4 GB binary, and unlink() removes a directory entry rather than
-# the inode: as long as a second entry exists the file survives whichever entry
-# a test destroys, and relinking it afterwards is a metadata operation.
-#
-# This does not make such a test *pass* -- anything running between the delete
-# and the restore still fails -- but the tree is never left needing a rebuild,
-# and the log says plainly that it happened.
-HD_BIN_GUARD_DIR=.hd-bin-guard
-
-hd_snapshot_bin() {
-    local build=$1 dir f
-    [ -n "$build" ] && [ -d "$build/bin" ] || return 0
-    hd_unlink_follows_symlinks || return 0
-    dir=$build/$HD_BIN_GUARD_DIR
-    rm -rf "$dir" 2>/dev/null
-    mkdir -p "$dir" 2>/dev/null || return 0
-    for f in "$build"/bin/*; do
-        # Regular files only: the symlink aliases are rebuilt from these, and
-        # hard-linking one would resolve through it here anyway.
-        [ -f "$f" ] && [ ! -L "$f" ] || continue
-        ln -f "$f" "$dir/${f##*/}" 2>/dev/null
-    done
-    return 0
-}
-
-hd_restore_bin() {
-    local build=$1 dir f name lost="" n=0
-    [ -n "$build" ] || return 0
-    dir=$build/$HD_BIN_GUARD_DIR
-    [ -d "$dir" ] || return 0
-    for f in "$dir"/*; do
-        [ -f "$f" ] || continue
-        name=${f##*/}
-        [ -e "$build/bin/$name" ] && continue
-        ln "$f" "$build/bin/$name" 2>/dev/null || continue
-        lost="$lost $name"
-        n=$((n + 1))
-    done
-    rm -rf "$dir" 2>/dev/null
-    if [ "$n" -gt 0 ]; then
-        hd_warn "the test run deleted$lost from $build/bin; restored from the"
-        hd_warn "hard-link snapshot. Results from this run are unreliable --"
-        hd_warn "anything that ran after the deletion could not find the tool."
-    fi
-    return 0
-}
 # hd_build <worktree> [target...]
 hd_build() {
-    local wt=$1 build rc=0
+    local wt=$1 build
     shift
     hd_ensure_configured "$wt"
-    build=$(hd_effective_build "$wt")
+    build=$(hd_build_dir "$wt")
     hd_lock "$build"
-    hd_clear_fragile_symlinks "$build"
     if [ "$#" -gt 0 ] && [ -n "$1" ]; then
         hd_log "building $* in $build"
-        hd_run cmake --build "$build" --target "$@" || rc=$?
+        hd_run cmake --build "$build" --target "$@"
     else
         hd_log "building in $build"
-        hd_run cmake --build "$build" || rc=$?
+        hd_run cmake --build "$build"
     fi
-    hd_restore_fragile_symlinks "$build"
-    return $rc
 }
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
+# shellcheck disable=SC2034 # read by the task scripts that source this file
 HD_SUITES="d3d12 vk mtl warp-d3d12 clang-d3d12 clang-vk clang-mtl clang-warp-d3d12"
 
 # hd_test_root <worktree> <build dir> -> directory holding the per-suite lit
-# trees, which differs between the integrated and standalone layouts.
+# trees. An llvm build tree carries them under tools/OffloadTest; a standalone
+# suite build has them at its top level.
 hd_test_root() {
     if [ -d "$2/tools/OffloadTest/test" ]; then
         printf '%s\n' "$2/tools/OffloadTest/test"
@@ -1315,16 +1515,10 @@ hd_sync_dxc() {
 
 # hd_lit <build dir> [args...]
 hd_lit() {
-    local build=$1 rc=0
+    local build=$1
     shift
     local lit="$build/bin/llvm-lit"
-    [ -x "$lit" ] || hd_die "$lit not found; run 'mask build' first"
-    hd_clear_test_scratch_symlinks "$build"
-    hd_snapshot_bin "$build"
+    [ -x "$lit" ] || hd_die "$lit not found; run 'hlsl-build' first"
     hd_log "$lit $*"
-    # Never let a failing suite skip the restore: lit exits non-zero whenever
-    # any test fails, and the caller runs under `set -e`.
-    hd_run "$lit" "$@" || rc=$?
-    hd_restore_bin "$build"
-    return $rc
+    hd_run "$lit" "$@"
 }

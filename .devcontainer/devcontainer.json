@@ -1,57 +1,43 @@
-// Dev container for the HLSL developer workspace. The toolchain comes from
-// flake.nix, not from here. See .devcontainer/README.md.
 {
-  "name": "hlsl-dev",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
-
-  "features": {
-    // Multi-user: the store stays root-owned, so it survives UID remapping.
-    // The feature also mounts /nix as a volume, so it survives a rebuild.
-    "ghcr.io/devcontainers/features/nix:1": {
-      "version": "latest",
-      "multiUser": true,
-      "extraNixConfig": "experimental-features = nix-command flakes"
+  "capAdd": [
+    "SYS_PTRACE"
+  ],
+  "containerEnv": {
+    "SCCACHE_IDLE_TIMEOUT": "0"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": []
     },
-    // For `gh auth token`, the easy way to feed offloader-scripts.
+    "zed": {
+      "extensions": []
+    }
+  },
+  "features": {
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
-
-  // Reap the process trees that ninja / lit leave behind.
-  "init": true,
-
-  // gdb/lldb on clang and the offload tools.
-  "capAdd": ["SYS_PTRACE"],
-  "securityOpt": ["seccomp=unconfined"],
-
-  // Codespaces only; building LLVM is the constraint.
+  "forwardPorts": [
+    10240
+  ],
   "hostRequirements": {
     "cpus": 8,
     "memory": "16gb",
     "storage": "128gb"
   },
-
-  // One compilation cache for every worktree, kept across rebuilds.
+  "image": "ghcr.io/cachix/devenv/devcontainer:latest",
+  "init": true,
   "mounts": [
     "source=hlsl-dev-sccache,target=${containerWorkspaceFolder}/.sccache,type=volume"
   ],
-
-  "containerEnv": {
-    // No GPU by default; lavapipe is the flake default and always works.
-    "HLSL_VK_DRIVER": "lavapipe",
-    "SCCACHE_IDLE_TIMEOUT": "0"
-  },
-
-  // Empty when unset on the host, which offloader-scripts reads as "no token".
+  "name": "hlsl-dev",
+  "overrideCommand": false,
+  "postCreateCommand": "set -eu\ngrep -qs 'devenv hook' ~/.bashrc || printf '\\neval \"$(devenv hook bash)\"\\n' >>~/.bashrc\ngrep -qs bashrc ~/.profile || printf '\\n[ -n \"$BASH_VERSION\" ] && [ -f ~/.bashrc ] && . ~/.bashrc\\n' >>~/.profile\ngit config --global --get-all safe.directory | grep -qx '\\*' || git config --global --add safe.directory '*'\ndevenv allow\n",
   "remoteEnv": {
     "GH_TOKEN": "${localEnv:GH_TOKEN}",
     "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}"
   },
-
-  "onCreateCommand": "bash .devcontainer/on-create.sh",
-
-  // Compiler Explorer. Numeric: string entries are not honoured everywhere.
-  "forwardPorts": [10240],
-
-  // The base image's non-root user.
-  "remoteUser": "vscode"
+  "securityOpt": [
+    "seccomp=unconfined"
+  ],
+  "updateContentCommand": "devenv test"
 }

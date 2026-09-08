@@ -284,7 +284,7 @@ def sha_present(repo_root: pathlib.Path, sha: str) -> bool:
 def ensure_history(repo_root: pathlib.Path, shas: list[str], allow_fetch: bool) -> str:
     """
     Make sure every sha resolves locally. Shallow checkouts need unshallowing;
-    prefer `mask fetch-history <repo>` (documented workflow), fall back to a
+    prefer `hlsl-fetch-history <repo>` (documented workflow), fall back to a
     direct git fetch. Returns a human note about what happened.
     """
     missing = [s for s in shas if s and not sha_present(repo_root, s)]
@@ -294,9 +294,9 @@ def ensure_history(repo_root: pathlib.Path, shas: list[str], allow_fetch: bool) 
         return f"{len(missing)} commit(s) not present locally; fetch disabled (--no-fetch-history)"
 
     repo_dir = repo_root.name
-    mask = shutil.which("mask")
-    if mask:
-        subprocess.run([mask, "fetch-history", repo_dir], cwd=str(WORKSPACE),
+    fetch_history = shutil.which("hlsl-fetch-history")
+    if fetch_history:
+        subprocess.run([fetch_history, repo_dir], cwd=str(WORKSPACE),
                        capture_output=True, text=True)
     if any(not sha_present(repo_root, s) for s in missing):
         # Fall back to a direct unshallow / full fetch.
@@ -590,9 +590,10 @@ def _repro_prompt(kind, workflows, signature, category, detail, repo,
         how = (
             f"The failure is a compiler **build** break in `{repo_dir}` (detail={detail}). "
             "Reproduce it by configuring and building from the workspace root:\n"
-            "  - llvm/llvm-project: `mask configure-llvm` then `mask build-llvm` "
-            "(narrow with e.g. `mask build-llvm clang`)\n"
-            "  - microsoft/DirectXShaderCompiler: `mask configure-dxc` then `mask build-dxc`\n"
+            "  - llvm/llvm-project: `hlsl-configure --in llvm-project` then "
+            "`hlsl-build --in llvm-project` (narrow with e.g. `hlsl-build --in llvm-project clang`)\n"
+            "  - microsoft/DirectXShaderCompiler: `hlsl-configure --in DirectXShaderCompiler` "
+            "then `hlsl-build --in DirectXShaderCompiler`\n"
             "Then read the first real compiler/linker error and trace it to source."
         )
     else:

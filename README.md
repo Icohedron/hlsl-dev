@@ -1,112 +1,192 @@
 # HLSL Developer Environment
 
-This repository provides a self-contained, Nix-powered developer environment for working on LLVM's HLSL features, Microsoft's DirectXShaderCompiler (DXC), and related test suites. It utilizes git submodules (with shallow cloning) and a `maskfile.md` for task automation.
+This repository provides a self-contained, Nix-powered developer environment
+for working on LLVM's HLSL features, Microsoft's DirectXShaderCompiler (DXC),
+and related test suites. It uses git submodules (with shallow cloning) and
+[devenv](https://devenv.sh) for the environment and its task automation.
 
-## What is Nix?
+## What is devenv?
 
-Nix is a powerful package manager and build system. In this project, we use it (via `flake.nix`) to provide a perfectly reproducible development environment. When you run `nix develop`, Nix automatically downloads and configures exact versions of all necessary build tools and dependencies (like CMake, Ninja, Python, and specific C++ toolchains) without polluting your host operating system. This ensures that every developer has the exact same environment, eliminating "works on my machine" issues.
+devenv is a thin, declarative layer over Nix. `devenv.nix` describes the whole
+workspace in one file — the exact versions of CMake, Ninja, Python, the C++
+toolchain, the Vulkan loader and everything else; the environment variables the
+builds need; the tasks (`hlsl-build`, `hlsl-test`, …); and the dev container.
+Nothing is installed into your host system, and every developer gets the same
+environment, which eliminates "works on my machine" problems.
+
+Two commands are enough to get it:
+
+```bash
+devenv shell     # enter the environment for one shell
+devenv info      # what it provides: packages, tasks, environment variables
+```
+
+If you want the environment to activate automatically whenever you `cd` into
+the workspace, add devenv's shell hook once, then trust this directory:
+
+```bash
+eval "$(devenv hook bash)"   # in ~/.bashrc (or `devenv hook zsh` in ~/.zshrc)
+devenv allow                 # once per checkout; `devenv revoke` undoes it
+```
+
+fish and nushell load the hook by themselves. No direnv, no `.envrc`.
 
 ## Quickstart
 
-1.  **Enter the Nix Shell:**
+1.  **Enter the environment:**
     ```bash
-    nix develop
+    devenv shell
     ```
 
-2.  **Initialize Submodules:**
-    We use `mask` as our task runner. Let's pull down a shallow clone of the dependencies to save time and disk space. This command automatically uses the `--recursive` flag to ensure that `DirectXShaderCompiler`'s own nested submodules (like `SPIRV-Tools` and `DirectX-Headers`) are fully checked out:
+2.  **Initialize submodules:**
+    A shallow clone of the dependencies, to save time and disk space. It is
+    recursive, so `DirectXShaderCompiler`'s own nested submodules (`SPIRV-Tools`,
+    `DirectX-Headers`, …) come along:
     ```bash
-    mask setup
+    hlsl-setup
     ```
 
-3.  **Configure and Build the Projects:**
-    Once cloned, use the included tasks to configure and build the compilers.
+3.  **Build something:**
     The tasks act on *the checkout you are standing in*, so `cd` into it first:
     ```bash
-    cd llvm-project && mask configure && mask build
-    cd ../DirectXShaderCompiler && mask configure && mask build
+    cd llvm-project && hlsl-build clang
+    cd ../DirectXShaderCompiler && hlsl-build
     ```
     Or drive them from anywhere with `--in`:
     ```bash
-    mask build --in llvm-project clang
-    mask build --in DirectXShaderCompiler
+    hlsl-build --in llvm-project clang
+    hlsl-test --in offload-test-suite clang-vk
     ```
+    There is no separate configure step to remember, and nothing to install
+    first: a task configures what it is about to build, and builds what it is
+    about to link against. `--dry-run` shows what that would be, `--no-auto`
+    refuses to do it.
+
+`hlsl` on its own lists every task; `hlsl <task>` is the same as `hlsl-<task>`,
+and `hlsl-<task> --help` explains one.
 
 ### In a container
 
-`.devcontainer/` describes the same environment as a dev container (Nix +
-direnv, dev shell pre-built). Open the folder in an editor that supports dev
-containers, or run `devcontainer up --workspace-folder .`, then carry on from
-`mask setup` as above. See
-[.devcontainer/README.md](.devcontainer/README.md) — in particular for Vulkan,
-which defaults to the lavapipe software rasterizer there.
+`devenv.nix` also generates `.devcontainer/devcontainer.json`, which describes
+this same environment as a dev container. Open the folder in an editor that
+supports dev containers, or run `devcontainer up --workspace-folder .`, then
+carry on from `hlsl-setup` as above.
+
+The image ships Nix and devenv; the toolchain still comes from `devenv.nix`, so
+what you build inside the container is what you build outside it. Creation runs
+`devenv test`, which realises the environment (several GB, tens of minutes on a
+cold cache) and smoke-tests it — on GitHub Codespaces that happens during a
+prebuild. The devenv shell hook is installed into the container's shells, so
+every terminal, and the shell an editor runs to capture the project
+environment, gets the toolchain; that is how clangd and the Python tooling see
+it rather than the bare image.
+
+The container has no GPU, so Vulkan defaults to lavapipe (see
+[Running the Vulkan offload tests](#running-the-vulkan-offload-tests)). To use
+a real driver, pass the render node through with `"runArgs": ["--device=/dev/dri"]`
+in `devcontainer.settings` in `devenv.nix`, and `hlsl-vk system` inside.
+
+Never edit `.devcontainer/devcontainer.json` by hand: it is generated, and
+devenv rewrites it on the next shell entry. Change `devcontainer.settings` in
+`devenv.nix` instead, and commit the regenerated file.
 
 ## Worktrees
 
 Every task that touches a checkout works the same way in a `wt` worktree as it
-does in the submodule itself. There is no per-worktree setup: `mask` finds the
-workspace `maskfile.md` from anywhere inside the dev shell, and the tasks work
-out what you mean from the current directory.
+does in the submodule itself. There is no per-worktree setup: the tasks know
+the workspace root from devenv, and work out what you mean from the current
+directory.
 
 ```bash
 cd llvm-project && wt switch --create texture-store   # -> llvm-project.texture-store
-mask build                 # builds llvm-project.texture-store/build
-mask lit clang/test/CodeGenHLSL/RootSignature
+hlsl-build                 # builds llvm-project.texture-store/build
+hlsl-lit clang/test/CodeGenHLSL/RootSignature
 ```
+
+Use the same branch name in two repositories and they pair up on their own —
+see [Building across worktrees](#building-across-worktrees).
 
 Build artifacts always live *inside* the worktree they belong to
 (`<worktree>/build`, `<worktree>/build-dist`), so two agents working in two
 worktrees never share a build directory, and `wt remove` takes the artifacts
-with it. Concurrent `mask` invocations that would write to the *same* build
-directory are serialised with a lock rather than corrupting it, and all
-worktrees share one sccache instance, so the second build of the same upstream
-sources is mostly cache hits.
+with it. Concurrent invocations that would write to the *same* build directory
+are serialised with a lock rather than corrupting it, and all worktrees share
+one sccache instance, so the second build of the same upstream sources is
+mostly cache hits.
 
 ### Seeing what is where
 
+```
+$ hlsl-ls
+  worktree                          branch      build         against
+
+llvm-project
+  llvm-project                      (detached)  not built
+* llvm-project.texture-store        main        built + dist
+
+offload-test-suite
+  offload-test-suite                (detached)  not built
+  offload-test-suite.texture-store  main        built         llvm: llvm-project.texture-store
+
+* the checkout this directory belongs to; "hlsl-info" explains one in full
+```
+
+`*` is the checkout the current directory belongs to — the one a bare
+`hlsl-build` acts on. `(detached)` is normal for a submodule: it sits at the
+commit the workspace records. `+ dist` means an LLVM distribution is installed
+beside that build, which is what standalone offload builds link against. The
+`against` column is what a checkout *remembers*; blank means it works it out
+each time, starting with the same branch name. `hlsl-ls --help` spells all of
+that out, and `hlsl-info` answers it in full for one checkout:
+
 ```bash
-mask ls        # every worktree, its branch, whether it is built, its pins
-mask info      # what the current directory resolves to, and against what
+hlsl-info      # what the current directory resolves to, and against what
 ```
 
 ### Building across worktrees
 
 A checkout rarely builds alone: an `offload-test-suite` build needs an
-`llvm-project` worktree, and running its suites needs a `dxc`. Every task takes
-the same dependency flags:
+`llvm-project` worktree, and running its suites needs a `dxc`.
+
+**The easy way is to name the worktrees after the branch.** Checkouts on the
+same branch name find each other, so a feature that spans two repositories
+needs no flags and no configuration at all:
 
 ```bash
-mask configure --llvm llvm-project.texture-store     # build against that LLVM
-mask test clang-vk --dxc DirectXShaderCompiler.my-fix # run against that DXC
-mask build --in offload-test-suite.my-feature --llvm ../llvm-project.texture-store
+cd llvm-project           && wt switch --create texture-store
+cd ../offload-test-suite  && wt switch --create texture-store
+
+cd ../offload-test-suite.texture-store
+hlsl-test clang-vk        # uses llvm-project.texture-store, builds what it needs
+```
+
+When they are *not* named alike, say so once — the choice is remembered for
+every later command in that worktree:
+
+```bash
+cd offload-test-suite.my-feature
+hlsl-configure --llvm texture-store --dxc DirectXShaderCompiler.my-fix
+hlsl-build && hlsl-test clang-vk        # both keep using them
 ```
 
 A dependency is resolved in this order, first match wins:
 
-1. `--llvm` / `--dxc` / `--offload` / `--golden` on the command line
+1. `--llvm` / `--dxc` on the command line
 2. `$HLSL_LLVM` / `$HLSL_DXC` / `$HLSL_OFFLOAD` / `$HLSL_GOLDEN` in the
    environment (handy for an agent that wants one setting for a whole session)
-3. a pin recorded by `mask link`, or by the last successful `mask configure`
+3. what the last successful `hlsl-configure` in that worktree resolved to
 4. a worktree of that repository checked out on the **same branch name**
 5. the submodule checkout in the workspace root
 
-Step 3 is what makes the common case terse — configure once with the flags, and
-every later `mask build` / `mask test` in that worktree keeps using them:
-
-```bash
-cd offload-test-suite.my-feature
-mask link --llvm texture-store --dxc DirectXShaderCompiler
-mask build && mask test clang-vk
-```
-
-Pins live in `.hlsl-dev/pins/` at the workspace root, never inside the
-checkouts, so `git status` in a worktree stays clean. `mask unlink` forgets
-them.
+Those memories live in `.hlsl-dev/pins/` at the workspace root, never inside
+the checkouts, so `git status` in a worktree stays clean.
+`hlsl-configure --forget` drops them, and `hlsl-info` shows what a directory
+currently resolves to.
 
 A worktree spec can be a path, a directory name
 (`llvm-project.texture-store`), just the suffix (`texture-store`), or a branch
 name. `--dxc` additionally accepts a directory containing `dxc`/`dxv`, or `nix`
-for the compiler that ships with the dev shell.
+for the compiler that ships with the environment.
 
 ### Code intelligence (CodeGraph)
 
@@ -116,10 +196,10 @@ graph of a checkout — callers, callees, impact radius — instead of grepping
 `DirectXShaderCompiler` and `offload-test-suite` alike:
 
 ```bash
-mask codegraph                                # index/refresh the current worktree
-mask codegraph --in llvm-project.my-feature   # ... or a named one
-mask codegraph --all                          # every worktree of every repository
-mask codegraph --fresh                        # rebuild from scratch
+hlsl-codegraph                                # index/refresh the current worktree
+hlsl-codegraph --in llvm-project.my-feature   # ... or a named one
+hlsl-codegraph --all                          # every worktree of every repository
+hlsl-codegraph --fresh                        # rebuild from scratch
 ```
 
 Each repository has its own scope, in `scripts/codegraph-<kind>.json`:
@@ -147,7 +227,7 @@ is never committed. The one file CodeGraph forces us to touch is the tracked
 `coverage` case-insensitively — which would silently hide all of
 `llvm/lib/Target` (the DirectX and SPIR-V backends included) and DXC's
 `include/llvm/Target` — and only a root `.gitignore` negation overrides a
-built-in default. `mask codegraph` appends a
+built-in default. `hlsl-codegraph` appends a
 marked block for that and marks the file `skip-worktree`, so it stays out of
 `git status` and out of commits. The offload test suite has no such directory,
 so its `.gitignore` is never touched.
@@ -156,14 +236,14 @@ The only time you have to think about that hidden edit is when a git operation
 wants to change `.gitignore` itself — a `checkout`, `rebase` or `pull` will
 then stop with `Your local changes to the following files would be overwritten
 by checkout: .gitignore` (or `Entry '.gitignore' not uptodate. Cannot merge.`).
-That is what `mask codegraph --restore-gitignore` is for: it restores the file to its
-committed state and unhides it, so the git operation goes through. Re-run `mask
-codegraph` afterwards to put the block back.
+That is what `hlsl-codegraph --restore-gitignore` is for: it restores the file
+to its committed state and unhides it, so the git operation goes through.
+Re-run `hlsl-codegraph` afterwards to put the block back.
 
 ```bash
-mask codegraph --restore-gitignore
+hlsl-codegraph --restore-gitignore
 git rebase origin/main
-mask codegraph
+hlsl-codegraph
 ```
 
 ## Building the offload test suite standalone
@@ -176,76 +256,82 @@ built and installed once, and the test suite is then a small top-level CMake
 project that links against it — a ~20 second configure and a ~2 minute build,
 per worktree.
 
-```bash
-# Once per llvm-project worktree: install the distribution
-# (clang, lit tooling, the LLVM libraries the offload tools link against).
-mask dist --in llvm-project          # -> llvm-project/build-dist/install
+This is the default layout, and installing the distribution is not a step you
+have to take: an offload build does it if it is not there.
 
-# Then, in as many offload worktrees as you like:
+```bash
 cd offload-test-suite.my-feature
-mask configure --llvm llvm-project   # standalone is the default mode
-mask build
-mask test clang-vk
+hlsl-test clang-vk        # installs the LLVM distribution if needed, then runs
+```
+
+The first run through says so plainly, because it is the expensive part:
+
+```
+==> missing prerequisite: the LLVM distribution for llvm-project -- the expensive one -- building it now
+```
+
+Check first if you would rather not find that out afterwards:
+
+```bash
+hlsl-test clang-vk --dry-run     # what would be built and configured
+hlsl-test clang-vk --no-auto     # or refuse to build prerequisites at all
 ```
 
 One distribution serves every offload worktree pointed at that llvm worktree.
-After changing Clang, `mask dist` again (it is incremental) and the offload
-builds pick the new toolchain up.
-
-To test a Clang *and* an offload change together, point the offload worktree at
-the llvm worktree that has the Clang change:
+After changing Clang, refresh it explicitly — it is incremental, and nothing
+tries to guess that an install has gone stale:
 
 ```bash
-mask dist --in llvm-project.my-clang-fix
-cd offload-test-suite.my-feature && mask configure --llvm my-clang-fix && mask test clang-d3d12
+hlsl-dist --in llvm-project.my-clang-fix
+cd offload-test-suite.my-feature && hlsl-test clang-d3d12
 ```
 
 If you already have a distribution built elsewhere — a shared one, or an
 unpacked CI artifact — point at it instead of building one:
 
 ```bash
-mask configure --dist-prefix /path/to/llvm-prefix
+hlsl-configure --dist-prefix /path/to/llvm-prefix
 ```
 
-The integrated layout is still available for an offload worktree when you want
-to exercise the in-tree build:
+To build the suite *inside* an llvm build tree instead — the in-tree layout,
+which is what upstream CI builds — configure that llvm worktree against these
+sources and work there:
 
 ```bash
-mask configure --mode integrated --llvm llvm-project.texture-store
+hlsl-configure --in llvm-project.texture-store --offload offload-test-suite.my-feature
+hlsl-test --in llvm-project.texture-store clang-vk
 ```
 
-In that mode the offload worktree has no build directory of its own: the llvm
-worktree's build tree is configured to pull it in as `OffloadTest`, and
-`mask build` / `mask test` operate there. Only one offload worktree can occupy
-an llvm build tree at a time, which is why standalone is the default.
+An llvm build tree includes exactly one offload source tree at a time, which is
+why standalone is the default.
 
 ## Running tests
 
 ```bash
-mask test                       # the whole check-hlsl umbrella
-mask test clang-vk              # one suite, through its ninja target
-mask test clang-vk Feature/HLSLLib          # a subdirectory
-mask test clang-vk Feature/HLSLLib/log2.32.test
-mask test clang-vk 'log2.*'     # anything that is not a path becomes a lit --filter
+hlsl-test                       # the whole check-hlsl umbrella
+hlsl-test clang-vk              # one suite, through its ninja target
+hlsl-test clang-vk Feature/HLSLLib          # a subdirectory
+hlsl-test clang-vk Feature/HLSLLib/log2.32.test
+hlsl-test clang-vk 'log2.*'     # anything that is not a path becomes a lit --filter
 
-mask lit clang/test/CodeGenHLSL/some_test.hlsl   # any lit test, from an llvm worktree
-mask build check-clang                            # or the usual ninja targets
+hlsl-lit clang/test/CodeGenHLSL/some_test.hlsl   # any lit test, from an llvm worktree
+hlsl-build check-clang                           # or the usual ninja targets
 ```
 
 Extra lit arguments go through `--lit-args`; use `=` when the value itself
-starts with a dash: `mask test clang-vk Feature --lit-args=--time-tests`.
+starts with a dash: `hlsl-test clang-vk Feature --lit-args=--time-tests`.
 
 Switching DXC does not require a rebuild — `DXC_DIR` only feeds the lit
-configuration, so `mask test <suite> --dxc <worktree>` regenerates the build
+configuration, so `hlsl-test <suite> --dxc <worktree>` regenerates the build
 tree in seconds and compiles nothing.
 
-## Running the Vulkan Offload Tests
+## Running the Vulkan offload tests
 
 The `check-hlsl-vk` and `check-hlsl-clang-vk` suites compile HLSL to SPIR-V and
-then *execute* it, so they need a real Vulkan driver (an "ICD"). The dev shell
-picks one for you.
+then *execute* it, so they need a real Vulkan driver (an "ICD"). The
+environment picks one for you.
 
-### Why the shell pins a driver
+### Why a driver is pinned
 
 The Vulkan loader loads **every** ICD manifest it can find and calls into each
 one from `vkEnumeratePhysicalDevices`, so a single broken driver takes down the
@@ -258,50 +344,48 @@ This cannot be fixed from `offloader`. Its `-adapter-regex` flag (and lit's
 enumeration, i.e. after the crash. The only effective lever is the loader's
 `VK_DRIVER_FILES`, which restricts it to an explicit set of manifests.
 
-So the dev shell defaults to **lavapipe**, Mesa's CPU rasterizer: slow, but it
+So the environment defaults to **lavapipe**, Mesa's CPU rasterizer: slow, but it
 works everywhere and gives reproducible results. `offload-test-suite`'s
 `lit.cfg.py` already forwards `VK_DRIVER_FILES` into the test environment, so the
 setting reaches `offloader` without any test-suite changes.
 
 ### Choosing a driver
 
-```bash
-mask vk-info              # what am I running against right now?
-mask vk-list              # what can I choose?
-mask vk-use system        # switch to the real GPU
-mask vk-use lavapipe      # switch back to the CPU rasterizer
-```
-
-`mask vk-use` records your choice in `.env` (gitignored). direnv watches that
-file, so the change applies on your next prompt — no manual reload. `.env` is
-loaded by `.envrc`, so it is a direnv-only convenience; if you use plain
-`nix develop`, pass the variable explicitly instead:
+One command shows, lists and switches:
 
 ```bash
-HLSL_VK_DRIVER=system nix develop
+hlsl-vk                   # what am I running against, and what does it expose?
+hlsl-vk --list            # what can I choose?
+hlsl-vk system            # switch to the real GPU
+hlsl-vk lavapipe          # switch back to the CPU rasterizer
 ```
+
+A switch applies to **the next command**, not the next shell: the choice is
+recorded in the workspace (`.hlsl-dev/settings.env`, gitignored, outside every
+checkout) and every task resolves it as it starts.
 
 Accepted values are `system` (let the loader discover drivers itself — use this
 on a machine with a working native driver), `lavapipe`, any Mesa ICD short name
-from `mask vk-list` (`radeon`, `intel`, `dzn`, …), or an absolute path to an ICD
-manifest. All of it is just a wrapper around the `HLSL_VK_DRIVER` environment
-variable.
+from `hlsl-vk --list` (`radeon`, `intel`, `dzn`, …), or an absolute path to an
+ICD manifest.
 
-For a one-off run you can bypass the shell setting entirely, since lit forwards
-the loader's own variable:
+For one command only, set `$HLSL_VK_DRIVER`; it wins over the recorded choice.
+To bypass all of it, set the loader's own variable — lit forwards that into the
+tests too:
 
 ```bash
-VK_DRIVER_FILES=/path/to/some_icd.x86_64.json mask test vk
+HLSL_VK_DRIVER=system hlsl-test clang-vk
+VK_DRIVER_FILES=/path/to/some_icd.x86_64.json hlsl-test vk
 ```
 
 ### Running the suites
 
 ```bash
-mask test vk                # DXC on Vulkan
-mask test clang-vk          # Clang on Vulkan
+hlsl-test vk                # DXC on Vulkan
+hlsl-test clang-vk          # Clang on Vulkan
 
 # A single test
-mask test clang-vk Feature/HLSLLib/log2.32.test
+hlsl-test clang-vk Feature/HLSLLib/log2.32.test
 ```
 
 > **Note:** lavapipe is a software rasterizer and is not fully conformant. It is
@@ -309,61 +393,220 @@ mask test clang-vk Feature/HLSLLib/log2.32.test
 > more likely to be a driver limitation than a compiler bug — confirm on real
 > hardware before filing an issue.
 
-## Managing Submodules
+## Running the D3D12 offload tests
 
-By default, submodules are cloned with a depth of 2 (`shallow = true` in `.gitmodules`). This is enough for local testing, but it can be restrictive when preparing Pull Requests or checking out old branches.
-
-### Updating to Latest Upstream
-
-To easily update all submodules to the latest commits on their respective default remote branches (e.g., `main` or `master`), run:
-
-```bash
-mask update-submodules
-```
-
-### Fetching Full History
-
-To fetch the full commit history of a submodule, use the `fetch-history` task:
+The `d3d12`, `warp-d3d12`, `clang-d3d12` and `clang-warp-d3d12` suites need
+Direct3D 12. The test suite finds it at configure time — on Windows directly,
+on Linux only under WSL, where it picks up the host driver from
+`/usr/lib/wsl/lib` plus the two static libraries `directx-headers` ships — and
+whatever it finds decides whether those suites exist in the build tree at all.
 
 ```bash
-# Example: Fetching history for LLVM
-mask fetch-history llvm-project
-
-# Example: Fetching history for DXC
-mask fetch-history DirectXShaderCompiler
+hlsl-d3d12                # is it available, is it on, does this build tree have it?
+hlsl-d3d12 off            # build without it
+hlsl-d3d12 on             # back to detecting it
 ```
 
-### Truncating History
+The suite has no switch of its own, so `off` is expressed with CMake's
+`CMAKE_DISABLE_FIND_PACKAGE_D3D12{,_WSL}`, which every configure passes
+explicitly — so toggling never needs a `--fresh`. Like the Vulkan driver, the
+choice belongs to the workspace rather than to a checkout, and switching it
+reconfigures the worktree you are standing in when it already has a build tree
+(a CMake re-run, not a rebuild).
 
-If you previously fetched the full history and now want to free up some disk space by truncating it back to a shallow depth (depth 2), run:
+Turn it off when the WSL driver is unstable, when a `d3d12` test wedges a run,
+or to reproduce what a machine without D3D12 builds.
+
+## Formatting
+
+The submodules are upstream repositories, and reviewers there expect a
+clang-formatted diff. `git clang-format` reformats only the lines a change
+touches, which is what this wraps:
 
 ```bash
-mask truncate-history llvm-project
+hlsl-format               # what would change in the staged diff
+hlsl-format --diff        # the same, as a patch
+hlsl-format --fix         # apply it
+hlsl-format --since main  # everything this branch changed, not just what is staged
 ```
 
-## Adding / Fixing Submodule URLs
+A **pre-commit hook that warns and lets the commit through** is installed in
+every checkout that has a `.clang-format` — `llvm-project`,
+`DirectXShaderCompiler` and `offload-test-suite`:
 
-If the placeholder URLs for `offload-test-suite` or `offload-golden-images` in `.gitmodules` are incorrect, edit the `.gitmodules` file with the correct repository URLs, then run `git submodule sync` and `mask setup`.
+```
+$ git commit -m "..."
+clang-format would change these staged files:
+    clang/lib/Sema/SemaHLSL.cpp
 
-## How the tasks are put together
+    hlsl-format --diff    to see it
+    hlsl-format --fix     to apply it
+[my-feature 0f31c9a] ...
+```
+
+It never blocks: formatting is not a gate this workspace gets to invent on top
+of upstream's rules, and a hook that stops a commit at the wrong moment is a
+hook people delete. When the staged diff is clean it says nothing at all.
+
+The hook lives in the clone's git directory (`.git/modules/<name>/hooks/`), so
+it is shared by every `wt` worktree of that submodule, is never part of a
+commit, and leaves `git status` clean. Entering the environment keeps it in
+place; an existing hook that is not ours is never overwritten.
+
+```bash
+hlsl-format --uninstall-hooks    # remove it
+hlsl-format --install-hooks      # put it back
+HLSL_INSTALL_HOOKS=0             # and stop the shell reinstalling it
+```
+
+It needs the tools from this environment, but not the shell: the hook adds the
+devenv profile to `PATH` itself, so a commit from an editor or a bare terminal
+gets the same check.
+
+## Secrets
+
+The workspace needs exactly one: a GitHub token for `offloader-monitor`, which
+reads the API and the run logs of `llvm/offload-test-suite`. Public-repo read
+scope is enough. Building compilers and running tests need no credentials at
+all.
+
+It is declared in [`secretspec.toml`](./secretspec.toml) and resolved when the
+task runs, from whatever provider you keep secrets in:
+
+```bash
+secretspec config global init    # choose a provider, once per machine
+secretspec set GH_TOKEN          # keyring, 1Password, dotenv, …
+offloader-monitor                # takes it from there
+```
+
+A token already in the environment wins — that is CI providing its own, and the
+dev container forwarding the host's `GH_TOKEN`/`GITHUB_TOKEN` — and if there is
+neither, `monitor_failures.py` says so plainly.
+
+The value never reaches Nix: devenv's `secretspec` integration is deliberately
+off (`devenv.yaml`), because anything it resolves into `env` would land in the
+shell derivation in the world-readable Nix store. The task calls `secretspec
+run` itself, so the token exists only in that one process.
+
+`.env` is *not* loaded into the shell either — devenv's dotenv integration is
+off. Workspace choices live in `.hlsl-dev/settings.env` (via `hlsl-vk` and
+`hlsl-d3d12`), where a change applies to the next command rather than the next
+shell, and secrets live in a provider. If you want a `.env` anyway, secretspec's
+`dotenv` provider will read one for you.
+
+## Managing submodules
+
+By default, submodules are cloned with a depth of 2 (`shallow = true` in
+`.gitmodules`). This is enough for local testing, but it can be restrictive when
+preparing pull requests or checking out old branches.
+
+### Updating to latest upstream
+
+To update all submodules to the latest commits on their respective default
+remote branches (e.g. `main` or `master`):
+
+```bash
+hlsl-update-submodules
+```
+
+### Fetching full history
+
+```bash
+hlsl-fetch-history llvm-project
+hlsl-fetch-history DirectXShaderCompiler
+```
+
+### Truncating history
+
+If you previously fetched the full history and now want to free up disk space
+by truncating it back to a shallow depth (depth 2):
+
+```bash
+hlsl-truncate-history llvm-project
+```
+
+## Adding / fixing submodule URLs
+
+If the placeholder URLs for `offload-test-suite` or `offload-golden-images` in
+`.gitmodules` are incorrect, edit `.gitmodules` with the correct repository
+URLs, then run `git submodule sync` and `hlsl-setup`.
+
+## How the environment is put together
 
 | Where | What |
 |---|---|
-| `maskfile.md` | the task surface: `ls`, `info`, `link`, `configure`, `build`, `dist`, `test`, `lit`, `clean`, … |
-| `scripts/hlsl-dev.sh` | worktree detection, dependency resolution, pins, locks, and the CMake invocations |
-| `flake.nix` | the dev shell, and the CMake flag *templates* for each build flavour |
+| `devenv.nix` | the whole environment: packages, variables, the CMake flag *templates*, the task list, the process definitions and the dev container |
+| `devenv.yaml`, `devenv.lock` | which nixpkgs the above is built from, and the exact revision |
+| `scripts/tasks/*.sh` | one file per `hlsl-<task>`: what it does |
+| `scripts/hlsl-dev.sh` | shared by all of them: option parsing, worktree detection, dependency resolution, prerequisites, locks, the CMake invocations |
+| `scripts/tests/hlsl-dev.test.sh` | self-test for that logic, run by `devenv test` |
+| `.hlsl-dev/` | workspace state: dependency memories, build locks, and `settings.env` (the Vulkan driver, D3D12) |
+| `offloader-scripts/tasks/*.sh` | the same, for the `offloader-<task>` CI monitoring commands |
 
-The flag lists in `flake.nix` are templates: placeholders such as
+Every executable in `scripts/tasks/` automatically becomes an `hlsl-<name>`
+command; its one-line `# summary:` comment is what `devenv info` and `hlsl`
+list. The command devenv puts on `PATH` only dispatches into the checkout, so
+editing a task takes effect immediately, without re-entering the environment.
+
+The flag lists in `devenv.nix` are templates: placeholders such as
 `$HD_LLVM_SRC`, `$HD_DXC_BIN_DIR` or `$HD_OFFLOAD_SRC` are left unexpanded in
 the environment and filled in per invocation, once the tasks have resolved
 which worktrees a command applies to. That is what lets one flag list serve
 every worktree of a repository instead of a single hard-coded checkout — tune
-build options in `flake.nix`, and every worktree picks them up on its next
+build options in `devenv.nix`, and every worktree picks them up on its next
 configure.
 
-`mask` itself is wrapped in the dev shell so that it finds this `maskfile.md`
-from any directory (a `maskfile.md` in the current directory, or an explicit
-`--maskfile`, still wins).
+### Checking the environment
+
+```bash
+devenv test                 # every check below, in order
+devenv tasks list           # what they are
+```
+
+The checks are devenv tasks, so each is named, timed and reported separately:
+
+| Task | What it checks |
+|---|---|
+| `hlsl:check:env` | the toolchain, the workspace layout, the CMake flag templates, the Vulkan and D3D12 setup |
+| `hlsl:check:tasks` | every task is on `PATH` and answers `--help` |
+| `hlsl:check:plan` | a `--dry-run` configure, build and test run for each checkout you actually have: real worktree discovery, real dependency resolution, and the cmake command that would follow |
+| `hlsl:check:selftest` | `scripts/tests/hlsl-dev.test.sh` — resolution, prerequisites, settings and the hook, against fake checkouts |
+| `hlsl:check:hook` | the clang-format hook, driven by real commits in a throwaway repository with devenv taken out of the environment |
+| `hlsl:check:shellcheck` | ShellCheck over the whole task layer (last: it is the slow one) |
+
+Checkouts that are not there are skipped, so this is green on a fresh clone —
+which matters, because the dev container runs it before `hlsl-setup` ever
+happens. The `offloader-scripts` unit tests are *not* part of it: that tooling
+builds the GitHub Pages report, not a compiler, so it has `offloader-test` for
+when you are working on it.
+
+One failing check does not hide the ones after it, and any of them can be run
+on its own while you work on it:
+
+```bash
+devenv tasks run hlsl:check:shellcheck --mode single
+```
+
+`devenv test` is the same command the dev container runs after creation, so a
+green run locally means a container build will get that far too. It never
+builds a compiler: the self-test exercises the resolution and prerequisite
+logic against fake checkouts in a temporary directory.
+
+### Compiler Explorer
+
+```bash
+hlsl-compiler-explorer          # :10240, wired to your builds
+```
+
+It generates `compiler-explorer/etc/config/hlsl.local.properties` from the
+resolved `--llvm` / `--dxc` worktrees, then runs in the foreground.
+
+### Updating the toolchain
+
+```bash
+devenv update           # move devenv.lock to the current nixos-unstable
+devenv test             # check the result before committing the lock
+```
 
 ### Useful environment variables
 
@@ -371,15 +614,16 @@ from any directory (a `maskfile.md` in the current directory, or an explicit
 |---|---|
 | `HLSL_WT` | act on this worktree, as if `--in` had been passed |
 | `HLSL_LLVM`, `HLSL_DXC`, `HLSL_OFFLOAD`, `HLSL_GOLDEN` | default dependencies for this shell |
-| `HLSL_MODE` | `standalone` or `integrated` for offload worktrees |
-| `HLSL_BUILD_TYPE`, `HLSL_BUILD_DIR` | build type / build directory |
+| `HLSL_BUILD_TYPE`, `HLSL_BUILD_DIR` | build type / build directory for this shell |
 | `HLSL_DIST_PREFIX` | an already-installed LLVM distribution to build against |
-| `HLSL_VK_DRIVER` | Vulkan ICD selection (see above) |
+| `HLSL_AUTO=0` | never build a missing prerequisite; fail and say what is missing |
+| `HLSL_INSTALL_HOOKS=0` | do not install the clang-format pre-commit hook |
+| `HLSL_VK_DRIVER` | Vulkan ICD for this command, overriding `hlsl-vk` (see above) |
 
 They are the same knobs as the flags, which makes them convenient for an agent
 that wants one setting to apply to a whole session:
 
 ```bash
 export HLSL_LLVM=llvm-project.texture-store
-mask build && mask test clang-vk        # both use that LLVM
+hlsl-build && hlsl-test clang-vk        # both use that LLVM
 ```

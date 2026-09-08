@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
+#
+# Inputs for the HLSL developer workspace. The exact revisions are pinned in
+# devenv.lock; `devenv update` moves them, and the whole environment -- the
+# toolchain, the tasks and the dev container -- is defined in devenv.nix.
+#
+# nixpkgs tracks nixos-unstable rather than devenv's rolling default: these
+# builds want the recent Mesa (lavapipe), Vulkan loader and LLVM that channel
+# carries.
+inputs:
+  nixpkgs:
+    url: github:NixOS/nixpkgs/nixos-unstable
+
+# The workspace has one secret (a GitHub token for `offloader-monitor`) and it
+# is declared in secretspec.toml, but this Nix-level integration stays off on
+# purpose: it would resolve the value during evaluation, and anything that
+# reaches `env` reaches the shell derivation in the world-readable Nix store.
+# The task calls `secretspec run` itself instead, so the token exists only in
+# that one process. Setting this to false also silences the "enable me" hint.
+secretspec:
+  enable: false

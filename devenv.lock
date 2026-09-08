@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "devenv": {
+      "locked": {
+        "dir": "src/modules",
+        "lastModified": 1788819331,
+        "narHash": "sha256-PXClmncMTmWutJvFGrA6rKyvxWtUwaMUT615XrDHdB8=",
+        "owner": "cachix",
+        "repo": "devenv",
+        "rev": "190959a9a4bb52d4802f076a90c3c4e3aa2e6fa2",
+        "type": "github"
+      },
+      "original": {
+        "dir": "src/modules",
+        "owner": "cachix",
+        "repo": "devenv",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1784497964,
@@ -18,6 +35,7 @@
     },
     "root": {
       "inputs": {
+        "devenv": "devenv",
         "nixpkgs": "nixpkgs"
       }
     }

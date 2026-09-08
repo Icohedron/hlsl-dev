@@ -1,0 +1,16 @@
+# ShellCheck configuration for the workspace's task layer.
+#
+# The task scripts in scripts/tasks/ and offloader-scripts/tasks/ source
+# scripts/hlsl-dev.sh through a `readlink -f "${BASH_SOURCE[0]}"` expression
+# that ShellCheck cannot resolve, so each one carries a `# shellcheck source=`
+# directive; these two settings let ShellCheck follow it, relative to the
+# script's own directory. Following it is what makes the HD_TASK_* variables a
+# task declares count as used.
+external-sources=true
+source-path=SCRIPTDIR
+
+# Informational findings that do not apply to this code base:
+#
+#   SC2119  hd_target and friends take *optional* positional arguments; a call
+#           with none is the normal case, not a forgotten "$@".
+disable=SC2119

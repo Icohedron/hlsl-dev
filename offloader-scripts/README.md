@@ -24,11 +24,11 @@ token, and triage never needs one.
    (scheduled CI on llvm/offload-test-suite)
                     │
                     ▼
-        mask monitor            ──►  reports/<UTC-ts>/summary.{json,md,csv}
+     offloader-monitor         ──►  reports/<UTC-ts>/summary.{json,md,csv}
    (classify red workflows)          reports/<UTC-ts>/logs/*.log.gz
                     │
                     ▼
-        mask triage <report>    ──►  reports/<UTC-ts>/triage/<item>.md
+     offloader-triage <report> ──►  reports/<UTC-ts>/triage/<item>.md
    (root-cause each failure)          reports/<UTC-ts>/triage/{triage.json,README.md}
 ```
 
@@ -42,9 +42,11 @@ no compiler builds required.
 ## Setup
 
 - **Python 3.10+**, standard library only. No pip dependencies.
-- **GitHub token** (monitor only): export `GH_TOKEN` or `GITHUB_TOKEN` with
-  public-repo read scope. A local `.env` in this directory is a convenient
-  place to keep it.
+- **GitHub token** (monitor only): public-repo read scope. `offloader-monitor`
+  uses `GH_TOKEN`/`GITHUB_TOKEN` from the environment if they are set, and
+  otherwise asks secretspec for one (`secretspec set GH_TOKEN`, declared in
+  `../secretspec.toml`). Running `monitor_failures.py` directly only looks at
+  the environment.
 - **Sibling checkouts** (triage only, for commit-range resolution and DXIL):
   `../llvm-project`, `../DirectXShaderCompiler`, `../offload-test-suite`. These
   are shallow by default; triage unshallows on demand (see below).
@@ -53,18 +55,19 @@ no compiler builds required.
 - **`pi`** on `PATH` (optional): enables the agentic reasoning steps. Without
   it, use `--no-agent`.
 
-Tasks are defined in [`maskfile.md`](./maskfile.md) via
-[mask](https://github.com/jacobdeichert/mask); run `mask` with no args to list
-them.
+These tasks are `offloader-monitor`, `offloader-triage`, `offloader-site` and
+`offloader-test`, defined in [`tasks/`](./tasks) and put on `PATH` by the
+workspace's [`devenv.nix`](../devenv.nix). Each one takes `--help`, and
+`devenv info` lists them all. They run from any directory.
 
 ---
 
 ## Monitoring — `monitor_failures.py`
 
 ```bash
-mask monitor            # full: fetch failing + successful logs, build divergence pivot
-mask monitor fast       # --no-pass-matrix: failing logs only (~half the downloads)
-mask monitor status     # --skip-logs: which workflows are red today (no classification)
+offloader-monitor       # full: fetch failing + successful logs, build divergence pivot
+offloader-monitor fast  # --no-pass-matrix: failing logs only (~half the downloads)
+offloader-monitor status # --skip-logs: which workflows are red today (no classification)
 
 # equivalently:
 python3 monitor_failures.py [--skip-logs] [--no-pass-matrix] [--otss-root DIR] [--out-root DIR]
@@ -147,8 +150,8 @@ fields in the JSON/CSV). Details:
 ## Triaging — `triage_report.py`
 
 ```bash
-mask triage reports/<UTC-ts>          # triage the given report
-TRIAGE_ARGS="--no-agent" mask triage reports/<UTC-ts>
+offloader-triage reports/<UTC-ts>     # triage the given report
+TRIAGE_ARGS="--no-agent" offloader-triage reports/<UTC-ts>
 
 # equivalently:
 python3 triage_report.py <report> [--no-agent] [--no-fetch-history] [--max N] \
@@ -198,7 +201,7 @@ interpreted from the DXIL alone.
 | `<strategy>__<workflow>__<suite>__<test>.md` | one writeup per failure |
 
 **Full git history.** Sibling repos are shallow clones. Triage unshallows them
-on demand (`mask fetch-history <repo>`, with a direct `git fetch --unshallow`
+on demand (`hlsl-fetch-history <repo>`, with a direct `git fetch --unshallow`
 fallback) to resolve commit ranges. Pass `--no-fetch-history` to skip this and
 rely on `/compare/` URLs.
 
@@ -214,7 +217,7 @@ ready-to-use prompt are written for you to run later.
 Offline; no token needed.
 
 ```bash
-mask test
+offloader-test
 # or:
 python3 -m unittest discover -s tests -v
 ```
@@ -236,7 +239,7 @@ the bulky `logs/`) into `<site>/reports/<timestamp>/`, prunes reports older than
 retained report newest-first with an at-a-glance red/green health column.
 
 ```bash
-mask site        # -> _site/index.html + _site/reports/<ts>/summary.html
+offloader-site   # -> _site/index.html + _site/reports/<ts>/summary.html
 # or:
 python3 build_site.py --reports-dir reports --site-dir _site --max-age-days 30
 ```

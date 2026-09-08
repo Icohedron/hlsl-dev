@@ -1,10 +1,17 @@
 result
-.direnv/
+
+# devenv's per-project state: the shell profile, its gc roots and process logs
+.devenv/
+.devenv.flake.nix
+
+# Uncommitted per-machine overrides layered on top of devenv.nix
+devenv.local.nix
+
 build/
 build-*/
 install/
 
-# Per-worktree state written by the mask tasks (dependency pins, build locks)
+# Per-worktree state written by the tasks (dependency pins, build locks)
 .hlsl-dev/
 
 # Worktrees created with `wt` sit next to the submodule they belong to
@@ -32,4 +39,5 @@ compile_commands.json
 
 # offloader-scripts tooling artifacts
 reports/
+_site/
 __pycache__/
