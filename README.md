@@ -32,6 +32,15 @@ Nix is a powerful package manager and build system. In this project, we use it (
     mask build --in DirectXShaderCompiler
     ```
 
+### In a container
+
+`.devcontainer/` describes the same environment as a dev container (Nix +
+direnv, dev shell pre-built). Open the folder in an editor that supports dev
+containers, or run `devcontainer up --workspace-folder .`, then carry on from
+`mask setup` as above. See
+[.devcontainer/README.md](.devcontainer/README.md) — in particular for Vulkan,
+which defaults to the lavapipe software rasterizer there.
+
 ## Worktrees
 
 Every task that touches a checkout works the same way in a `wt` worktree as it
