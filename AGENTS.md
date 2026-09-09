@@ -213,6 +213,7 @@ hlsl-d3d12 on     # back to detecting it
 | `HLSL_WT` | act on this worktree, as if `--in` had been passed |
 | `HLSL_LLVM`, `HLSL_DXC`, `HLSL_OFFLOAD`, `HLSL_GOLDEN` | default dependencies |
 | `HLSL_BUILD_TYPE`, `HLSL_BUILD_DIR` | build type / build directory for this shell |
+| `HLSL_BUILD_DIR_NAME` | build directory *name* for every worktree (default `build`; the dev container uses `build-container`, so its trees and the host's stay apart) |
 | `HLSL_DIST_PREFIX` | an already-installed LLVM distribution to build against |
 | `HLSL_AUTO=0` | never build a missing prerequisite; fail and say what is missing |
 | `HLSL_INSTALL_HOOKS=0` | do not install the clang-format pre-commit hook |

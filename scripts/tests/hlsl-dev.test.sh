@@ -82,6 +82,21 @@ check "build dir: \$HLSL_BUILD_DIR, target only" "$(hd_build_dir "$llvm")" "$llv
 check "build dir: not for dependencies"          "$(hd_build_dir "$offload")" "$offload/build"
 HD_WT="" HD_OPT_BUILD_DIR=""
 
+# The name, on the other hand, is what an environment that must not share
+# build trees sets -- the dev container -- so it holds for every worktree, and
+# `hlsl-ls` reports that environment's trees rather than the other one's.
+HLSL_BUILD_DIR_NAME="build-container"
+check "build dir: \$HLSL_BUILD_DIR_NAME, every worktree" \
+    "$(hd_build_dir "$llvm")" "$llvm/build-container"
+check "build dir: dependencies too" \
+    "$(hd_build_dir "$offload")" "$offload/build-container"
+check "build dir: the distribution is still shared" \
+    "$(hd_dist_prefix "$llvm")" "$llvm/build-dist/install"
+HD_WT=$llvm HD_OPT_BUILD_DIR=build-debug
+check "build dir: \$HLSL_BUILD_DIR still wins for the target" \
+    "$(hd_build_dir "$llvm")" "$llvm/build-debug"
+HD_WT="" HD_OPT_BUILD_DIR="" HLSL_BUILD_DIR_NAME=""
+
 # --- pins -------------------------------------------------------------------
 hd_pin_set "$llvm" DXC "/some/bin"
 check "pin: roundtrip" "$(hd_pin_get "$llvm" DXC)" "/some/bin"

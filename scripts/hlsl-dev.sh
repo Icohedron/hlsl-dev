@@ -693,9 +693,18 @@ hd_dep() {
 #   <llvm worktree>/build-dist/install
 #                                   the prefix offload standalone builds consume
 #
-# $HLSL_BUILD_DIR overrides the first one for the *target* worktree. It is a
-# session variable rather than a flag on purpose: every command in that session
-# then agrees on where the build tree is, with nothing to remember between them.
+# $HLSL_BUILD_DIR overrides the first one for the *target* worktree, and
+# $HLSL_BUILD_DIR_NAME renames it for *every* worktree. Both are session
+# variables rather than flags on purpose: every command in that session then
+# agrees on where the build tree is, with nothing to remember between them.
+#
+# The name is what an environment that must not share build trees with another
+# one sets -- the dev container does, because a tree configured under WSL links
+# a D3D12 driver that is not there. Renaming it rather than pointing at one
+# directory keeps every command consistent: a build, the `built` column of
+# `hlsl-ls` and the prerequisite checks all look in the same place, per
+# worktree. The distribution build (build-dist) is deliberately not renamed:
+# it is plain LLVM, so it is worth sharing.
 
 hd_build_dir() {
     local wt=$1
