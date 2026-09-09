@@ -306,9 +306,13 @@ in
   #
   #     devenv tasks run hlsl:check:shellcheck --mode single
   #
-  # The chain is there for readable output: without it they interleave. They
-  # hang off devenv:enterTest, so they run for `devenv test` and not on every
-  # shell entry.
+  # The chain is there for readable output: without it they interleave. It is
+  # entered from enterTest below, by name, rather than by declaring
+  # `before = [ "devenv:enterTest" ]` on each task: devenv 2.3 runs the tasks
+  # that enterTest depends on when *entering the shell* too, which put a
+  # 20-second ShellCheck run in front of every `direnv export` -- that is,
+  # in front of every `podman exec` and every new terminal in the dev
+  # container. Nothing here may run on shell entry.
   #
   # They run as their own processes, so they see what the *profile* provides.
   # What only a shell can see -- the variables enterShell exports -- is checked
@@ -321,7 +325,6 @@ in
   tasks = {
     "hlsl:check:env" = {
       description = "Toolchain, workspace layout, CMake flag templates, GPU setup";
-      before = [ "devenv:enterTest" ];
       showOutput = true;
       exec = ''
         set -e
@@ -355,7 +358,6 @@ in
     "hlsl:check:tasks" = {
       description = "Every task is on PATH and answers --help";
       after = [ "hlsl:check:env@completed" ];
-      before = [ "devenv:enterTest" ];
       showOutput = true;
       exec = ''
         set -e
@@ -375,7 +377,6 @@ in
     "hlsl:check:plan" = {
       description = "Dry-run a configure and a build for each real checkout";
       after = [ "hlsl:check:tasks@completed" ];
-      before = [ "devenv:enterTest" ];
       showOutput = true;
       exec = ''bash "$DEVENV_ROOT/scripts/tests/plan.test.sh"'';
     };
@@ -383,7 +384,6 @@ in
     "hlsl:check:selftest" = {
       description = "scripts/hlsl-dev.sh self-test (fake checkouts, no compiler)";
       after = [ "hlsl:check:plan@completed" ];
-      before = [ "devenv:enterTest" ];
       showOutput = true;
       exec = ''bash "$DEVENV_ROOT/scripts/tests/hlsl-dev.test.sh"'';
     };
@@ -391,7 +391,6 @@ in
     "hlsl:check:hook" = {
       description = "The clang-format hook, driven by a real commit";
       after = [ "hlsl:check:selftest@completed" ];
-      before = [ "devenv:enterTest" ];
       showOutput = true;
       exec = ''bash "$DEVENV_ROOT/scripts/tests/format-hook.test.sh"'';
     };
@@ -401,7 +400,6 @@ in
     "hlsl:check:shellcheck" = {
       description = "ShellCheck over the task layer";
       after = [ "hlsl:check:hook@completed" ];
-      before = [ "devenv:enterTest" ];
       showOutput = true;
       exec = ''
         set -e
@@ -440,12 +438,15 @@ in
   };
 
   # What is left for the shell hook is what only a shell has: the variables
-  # enterShell exports. Everything else is a hlsl:check:* task above.
+  # enterShell exports -- and running the check chain, which hangs off its last
+  # link: `--mode before` (the default) pulls in everything it depends on, in
+  # order.
   enterTest = ''
     set -e
     test -n "$SCCACHE_DIR"
     test -e "''${VK_DRIVER_FILES:-$HLSL_VK_ICD_DIR}"
     echo "shell environment ok"
+    devenv tasks run hlsl:check:shellcheck
   '';
 
   # ------------------------------------------------------------------------
