@@ -32,6 +32,14 @@ mkdir -p "$root/offload-golden-images/hlsl"
 export HLSL_DEV_ROOT=$root
 export HLSL_DEV_STATE=$root/.hlsl-dev
 export HLSL_CMAKE_FLAGS_LLVM="-DCMAKE_BUILD_TYPE=\$HD_BUILD_TYPE"
+
+# The caller's environment must not decide what the defaults are: the dev
+# container exports HLSL_BUILD_DIR_NAME=build-container, which moves every
+# build directory the checks below assert. The vk block does the same for its
+# own variables further down.
+unset HLSL_WT HLSL_LLVM HLSL_DXC HLSL_OFFLOAD HLSL_GOLDEN \
+    HLSL_BUILD_DIR HLSL_BUILD_DIR_NAME HLSL_BUILD_TYPE HLSL_DIST_PREFIX HLSL_AUTO
+
 llvm=$root/llvm-project
 offload=$root/offload-test-suite
 

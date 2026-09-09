@@ -67,6 +67,11 @@ not `mask build`. `hlsl` lists them all, `hlsl <task>` is an alias for
    hlsl-test clang-vk --dry-run    # what would be built and configured
    hlsl-test clang-vk --no-auto    # refuse to build prerequisites ($HLSL_AUTO=0)
    ```
+
+   A target can also build far more than its name suggests: `check-llvm` drags
+   in `llvm-test-depends`, which is every LLVM tool plus the Kaleidoscope
+   examples, and each one is a linked copy of LLVM. `hlsl-trim` deletes the
+   binaries the targets you actually use do not depend on (`--dry-run` first).
 5. **Never re-configure or clean someone else's worktree.** Concurrent builds of
    the *same* build directory are serialised by a lock; different worktrees are
    independent and must stay that way.
@@ -82,6 +87,8 @@ hlsl-info                    # what does this directory resolve to, against what
 
 hlsl-build [target]          # build the current checkout (configuring first)
 hlsl-clean [--dist]          # remove its build directory
+hlsl-trim [--dry-run]        # remove just the binaries the targets you use do
+                             # not need (a stray check-llvm costs ~16 GB)
 hlsl-configure --llvm X      # change what it builds against; remembered after
 hlsl-configure --forget      # drop what it remembered
 

@@ -25,12 +25,17 @@ dxc=$root/DirectXShaderCompiler
 offload=$root/offload-test-suite
 golden=$root/offload-golden-images
 
+# The build directory is named, not assumed: the dev container sets
+# HLSL_BUILD_DIR_NAME=build-container so its trees and the host's stay apart,
+# and this suite plans against whatever environment it is run in.
+build=${HLSL_BUILD_DIR_NAME:-build}
+
 # Nothing here may touch the workspace: --dry-run exists precisely so a plan
 # costs nothing. Anything it creates is a bug in the dry-run guards.
 state() { find "$root/.hlsl-dev" -type f 2>/dev/null | sort || true; }
 builds() {
     local d
-    for d in "$llvm/build" "$dxc/build" "$offload/build"; do
+    for d in "$llvm/$build" "$dxc/$build" "$offload/$build"; do
         [ -d "$d" ] && printf '%s\n' "$d"
     done
     return 0
@@ -47,7 +52,7 @@ plan() { # plan <task> <args...> -> stdout+stderr of the dry run, exit code in $
 if [ -f "$llvm/llvm/CMakeLists.txt" ]; then
     plan hlsl-configure --in "$llvm"
     check "llvm: the plan succeeds" "$rc" "0"
-    contains "llvm: configures its llvm/ directory" "$out" "would run: cmake -S $llvm/llvm -B $llvm/build"
+    contains "llvm: configures its llvm/ directory" "$out" "would run: cmake -S $llvm/llvm -B $llvm/$build"
     contains "llvm: build type reaches the flags" "$out" "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
     lacks "llvm: no placeholder survives expansion" "$out" '$HD_'
     contains "llvm: the HLSL cache comes last" "$out" "-C $llvm/clang/cmake/caches/HLSL.cmake"
@@ -58,7 +63,7 @@ if [ -f "$llvm/llvm/CMakeLists.txt" ]; then
 
     plan hlsl-build --in "$llvm" clang
     check "llvm: a build plans too" "$rc" "0"
-    contains "llvm: on the target asked for" "$out" "would run: cmake --build $llvm/build --target clang"
+    contains "llvm: on the target asked for" "$out" "would run: cmake --build $llvm/$build --target clang"
 else
     skip "llvm-project is not checked out"
 fi
@@ -67,7 +72,7 @@ fi
 if [ -f "$dxc/cmake/caches/PredefinedParams.cmake" ]; then
     plan hlsl-configure --in "$dxc"
     check "dxc: the plan succeeds" "$rc" "0"
-    contains "dxc: configures its top level" "$out" "would run: cmake -S $dxc -B $dxc/build"
+    contains "dxc: configures its top level" "$out" "would run: cmake -S $dxc -B $dxc/$build"
     contains "dxc: with its own cache" "$out" "-C $dxc/cmake/caches/PredefinedParams.cmake"
     lacks "dxc: no placeholder survives expansion" "$out" '$HD_'
 else
@@ -78,7 +83,7 @@ fi
 if [ -d "$offload/tools/offloader" ]; then
     plan hlsl-configure --in "$offload"
     check "offload: the plan succeeds" "$rc" "0"
-    contains "offload: configures standalone" "$out" "would run: cmake -S $offload -B $offload/build"
+    contains "offload: configures standalone" "$out" "would run: cmake -S $offload -B $offload/$build"
     contains "offload: against an llvm distribution" "$out" "-DCMAKE_PREFIX_PATH=$llvm/build-dist/install/lib/cmake/llvm"
     contains "offload: knowing the llvm sources" "$out" "-DLLVM_MAIN_SRC_DIR=$llvm/llvm"
     contains "offload: with the golden images" "$out" "-DGOLDENIMAGE_DIR=$golden"

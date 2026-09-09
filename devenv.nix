@@ -117,6 +117,26 @@ let
     "-DLLVM_OPTIMIZED_TABLEGEN=OFF" # Turn ON only for Debug configurations to save time
     "-DCMAKE_INSTALL_PREFIX=$HD_INSTALL_PREFIX"
 
+    # Keep the build tree from being mostly duplicated debug info. A default
+    # RelWithDebInfo tree is ~85% DWARF by size, copied into every one of the
+    # ~150 executables that link the same static archives:
+    #
+    #   split DWARF   leaves the debug info in .dwo files next to the objects
+    #                 instead of the linked binary. sccache (0.16) treats the
+    #                 .dwo as an extra output and replays it on a cache hit,
+    #                 so the shared .sccache/ still works.
+    #   dylib linking builds one libLLVM.so and links the tools against it
+    #                 rather than into them. It also flips CLANG_LINK_CLANG_DYLIB
+    #                 (clang/CMakeLists.txt), which is where most of the mass is.
+    #
+    # Both cost link-time indirection, not compile time: LLVM_ENABLE_PIC is
+    # already ON, so flipping them relinks rather than rebuilds. Deliberately
+    # not in llvmDistCMakeFlags -- an install carries no .dwo files, and the
+    # standalone distribution's component list enumerates the static LLVM
+    # libraries that offload builds link against.
+    "-DLLVM_USE_SPLIT_DWARF=ON"
+    "-DLLVM_LINK_LLVM_DYLIB=ON"
+
     # Offload Test Suite & DXC Integration. DXC_EXECUTABLE/DXV_EXECUTABLE are
     # spelled out so that `hlsl-test --dxc <worktree>` can retarget an existing
     # build tree at another DXC without a fresh configure.
@@ -388,9 +408,16 @@ in
       exec = ''bash "$DEVENV_ROOT/scripts/tests/hlsl-dev.test.sh"'';
     };
 
+    "hlsl:check:trim" = {
+      description = "hlsl-trim against a real build graph in a throwaway tree";
+      after = [ "hlsl:check:selftest@completed" ];
+      showOutput = true;
+      exec = ''bash "$DEVENV_ROOT/scripts/tests/trim.test.sh"'';
+    };
+
     "hlsl:check:hook" = {
       description = "The clang-format hook, driven by a real commit";
-      after = [ "hlsl:check:selftest@completed" ];
+      after = [ "hlsl:check:trim@completed" ];
       showOutput = true;
       exec = ''bash "$DEVENV_ROOT/scripts/tests/format-hook.test.sh"'';
     };

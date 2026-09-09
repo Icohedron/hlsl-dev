@@ -329,6 +329,40 @@ Switching DXC does not require a rebuild — `DXC_DIR` only feeds the lit
 configuration, so `hlsl-test <suite> --dxc <worktree>` regenerates the build
 tree in seconds and compiles nothing.
 
+### Trimming a build that overreached
+
+Some targets build far more than they sound like they do. `check-llvm` drags in
+`llvm-test-depends` — the entire LLVM tool zoo, plus the Kaleidoscope and OrcV2
+examples, which `llvm/test/CMakeLists.txt` adds whenever `LLVM_INCLUDE_EXAMPLES`
+is on even though `LLVM_BUILD_EXAMPLES` is off. Each of those is a fully linked
+copy of LLVM. One stray `hlsl-build check-llvm` is worth about 16 GB.
+
+`hlsl-trim` takes it back, without a reconfigure and without rebuilding
+anything you kept:
+
+```bash
+hlsl-trim --dry-run     # list what would go, remove nothing
+hlsl-trim               # keep what check-hlsl and check-clang need
+hlsl-trim check-hlsl    # HLSL only -- the clang unit tests go too
+```
+
+It asks Ninja what the targets you name actually depend on (`ninja -t graph`)
+and deletes the executables that are not in the answer, leaving objects,
+libraries, CMake state and the install prefix alone. Nothing is lost that a
+link step cannot make again — the next build asking for one of those targets
+relinks it — and only ELF files are considered, so `llvm-lit` and the other
+scripts in `bin/` stay put. `hlsl-clean` is still the way to remove a build
+directory outright.
+
+Builds are also configured to stop duplicating debug info: llvm worktrees build
+with `LLVM_USE_SPLIT_DWARF` (DWARF stays in `.dwo` files beside the objects
+instead of being copied into every binary) and `LLVM_LINK_LLVM_DYLIB` (one
+`libLLVM.so`, and with it `libclang-cpp.so`, rather than a static copy per
+tool). The one consequence to know about: a binary copied out of its build
+directory leaves its `.dwo` files behind and loses its debug info. The
+standalone distribution is deliberately still linked statically, so
+`build-dist/install` stays self-contained.
+
 ## Running the Vulkan offload tests
 
 The `check-hlsl-vk` and `check-hlsl-clang-vk` suites compile HLSL to SPIR-V and
