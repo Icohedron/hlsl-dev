@@ -64,6 +64,11 @@ if [ -f "$llvm/llvm/CMakeLists.txt" ]; then
     plan hlsl-build --in "$llvm" clang
     check "llvm: a build plans too" "$rc" "0"
     contains "llvm: on the target asked for" "$out" "would run: cmake --build $llvm/$build --target clang"
+
+    plan hlsl-build --in "$llvm" clang llvm-dis FileCheck
+    check "llvm: several targets plan too" "$rc" "0"
+    contains "llvm: all of them, in one cmake" "$out" \
+        "would run: cmake --build $llvm/$build --target clang llvm-dis FileCheck"
 else
     skip "llvm-project is not checked out"
 fi

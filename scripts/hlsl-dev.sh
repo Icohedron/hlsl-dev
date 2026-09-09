@@ -1552,15 +1552,25 @@ hd_ensure_configured() {
 }
 
 # hd_build <worktree> [target...]
+#
+# More than one target is passed straight through: `cmake --build --target`
+# has taken a list since CMake 3.15, and Ninja builds them in one invocation,
+# which is both faster and safer than a task loop -- one configure, one lock,
+# one dependency graph. Empty arguments are dropped rather than forwarded as
+# an empty target name, so a caller composing a name that may come out blank
+# ends up at the default target instead of a cmake error.
 hd_build() {
-    local wt=$1 build
+    local wt=$1 build target targets=()
     shift
+    for target in "$@"; do
+        [ -n "$target" ] && targets+=("$target")
+    done
     hd_ensure_configured "$wt"
     build=$(hd_build_dir "$wt")
     hd_lock "$build"
-    if [ "$#" -gt 0 ] && [ -n "$1" ]; then
-        hd_log "building $* in $build"
-        hd_run cmake --build "$build" --target "$@"
+    if [ "${#targets[@]}" -gt 0 ]; then
+        hd_log "building ${targets[*]} in $build"
+        hd_run cmake --build "$build" --target "${targets[@]}"
     else
         hd_log "building in $build"
         hd_run cmake --build "$build"

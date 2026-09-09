@@ -273,4 +273,17 @@ hd_prepare_build_dir "$root/dry-build"
 check "otherwise the build directory is made" \
     "$([ -d "$root/dry-build" ] && echo made || echo clean)" "made"
 
+# --- several targets go to cmake in one invocation ---------------------------
+HD_DRY_RUN=1
+out=$(hd_build "$llvm" clang opt llvm-dis 2>&1)
+contains "build: one target" "$(hd_build "$llvm" clang 2>&1)" "--target clang"
+contains "build: several targets, one cmake" "$out" "--target clang opt llvm-dis"
+check "build: and one invocation only" "$(printf '%s\n' "$out" | grep -c -- '--build')" "1"
+contains "build: it says what it is building" "$out" "building clang opt llvm-dis in"
+lacks "build: no target means the default one" "$(hd_build "$llvm" 2>&1)" "--target"
+lacks "build: an empty target is not one" "$(hd_build "$llvm" "" 2>&1)" "--target"
+contains "build: an empty one among others is dropped" \
+    "$(hd_build "$llvm" "" clang "" opt 2>&1)" "--target clang opt"
+HD_DRY_RUN=""
+
 exit "$fail"

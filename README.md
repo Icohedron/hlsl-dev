@@ -320,6 +320,7 @@ hlsl-test clang-vk 'log2.*'     # anything that is not a path becomes a lit --fi
 
 hlsl-lit clang/test/CodeGenHLSL/some_test.hlsl   # any lit test, from an llvm worktree
 hlsl-build check-clang                           # or the usual ninja targets
+hlsl-build clang llvm-dis FileCheck              # several at once, in one go
 ```
 
 Extra lit arguments go through `--lit-args`; use `=` when the value itself

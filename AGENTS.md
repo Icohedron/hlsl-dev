@@ -85,7 +85,8 @@ devenv info                  # packages, tasks and environment variables on offe
 hlsl-ls                      # every worktree: branch, build state, pins
 hlsl-info                    # what does this directory resolve to, against what?
 
-hlsl-build [target]          # build the current checkout (configuring first)
+hlsl-build [target]...       # build the current checkout (configuring first);
+                             # several targets go in one cmake invocation
 hlsl-clean [--dist]          # remove its build directory
 hlsl-trim [--dry-run]        # remove just the binaries the targets you use do
                              # not need (a stray check-llvm costs ~16 GB)
