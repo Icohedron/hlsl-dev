@@ -59,6 +59,21 @@ HD_OPT_LLVM=""
 hd_pin_clear "$offload"
 check "dep: cleared pins fall back again" "$(hd_dep llvm "$offload")" "$llvm"
 
+# A pin is a memory, not an instruction: one that no longer resolves must not
+# take the checkout down with it. This is what a store written against another
+# path looks like -- the dev container reading pins the host wrote.
+printf 'LLVM=%s\n' "/elsewhere/hlsl-dev/llvm-project" >"$(hd_pin_file "$offload")"
+check "dep: a stale pin falls back" "$(hd_dep llvm "$offload" 2>/dev/null)" "$llvm"
+contains "dep: and says so" "$(hd_dep llvm "$offload" 2>&1 >/dev/null)" \
+    "is pinned to the llvm-project checkout"
+hd_pin_clear "$offload"
+
+# An explicit --llvm is not a memory, and still fails loudly.
+HD_OPT_LLVM=/elsewhere/hlsl-project
+contains "dep: an explicit spec still fails" \
+    "$( (hd_dep llvm "$offload") 2>&1 || true)" "no llvm-project worktree matches"
+HD_OPT_LLVM=""
+
 # --- build directories ------------------------------------------------------
 check "build dir: default"     "$(hd_build_dir "$llvm")" "$llvm/build"
 check "dist prefix: default"   "$(hd_dist_prefix "$llvm")" "$llvm/build-dist/install"
@@ -74,6 +89,30 @@ HD_DRY_RUN=1 hd_pin_set "$llvm" DXC "/other/bin"
 check "pin: a dry run writes nothing" "$(hd_pin_get "$llvm" DXC)" "/some/bin"
 hd_pin_clear "$llvm"
 check "pin: cleared" "$(hd_pin_get "$llvm" DXC)" ""
+
+# What is inside the workspace is stored relative to it, so the same store
+# read through another path -- /workspaces/hlsl-dev in the dev container --
+# still names the same checkouts.
+hd_pin_set "$offload" LLVM "$root/llvm-project.pinned"
+check "pin: a workspace path is stored relative" \
+    "$(sed -n 's/^LLVM=//p' "$(hd_pin_file "$offload")")" "./llvm-project.pinned"
+check "pin: and comes back absolute" \
+    "$(hd_pin_get "$offload" LLVM)" "$root/llvm-project.pinned"
+
+# Anything else is left alone: a dxc outside the tree, or a word like "nix".
+hd_pin_set "$offload" DXC nix
+check "pin: a word is stored as it is" \
+    "$(sed -n 's/^DXC=//p' "$(hd_pin_file "$offload")")" "nix"
+check "pin: and read back as it is" "$(hd_pin_get "$offload" DXC)" "nix"
+
+# A store written before pins were relative migrates on the next write.
+printf 'LLVM=%s\nBUILD_TYPE=Debug\n' "$root/llvm-project.pinned" >"$(hd_pin_file "$offload")"
+hd_pin_set "$offload" GOLDEN "$root/offload-golden-images"
+check "pin: an absolute store is rewritten" \
+    "$(sed -n 's/^LLVM=//p' "$(hd_pin_file "$offload")")" "./llvm-project.pinned"
+check "pin: without disturbing the scalars" \
+    "$(hd_pin_get "$offload" BUILD_TYPE)" "Debug"
+hd_pin_clear "$offload"
 
 # --- prerequisites ----------------------------------------------------------
 HD_DRY_RUN=1 HD_AUTO=1

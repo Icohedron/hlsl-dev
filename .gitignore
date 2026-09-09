@@ -4,6 +4,9 @@ result
 .devenv/
 .devenv.flake.nix
 
+# direnv's cache of the environment `.envrc` loads
+.direnv/
+
 # Uncommitted per-machine overrides layered on top of devenv.nix
 devenv.local.nix
 

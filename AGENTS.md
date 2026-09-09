@@ -32,9 +32,11 @@ if it is empty you are outside it and the `hlsl-*` tasks, `cmake`, `ninja`,
 `sccache` and the Vulkan setup will not behave. Enter it with `devenv shell`,
 or prefix a single command with `devenv shell <cmd>`.
 
-There is no direnv and no `.envrc`. For automatic activation on `cd`, devenv's
-own hook does the job: `eval "$(devenv hook bash)"` in `~/.bashrc`, then
-`devenv allow` once in this directory.
+Activation on `cd` is direnv's job here: the workspace ships an `.envrc`
+(`use devenv`), so `eval "$(direnv hook bash)"` in `~/.bashrc` plus one
+`direnv allow` is enough, and that is what the dev container does. devenv's
+own hook works too, but it moves the shell to the project root on activation
+([devenv#3041](https://github.com/cachix/devenv/issues/3041)).
 
 The tasks are commands on PATH, not a subcommand of a runner: `hlsl-build`,
 not `mask build`. `hlsl` lists them all, `hlsl <task>` is an alias for
@@ -123,8 +125,9 @@ hlsl-build && hlsl-test clang-vk        # both keep using them
 ```
 
 Those memories live in `.hlsl-dev/pins/` at the workspace root, never inside a
-checkout, so `git status` in a worktree stays clean. `hlsl-configure --forget`
-drops them.
+checkout, so `git status` in a worktree stays clean. A pin that no longer
+resolves warns and falls through to rule 4 instead of failing.
+`hlsl-configure --forget` drops them.
 
 A worktree spec may be a path, a directory name (`llvm-project.texture-store`),
 just the suffix (`texture-store`), or a branch name. `--dxc` also accepts a

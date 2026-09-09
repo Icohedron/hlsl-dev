@@ -357,7 +357,10 @@ hd_wt_from() {
 # A spec is an absolute or relative path, a path relative to the workspace
 # root, a directory name ("llvm-project.texture-store"), a bare suffix
 # ("texture-store"), or a branch name.
-hd_resolve() {
+#
+# hd_try_resolve is the same lookup without the verdict: it returns 1 instead
+# of printing an error and exiting, for callers that have somewhere else to go.
+hd_try_resolve() {
     local kind=$1 spec=$2 cand="" wt b
     [ -n "$spec" ] || return 1
 
@@ -367,8 +370,7 @@ hd_resolve() {
         cand=$(hd_abs "$HD_ROOT/$spec")
     fi
     if [ -n "$cand" ]; then
-        [ "$(hd_kind "$cand")" = "$kind" ] ||
-            hd_die "$cand is not a $(hd_kind_label "$kind") checkout"
+        [ "$(hd_kind "$cand")" = "$kind" ] || return 1
         printf '%s\n' "$cand"
         return 0
     fi
@@ -384,6 +386,28 @@ hd_resolve() {
         fi
     done <<< "$(hd_worktrees "$kind")"
 
+    return 1
+}
+
+hd_resolve() {
+    local kind=$1 spec=$2 wt cand
+    [ -n "$spec" ] || return 1
+
+    if wt=$(hd_try_resolve "$kind" "$spec") && [ -n "$wt" ]; then
+        printf '%s\n' "$wt"
+        return 0
+    fi
+
+    # A directory that is there but is the wrong thing deserves to be said so.
+    cand=""
+    if [ -d "$spec" ]; then
+        cand=$(hd_abs "$spec")
+    elif [ -d "$HD_ROOT/$spec" ]; then
+        cand=$(hd_abs "$HD_ROOT/$spec")
+    fi
+    [ -z "$cand" ] ||
+        hd_die "$cand is not a $(hd_kind_label "$kind") checkout"
+
     printf 'error: no %s worktree matches '\''%s'\''. Known worktrees:\n' \
         "$(hd_kind_label "$kind")" "$spec" >&2
     hd_worktrees "$kind" | sed 's|^|         |' >&2
@@ -396,6 +420,32 @@ hd_resolve() {
 # Cross-worktree choices are remembered outside the checkouts, in
 # $HD_ROOT/.hlsl-dev/pins/<key>.env, so that `git status` inside a worktree
 # stays clean and two agents never write to the same file.
+#
+# A value that names something inside the workspace is stored relative to the
+# workspace root, spelled "./<path>", because the same store is read through
+# more than one path: the dev container mounts the workspace at
+# /workspaces/<name> while the host has it wherever it cloned it, and an
+# absolute pin written on one side resolves to nothing on the other. Values
+# that are not workspace paths -- BUILD_TYPE, MODE, a dxc outside the tree,
+# the literal "nix" -- are stored as they are.
+
+# hd_pin_rel <value> -> the value as it is stored.
+hd_pin_rel() {
+    case "$1" in
+    "$HD_ROOT") printf '.\n' ;;
+    "$HD_ROOT"/*) printf './%s\n' "${1#"$HD_ROOT"/}" ;;
+    *) printf '%s\n' "$1" ;;
+    esac
+}
+
+# hd_pin_abs <value> -> the value as it is used.
+hd_pin_abs() {
+    case "$1" in
+    .) printf '%s\n' "$HD_ROOT" ;;
+    ./*) printf '%s/%s\n' "$HD_ROOT" "${1#./}" ;;
+    *) printf '%s\n' "$1" ;;
+    esac
+}
 
 hd_key() {
     local p=${1%/}
@@ -407,21 +457,34 @@ hd_pin_file() { printf '%s\n' "$(hd_state_dir)/pins/$(hd_key "$1").env"; }
 
 # hd_pin_get <worktree> <KEY>
 hd_pin_get() {
-    local f
+    local f v
     f=$(hd_pin_file "$1")
     [ -f "$f" ] || return 0
-    sed -n "s/^$2=//p" "$f" | tail -n 1
+    v=$(sed -n "s/^$2=//p" "$f" | tail -n 1)
+    [ -n "$v" ] || return 0
+    hd_pin_abs "$v"
 }
 
 # hd_pin_set <worktree> <KEY> <value>   (empty value removes the pin)
+#
+# The other keys are rewritten too, which is what migrates a store written
+# before pins were relative: one configure and the file is portable again.
 hd_pin_set() {
-    local f tmp
+    local f tmp line
     [ -z "${HD_DRY_RUN:-}" ] || return 0
     f=$(hd_pin_file "$1")
     mkdir -p "$(dirname "$f")"
     tmp=$(mktemp "$f.XXXXXX")
-    if [ -f "$f" ]; then grep -v "^$2=" "$f" >"$tmp" || true; fi
-    [ -n "$3" ] && printf '%s=%s\n' "$2" "$3" >>"$tmp"
+    if [ -f "$f" ]; then
+        while IFS= read -r line; do
+            case "$line" in
+            "$2="* | '') continue ;;
+            *=*) printf '%s=%s\n' "${line%%=*}" "$(hd_pin_rel "${line#*=}")" ;;
+            *) printf '%s\n' "$line" ;;
+            esac
+        done <"$f" >"$tmp"
+    fi
+    [ -n "$3" ] && printf '%s=%s\n' "$2" "$(hd_pin_rel "$3")" >>"$tmp"
     mv "$tmp" "$f"
 }
 
@@ -564,6 +627,12 @@ hd_d3d12_flags() {
 #   3. a pin recorded by `hlsl-link` or by the last successful `hlsl-configure`
 #   4. a worktree of that repository checked out on the *same branch name*
 #   5. the submodule checkout in the workspace root
+#
+# 1 and 2 are said out loud, so a spec that resolves to nothing is an error.
+# A pin is only a memory of an earlier command: if what it names has been
+# removed since -- or was never there, as with a store written against another
+# path -- it is dropped with a warning and the search goes on, rather than
+# every command in that checkout failing until someone runs --forget.
 
 hd_dep() {
     local kind=$1 from=${2:-} spec="" wt br
@@ -575,12 +644,23 @@ hd_dep() {
     golden) spec=$HD_OPT_GOLDEN ;;
     esac
 
-    if [ -z "$spec" ] && [ -n "$from" ]; then
-        spec=$(hd_pin_get "$from" "$(printf '%s' "$kind" | tr '[:lower:]' '[:upper:]')")
-    fi
     if [ -n "$spec" ]; then
         hd_resolve "$kind" "$spec"
         return
+    fi
+
+    if [ -n "$from" ]; then
+        spec=$(hd_pin_get "$from" "$(printf '%s' "$kind" | tr '[:lower:]' '[:upper:]')")
+        if [ -n "$spec" ]; then
+            if wt=$(hd_try_resolve "$kind" "$spec") && [ -n "$wt" ]; then
+                printf '%s\n' "$wt"
+                return 0
+            fi
+            hd_warn "$(basename "$from") is pinned to the $(hd_kind_label "$kind") checkout
+         '$spec', which is not there; ignoring the pin. Point it somewhere else
+         with 'hlsl-configure --$kind <worktree>', or drop it with
+         'hlsl-configure --forget'."
+        fi
     fi
 
     if [ -n "$from" ]; then
@@ -642,6 +722,14 @@ hd_dist_prefix() {
         return 0
     fi
     pinned=$(hd_pin_get "$1" DIST_PREFIX)
+    # A pinned prefix that has not been installed yet is normal -- it is
+    # installed on demand -- but one whose parent does not exist either is a
+    # memory of a directory that is not on this machine (or not at this path).
+    if [ -n "$pinned" ] && [ ! -e "$pinned" ] && [ ! -d "$(dirname "$pinned")" ]; then
+        hd_warn "$(basename "$1") is pinned to the LLVM distribution
+         '$pinned', which is not there; using its own instead."
+        pinned=""
+    fi
     if [ -n "$pinned" ]; then
         printf '%s\n' "$pinned"
     else

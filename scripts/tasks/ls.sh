@@ -86,7 +86,10 @@ for kind in llvm dxc offload golden; do
                 esac
                 # A dxc pin is a directory of binaries, and one of the things it
                 # can be is a store path a screen wide; name the checkout it
-                # came from instead, or say where it came from.
+                # came from instead, or say where it came from. Pins inside the
+                # workspace are stored relative to its root ("./llvm-project"),
+                # which is not how the flags are spelled.
+                value=$(hd_pin_abs "$value")
                 case "$value" in
                 "$HD_ROOT"/*) value=${value#"$HD_ROOT"/} ;;
                 "${HLSL_DXC_PREBUILT_DIR:-/nonexistent}") value="(the prebuilt dxc)" ;;

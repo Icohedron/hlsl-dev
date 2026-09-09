@@ -22,14 +22,17 @@ devenv info      # what it provides: packages, tasks, environment variables
 ```
 
 If you want the environment to activate automatically whenever you `cd` into
-the workspace, add devenv's shell hook once, then trust this directory:
+the workspace, use direnv: the workspace ships an `.envrc` (`use devenv`), and
+that is what the dev container uses too.
 
 ```bash
-eval "$(devenv hook bash)"   # in ~/.bashrc (or `devenv hook zsh` in ~/.zshrc)
-devenv allow                 # once per checkout; `devenv revoke` undoes it
+eval "$(direnv hook bash)"   # in ~/.bashrc, then `direnv allow` once
 ```
 
-fish and nushell load the hook by themselves. No direnv, no `.envrc`.
+devenv has a hook of its own (`devenv hook bash`), but it changes the shell's
+working directory to the project root on activation
+([devenv#3041](https://github.com/cachix/devenv/issues/3041)), so direnv is
+less annoying to use.
 
 ## Quickstart
 
@@ -181,7 +184,8 @@ A dependency is resolved in this order, first match wins:
 Those memories live in `.hlsl-dev/pins/` at the workspace root, never inside
 the checkouts, so `git status` in a worktree stays clean.
 `hlsl-configure --forget` drops them, and `hlsl-info` shows what a directory
-currently resolves to.
+currently resolves to. A pin that no longer resolves is a warning, not an
+error: resolution carries on at rule 4.
 
 A worktree spec can be a path, a directory name
 (`llvm-project.texture-store`), just the suffix (`texture-store`), or a branch
