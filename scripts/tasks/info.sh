@@ -44,4 +44,17 @@ offload)
     ;;
 esac
 
+# What an editor's clangd will find: the root symlink is the only place it
+# looks that does not depend on the build directory being called `build`.
+# Refreshing it here makes `hlsl-info` the answer to "why is clangd dead?".
+hd_link_cdb "$wt" "$(hd_build_dir "$wt")"
+cdb="$wt/compile_commands.json"
+if [ -L "$cdb" ]; then
+    printf '%-16s %s -> %s\n' "clangd db" "$cdb" "$(readlink "$cdb")"
+elif [ -f "$cdb" ]; then
+    printf '%-16s %s (a file of your own; left alone)\n' "clangd db" "$cdb"
+else
+    printf '%-16s %s\n' "clangd db" "none yet (written by the next configure)"
+fi
+
 printf '%-16s %s\n' "pins" "$(hd_pin_file "$wt")"

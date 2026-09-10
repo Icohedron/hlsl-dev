@@ -559,9 +559,13 @@ in
     # It is the *name* rather than one directory, so it holds for every
     # worktree: what `hlsl-ls` calls built in here is what is built in here,
     # and the same command on the host still reports the host's trees. What
-    # they do share is the memory of what builds against what, and
+    # they do share is the memory of what builds against what,
     # <llvm worktree>/build-dist, the plain-LLVM distribution an offload
-    # worktree builds against.
+    # worktree builds against, and <worktree>/compile_commands.json -- the
+    # symlink a configure leaves at the root of the worktree, because clangd
+    # looks in `build/` and its own directory and nowhere else, so an editor
+    # opened on the host would otherwise never find what was built in here
+    # (see hd_link_cdb in scripts/hlsl-dev.sh).
     containerEnv.HLSL_BUILD_DIR_NAME = "build-container";
 
     # Empty when unset on the host, which offloader-scripts reads as "no token".

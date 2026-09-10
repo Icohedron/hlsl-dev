@@ -166,6 +166,12 @@ build of the same upstream sources is mostly cache hits.
 
 ## Code intelligence
 
+A configure links the build's `compile_commands.json` to the root of the
+worktree (`<worktree>/compile_commands.json -> build-container/...`), because
+clangd only looks in the worktree, its parents and their `build/` — not in the
+container's `build-container/`. `hlsl-info` shows where it points; `hlsl-clean`
+removes it with the build tree. Never commit it (it is in `info/exclude`).
+
 Prefer the `codegraph_*` tools over grepping multi-gigabyte source trees for
 architecture, symbol, caller/callee and impact questions. Index scopes are in
 `scripts/codegraph-{llvm,dxc,offload}.json`. If a worktree has no index, run

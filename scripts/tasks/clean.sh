@@ -21,6 +21,10 @@ if [ -d "$build" ]; then
     rm -rf "$build"
 fi
 
+# Repoint (or drop) the compile_commands.json link the editors read, so a
+# clean never leaves clangd following a database that is no longer there.
+hd_link_cdb "$wt"
+
 if [ -n "${dist:-}" ] && [ "$(hd_kind "$wt")" = "llvm" ]; then
     for d in "$(hd_dist_build_dir "$wt")" "$(hd_dist_prefix "$wt")"; do
         [ -d "$d" ] || continue

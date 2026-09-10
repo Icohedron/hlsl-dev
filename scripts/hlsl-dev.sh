@@ -947,6 +947,51 @@ hd_git_exclude() {
     done
 }
 
+# hd_link_cdb <worktree> [build dir] -- keep <worktree>/compile_commands.json
+# pointing at a compilation database an editor can actually find.
+#
+# clangd looks for compile_commands.json beside the file it is editing, in the
+# parent directories, and in a `build/` subdirectory of each -- and nowhere
+# else. That is fine while the build directory is called `build`, but the dev
+# container sets $HLSL_BUILD_DIR_NAME=build-container, so a worktree only ever
+# built in there has its database in a directory no editor looks in: open the
+# same tree from the host and clangd has no flags, no index and no navigation.
+# A symlink at the root of the worktree is found by both, whatever the build
+# directory is called, and git never sees it (hd_git_exclude above lists it).
+#
+# The link follows the tree most recently configured or built: the two
+# databases describe the same sources and differ only in what the environment
+# detected (D3D12 under WSL, for instance), so either serves an editor, and
+# "the one I last worked in" is the least surprising answer. A real file is
+# left alone -- that one is the developer's own.
+hd_link_cdb() {
+    local wt=$1 build=${2:-} link target cand newest=""
+    [ -z "${HD_DRY_RUN:-}" ] || return 0
+    link="$wt/compile_commands.json"
+    [ ! -e "$link" ] || [ -L "$link" ] || return 0
+
+    if [ -n "$build" ] && [ -f "$build/compile_commands.json" ]; then
+        target="$build/compile_commands.json"
+    else
+        # Whichever build directory of this worktree has the newest database:
+        # what heals a worktree the *other* environment configured.
+        for cand in "$wt"/build*/compile_commands.json; do
+            [ -f "$cand" ] || continue
+            [ -z "$newest" ] || [ "$cand" -nt "$newest" ] || continue
+            newest=$cand
+        done
+        target=$newest
+    fi
+
+    if [ -z "$target" ]; then
+        # Nothing to point at (a fresh or just-cleaned worktree): do not leave
+        # a dangling link behind for clangd to trip over.
+        [ -L "$link" ] && [ ! -e "$link" ] && rm -f "$link"
+        return 0
+    fi
+    ln -sfn "${target#"$wt"/}" "$link" 2>/dev/null || true
+}
+
 # ---------------------------------------------------------------------------
 # clang-format pre-commit hook
 # ---------------------------------------------------------------------------
@@ -1407,6 +1452,7 @@ hd_configure_llvm() {
     hd_cmake_flags HLSL_CMAKE_FLAGS_LLVM
     while IFS= read -r flag; do HD_FLAGS+=("$flag"); done <<< "$(hd_d3d12_flags)"
     hd_run cmake -S "$wt/llvm" -B "$build" "${HD_FLAGS[@]}"
+    hd_link_cdb "$wt" "$build"
 
     hd_record "$wt" BUILD_TYPE "$HD_BUILD_TYPE" OFFLOAD "$offload" DXC "$dxcbin"
 }
@@ -1429,6 +1475,7 @@ hd_configure_dxc() {
     hd_lock "$build"
     hd_cmake_flags HLSL_CMAKE_FLAGS_DXC
     hd_run cmake -S "$wt" -B "$build" "${HD_FLAGS[@]}"
+    hd_link_cdb "$wt" "$build"
 
     hd_record "$wt" BUILD_TYPE "$HD_BUILD_TYPE"
 }
@@ -1478,6 +1525,7 @@ hd_configure_offload() {
     hd_cmake_flags HLSL_CMAKE_FLAGS_OFFLOAD
     while IFS= read -r flag; do HD_FLAGS+=("$flag"); done <<< "$(hd_d3d12_flags)"
     hd_run cmake -S "$wt" -B "$build" "${HD_FLAGS[@]}"
+    hd_link_cdb "$wt" "$build"
 
     hd_record "$wt" BUILD_TYPE "$HD_BUILD_TYPE" LLVM "$llvm" DXC "$dxcbin"
     if [ -n "${HD_OPT_DIST_PREFIX:-}" ]; then
@@ -1567,6 +1615,7 @@ hd_build() {
     done
     hd_ensure_configured "$wt"
     build=$(hd_build_dir "$wt")
+    hd_link_cdb "$wt" "$build"
     hd_lock "$build"
     if [ "${#targets[@]}" -gt 0 ]; then
         hd_log "building ${targets[*]} in $build"

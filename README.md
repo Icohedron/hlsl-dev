@@ -192,6 +192,32 @@ A worktree spec can be a path, a directory name
 name. `--dxc` additionally accepts a directory containing `dxc`/`dxv`, or `nix`
 for the compiler that ships with the environment.
 
+### clangd
+
+Every build exports a compilation database (`CMAKE_EXPORT_COMPILE_COMMANDS`),
+and a configure links it into the root of the worktree:
+
+```
+llvm-project.texture1d/compile_commands.json -> build-container/compile_commands.json
+```
+
+clangd looks for that file beside the file being edited, in the parent
+directories, and in a `build/` subdirectory of each — nowhere else. A worktree
+built in the dev container keeps its database in `build-container/`
+(`$HLSL_BUILD_DIR_NAME`), which none of those places is, so an editor opened on
+the host finds nothing and clangd runs with no flags: no includes, no
+navigation, errors everywhere. The symlink is the one path both sides find,
+whatever the build directory is called, and it is in the checkout's
+`info/exclude`, so `git status` stays clean.
+
+It follows the build tree most recently configured or built. When the
+environment you are in has no build directory of its own it falls back to
+whatever database the worktree does have — which is what heals a worktree the
+*other* side configured — and `hlsl-clean` takes the link away with the build
+tree rather than leaving clangd chasing a database that is gone. `hlsl-info`
+prints where it points, and a real `compile_commands.json` you put there
+yourself is left alone.
+
 ### Code intelligence (CodeGraph)
 
 [CodeGraph](https://github.com/colbymchenry/codegraph) gives agents a symbol

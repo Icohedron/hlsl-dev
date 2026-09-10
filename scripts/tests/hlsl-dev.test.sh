@@ -105,6 +105,52 @@ check "build dir: \$HLSL_BUILD_DIR still wins for the target" \
     "$(hd_build_dir "$llvm")" "$llvm/build-debug"
 HD_WT="" HD_OPT_BUILD_DIR="" HLSL_BUILD_DIR_NAME=""
 
+# --- the compilation database an editor can find ----------------------------
+# clangd looks beside the file, in the parents, and in their `build/` -- so a
+# worktree built only in the dev container (build-container) leaves an editor
+# opened on the host with no database at all. The root symlink is what both
+# find, whatever the build directory is called.
+cdb=$llvm/compile_commands.json
+hd_link_cdb "$llvm" "$llvm/build-container"
+check "cdb: nothing to point at yet" "$(readlink "$cdb" 2>/dev/null)" ""
+
+mkdir -p "$llvm/build-container"
+: >"$llvm/build-container/compile_commands.json"
+hd_link_cdb "$llvm" "$llvm/build-container"
+check "cdb: linked, relatively" "$(readlink "$cdb")" "build-container/compile_commands.json"
+check "cdb: and it resolves" "$([ -f "$cdb" ] && echo yes)" "yes"
+
+# The tree you just configured wins over the other environment's.
+mkdir -p "$llvm/build"
+: >"$llvm/build/compile_commands.json"
+hd_link_cdb "$llvm" "$llvm/build"
+check "cdb: follows the last configure" "$(readlink "$cdb")" "build/compile_commands.json"
+
+# ... but a build directory this environment has not created falls back to
+# whatever database the worktree does have.
+rm -rf "$llvm/build"
+hd_link_cdb "$llvm" "$llvm/build"
+check "cdb: falls back to the other build tree" "$(readlink "$cdb")" \
+    "build-container/compile_commands.json"
+
+# A clean leaves no dangling link for clangd to trip over.
+rm -rf "$llvm/build-container"
+hd_link_cdb "$llvm" "$llvm/build"
+check "cdb: cleaned away with the build" "$([ -e "$cdb" ] || [ -L "$cdb" ] && echo left)" ""
+
+# A real file there is the developer's own; never replace it.
+printf '[]\n' >"$cdb"
+mkdir -p "$llvm/build"
+: >"$llvm/build/compile_commands.json"
+hd_link_cdb "$llvm" "$llvm/build"
+check "cdb: a real file is left alone" "$([ -L "$cdb" ] && echo link || echo file)" "file"
+rm -f "$cdb"
+
+HD_DRY_RUN=1 hd_link_cdb "$llvm" "$llvm/build"
+check "cdb: a dry run writes nothing" "$([ -e "$cdb" ] && echo made)" ""
+HD_DRY_RUN=""
+rm -rf "$llvm/build"
+
 # --- pins -------------------------------------------------------------------
 hd_pin_set "$llvm" DXC "/some/bin"
 check "pin: roundtrip" "$(hd_pin_get "$llvm" DXC)" "/some/bin"
