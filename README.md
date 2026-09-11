@@ -669,6 +669,41 @@ HLSL_DIA_SDK=/opt/dia-sdk hlsl-build --platform windows-x64 dxc
 
 
 
+### Packaging one test for a bug report
+
+A whole suite is the wrong thing to attach to an issue. `hlsl-repro` takes the
+tests you name and produces a self-contained archive that reproduces them:
+
+```bash
+hlsl-repro Feature/HLSLLib/log2.32.test
+hlsl-repro --suite clang-d3d12 Feature/HLSLLib/log2.32.test Feature/HLSLLib/exp2.32.test
+hlsl-repro --platform windows-x64 --suite vk Feature/Basic/DescriptorTable.test
+```
+
+Inside is the same install prefix as `hlsl-package`, with the test tree cut
+down to what was named (each test, the `lit.local.cfg` files above it, the
+golden images), plus three things a bug report needs:
+
+- **`REPRO.md`** — what it is, the exact revision of every checkout it was
+  built from (`llvm-project`, `offload-test-suite`, the golden images), the
+  platform, the suite, the build type, the DXC that built it, the Vulkan
+  driver and D3D12 setting for a native build, the RUN lines of each test, and
+  a "What happened here" section to fill in.
+- **`run-nolit.sh` / `run-nolit.cmd`** — the tests' own RUN lines with lit's
+  substitutions already applied, against the binaries in `bin/`. **No Python,
+  no pip, no lit**: a graphics driver and the archive are the whole
+  dependency list. A test using a substitution this expansion does not know is
+  left out of the script and named in `REPRO.md` rather than guessed at.
+- **`run.sh` / `run.cmd`** — the same tests through lit, which is what CI runs
+  and therefore the authority on feature detection and XFAILs. This is the
+  path that wants Python with `lit` and `pyyaml`; an argument overrides the
+  suite and anything after it goes to `configure-test-suite.py`
+  (`--dxc-path …`).
+
+Pick a `clang-*` suite when the compiler under test should be the one in the
+archive; the DXC-compiled suites (`d3d12`, `vk`, `mtl`) need a `dxc` for that
+machine as well, which `REPRO.md` says.
+
 ### What the suite needs on the other side
 
 The offload test suite refuses to configure without a runtime API for the

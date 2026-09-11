@@ -109,6 +109,7 @@ hlsl-codegraph               # index/refresh the current worktree for CodeGraph
 hlsl-cross                   # cross-compilation: platforms, toolchains, licence
 hlsl-build --platform windows-x64 clang    # build for another machine
 hlsl-package --platform windows-x64        # zip up tools+tests to run there
+hlsl-repro Feature/HLSLLib/log2.32.test    # one test + tools + provenance, for a bug
 hlsl-package --in DirectXShaderCompiler --platform windows-x64   # its dxc prefix
 ```
 
