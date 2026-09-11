@@ -134,6 +134,30 @@ rm -rf "$repro"
 mkdir -p "$repro/share/hlsl-test-suite/test"
 cp -a "$prefix/bin" "$repro/bin"
 [ -d "$prefix/lib" ] && cp -a "$prefix/lib" "$repro/lib"
+
+# LLVM's driver aliases are symlinks (clang-dxc.exe -> clang.exe). A .zip
+# carries the link and Windows extracts something that will not run, so make
+# them real files first -- and only then drop what these tests never invoke.
+# The order matters: pruning first would break the link that is about to become
+# the compiler.
+hd_materialise_symlinks "$repro/bin"
+
+case "$suite" in
+clang-*) compiler="clang-dxc" ;;
+*) compiler="dxc" ;;
+esac
+keep="offloader api-query imgdiff FileCheck not split-file obj2yaml $compiler"
+dropped=""
+for f in "$repro"/bin/*; do
+    [ -e "$f" ] || continue
+    base=$(basename "$f")
+    case " $keep " in
+    *" ${base%.exe} "*) continue ;;
+    esac
+    dropped="$dropped ${base}"
+    rm -f "$f"
+done
+[ -z "$dropped" ] || hd_log "left out (nothing in these tests runs them):$dropped"
 for f in configure-test-suite.py lit.site.cfg.py.in requirements.txt; do
     [ -e "$prefix/share/hlsl-test-suite/$f" ] &&
         cp -a "$prefix/share/hlsl-test-suite/$f" "$repro/share/hlsl-test-suite/"

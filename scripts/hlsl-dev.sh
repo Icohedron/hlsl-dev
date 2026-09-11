@@ -803,6 +803,30 @@ hd_toolchain_file() {
     printf '%s\n' "$link/toolchain.cmake"
 }
 
+# hd_materialise_symlinks <dir> -- replace every symlink under <dir> with a
+# copy of what it points at.
+#
+# LLVM installs its driver aliases as symlinks (clang-dxc.exe -> clang.exe),
+# which is right on the machine that built them and wrong in an archive bound
+# for Windows: a .zip carries the link, Windows extracts something that is not
+# an executable, and running it fails with "The operation was canceled by the
+# user" -- a message that says nothing about the cause. A real Windows install
+# of LLVM has copies there, so this is what that layout looks like.
+hd_materialise_symlinks() {
+    local dir=$1 link target
+    while IFS= read -r link; do
+        [ -n "$link" ] || continue
+        target=$(readlink -f "$link") || continue
+        [ -e "$target" ] || {
+            hd_warn "dropping $link: it points at $target, which is not here"
+            rm -f "$link"
+            continue
+        }
+        rm -f "$link"
+        cp -a "$target" "$link"
+    done <<< "$(find "$dir" -type l)"
+}
+
 # ---------------------------------------------------------------------------
 # Host tools for a cross build
 # ---------------------------------------------------------------------------

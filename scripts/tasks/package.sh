@@ -59,6 +59,31 @@ if [ "$kind" = "llvm" ]; then
     hd_build "$wt" install-distribution install-offload-tools install-offload-test-suite
     prefix="$build/install"
     default_archive="$build/hlsl-$label.$ext"
+
+    # A Windows archive cannot carry LLVM's driver symlinks (clang-dxc.exe ->
+    # clang.exe): what comes out of the .zip on the other side is not an
+    # executable. Stage a copy of the prefix and make them real files -- which
+    # is what a Windows install of LLVM has anyway. The staging copy is also
+    # why the install prefix itself is left untouched.
+    if [ "$(hd_platform_os "$platform")" = "windows" ] && [ -z "${HD_DRY_RUN:-}" ]; then
+        staged="$build/package"
+        hd_log "staging $prefix with its symlinks made into copies"
+        rm -rf "$staged"
+        cp -a "$prefix" "$staged"
+        hd_materialise_symlinks "$staged"
+
+        # ... but not five copies of a 135 MB binary. clang, clang++, clang-cl,
+        # clang-cpp and clang-dxc are one executable choosing a driver from its
+        # own name; the suite calls clang-dxc, a person poking at the failure
+        # calls clang, and the other three are `copy clang.exe clang-cl.exe`
+        # away on the target if anyone ever wants them.
+        for f in clang++ clang-cl clang-cpp; do
+            [ -e "$staged/bin/$f.exe" ] || continue
+            rm -f "$staged/bin/$f.exe"
+            hd_log "left out of the archive: bin/$f.exe (a copy of clang.exe)"
+        done
+        prefix=$staged
+    fi
 else
     # DXC has no install target that produces this: `ninja install` walks every
     # cmake_install.cmake (including LLVM tools that the default target never

@@ -590,16 +590,25 @@ hlsl-package --platform linux-arm64      # -> hlsl-linux-arm64.tar.gz
 In an llvm-project checkout it runs the three install targets
 (`install-distribution`,
 `install-offload-tools`, `install-offload-test-suite`) into
-`<build dir>/install` and archives that prefix — for `windows-x64`, 79 MB
+`<build dir>/install` and archives that prefix — for `windows-x64`, 130 MB
 zipped:
 
 ```
-bin/          clang.exe, offloader.exe, api-query.exe, imgdiff.exe,
-              FileCheck.exe, not.exe, obj2yaml.exe, split-file.exe
+bin/          clang.exe, clang-dxc.exe, offloader.exe, api-query.exe,
+              imgdiff.exe, FileCheck.exe, not.exe, obj2yaml.exe, split-file.exe
 lib/clang/<ver>/include/    the HLSL resource headers
 share/hlsl-test-suite/      the tests, the golden images,
                             configure-test-suite.py and the lit template
 ```
+
+A Windows archive carries **no symlinks**, because a `.zip` that does produces
+something Windows will not run — PowerShell reports it as *"The operation was
+canceled by the user"*, which says nothing about the cause. LLVM installs its
+driver aliases as links (`clang-dxc.exe -> clang.exe`), so packaging makes them
+real files, as an install on Windows would. `clang++.exe`, `clang-cl.exe` and
+`clang-cpp.exe` are left out rather than shipped as three more copies of a
+135 MB binary; on the target they are one `copy clang.exe clang-cl.exe` away.
+`hlsl-repro` goes further and keeps only the tools its tests invoke.
 
 The archive is written inside the build tree, so it is never something `git
 status` has an opinion about, and `--out <path>` puts it somewhere else.
