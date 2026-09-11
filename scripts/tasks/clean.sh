@@ -9,7 +9,7 @@ distribution build and install prefix of an llvm worktree).
 
 Never clean a worktree somebody else is building in: concurrent builds of the
 same build directory are serialised by a lock, but a removal is not."
-HD_TASK_OPTS="in= dist"
+HD_TASK_OPTS="in= platform= dist"
 hd_parse "$@"
 hd_init
 

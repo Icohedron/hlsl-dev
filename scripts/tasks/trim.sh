@@ -25,7 +25,7 @@ instead of a hard-coded list. Named targets replace the default set:
 Nothing is lost that a link step cannot make again: the next build asking for
 one of these targets rebuilds it. Only ELF files are considered, so llvm-lit
 and the other scripts in bin/ stay put whatever the graph says."
-HD_TASK_OPTS="in= dry_run"
+HD_TASK_OPTS="in= platform= dry_run"
 hd_parse "$@"
 hd_init
 

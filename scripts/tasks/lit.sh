@@ -10,7 +10,7 @@ tests, or offload tests addressed through the build tree.
 
 Paths are taken as given (relative to the current directory), so
 'hlsl-lit clang/test/CodeGenHLSL' works from inside an llvm worktree."
-HD_TASK_OPTS="in= lit_args="
+HD_TASK_OPTS="in= lit_args= platform="
 hd_parse "$@"
 hd_need_args 1
 hd_init

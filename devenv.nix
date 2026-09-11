@@ -87,9 +87,14 @@ let
   #   HD_DXC_BIN_DIR     directory containing dxc/dxv
   #   HD_OFFLOAD_SRC     offload-test-suite worktree
   #   HD_GOLDEN_DIR      offload-golden-images worktree
+  #   HD_TOOLCHAIN_FILE  CMake toolchain file of the cross platform being built
+  #   HD_TARGET_TRIPLE   triple that cross build produces binaries for
+  #   HD_NATIVE_TOOL_DIR host-built llvm-tblgen/clang-tblgen a cross build runs
+  #   HD_SEMI            a literal ';' -- how a CMake *list* value is written
+  #                      here, since a template may not contain one
   #
-  # Keep the placeholders free of spaces and shell metacharacters; the expander
-  # rejects anything fancier on purpose.
+  # Keep the placeholders free of whitespace and shell metacharacters; the
+  # expander rejects anything fancier on purpose.
 
   # Shared by every build we drive.
   commonCMakeFlags = [
@@ -189,6 +194,164 @@ let
     "-C $HD_DXC_SRC/cmake/caches/PredefinedParams.cmake"
   ];
 
+  # ----------------------------------------------------------------------
+  # Cross-compilation
+  # ----------------------------------------------------------------------
+  # `hlsl-build --platform windows-x64` (and linux-arm64, windows-arm64)
+  # appends these to the flags above, so a cross build is
+  # the native one plus a toolchain file and the handful of decisions that
+  # change when the binaries are not for this machine. Later -D flags win, so
+  # each list may overrule the native answer above it.
+  #
+  # The toolchain files themselves are scripts/cross/toolchains.nix, built on
+  # demand rather than from here: the MSVC SDK alone is gigabytes, and most
+  # sessions never cross-compile. HLSL_NIXPKGS_PATH below is what lets that
+  # file use this environment's pinned nixpkgs.
+  crossCMakeFlags = [
+    "-DCMAKE_TOOLCHAIN_FILE=$HD_TOOLCHAIN_FILE"
+
+    # Optional host libraries LLVM would otherwise pick up from *this*
+    # machine. Cross-building them as well buys nothing for a compiler that is
+    # being checked for portability, and each is a way for a native path to
+    # leak into the link.
+    "-DLLVM_ENABLE_ZLIB=OFF"
+    "-DLLVM_ENABLE_ZSTD=OFF"
+    "-DLLVM_ENABLE_LIBXML2=OFF"
+    "-DLLVM_ENABLE_LIBEDIT=OFF"
+    "-DLLVM_ENABLE_TERMINFO=OFF"
+    "-DLLVM_INCLUDE_BENCHMARKS=OFF"
+
+    # clang-tidy runs the *host* clang over the sources; with a cross toolchain
+    # in front of it, its findings are about the wrong platform.
+    "-DOFFLOADTEST_USE_CLANG_TIDY=OFF"
+
+    # Nothing built here is run here, so the test suites that need external
+    # tools on the *target* (spirv-dis, the DXIL validator) would only add
+    # dependencies on binaries that cannot exist in a cross tree -- the
+    # configure fails on "the dependency target spirv-dis does not exist"
+    # rather than on anything about the compiler.
+    "-DLLVM_INCLUDE_SPIRV_TOOLS_TESTS=OFF"
+    "-DLLVM_INCLUDE_DXIL_TESTS=OFF"
+
+    # Split DWARF is on natively to keep the build tree from being mostly
+    # duplicated debug info, but it is a post-link objcopy step, and the cross
+    # binutils refuse it ("symbol table '.symtab' cannot be removed because it
+    # is referenced by .rela.debug_info.dwo"). A cross tree is built to be
+    # taken elsewhere, not to be debugged here, so it is not worth a fight.
+    "-DLLVM_USE_SPLIT_DWARF=OFF"
+  ];
+
+  # Extra flags for the builds that compile LLVM itself (the integrated build
+  # and the standalone distribution). A cross build cannot run the tablegens it
+  # needs, so it is handed the ones built for this machine
+  # (see hd_ensure_native_tools in scripts/hlsl-dev.sh), and it has to be told
+  # what it is producing: LLVM would otherwise ask the build machine.
+  crossLLVMCMakeFlags = [
+    "-DLLVM_NATIVE_TOOL_DIR=$HD_NATIVE_TOOL_DIR"
+    "-DLLVM_HOST_TRIPLE=$HD_TARGET_TRIPLE"
+    "-DLLVM_DEFAULT_TARGET_TRIPLE=$HD_TARGET_TRIPLE"
+  ];
+
+  # The host half of a cross build: the tablegens and generators the cross
+  # build executes. Deliberately minimal -- Release, no assertions, one target
+  # -- because nothing here ships; it exists so the cross compile can run it.
+  # clang-tools-extra is on because the HLSL cache builds it, and its
+  # generators (clang-tidy-confusable-chars-gen, clang-pseudo-gen) are looked
+  # up in the same directory.
+  nativeToolsCMakeFlags = [
+    "-G Ninja"
+    "-DCMAKE_BUILD_TYPE=Release"
+    "-DCMAKE_C_COMPILER_LAUNCHER=${pkgs.sccache}/bin/sccache"
+    "-DCMAKE_CXX_COMPILER_LAUNCHER=${pkgs.sccache}/bin/sccache"
+    "-DLLVM_ENABLE_PROJECTS=clang\${HD_SEMI}clang-tools-extra"
+    "-DLLVM_TARGETS_TO_BUILD=Native"
+    "-DLLVM_ENABLE_ASSERTIONS=OFF"
+    "-DLLVM_INCLUDE_TESTS=OFF"
+    "-DLLVM_INCLUDE_BENCHMARKS=OFF"
+    "-DLLVM_ENABLE_LLD=ON"
+  ];
+
+  # Linux targets: the cross gcc comes with its own linker, and pointing LLVM
+  # at the lld *this* machine's clang uses would link host objects.
+  crossLinuxCMakeFlags = [
+    "-DLLVM_ENABLE_LLD=OFF"
+  ];
+
+  # Windows targets. Neither the LLVM nor the Clang dylib exists there (no
+  # default visibility story), and both are on in the native build for the sake
+  # of disk space, so both have to be turned back off here. lld stays on: it is
+  # the only linker for the MSVC ABI on this machine.
+  crossWindowsCMakeFlags = [
+    "-DLLVM_LINK_LLVM_DYLIB=OFF"
+    "-DCLANG_LINK_CLANG_DYLIB=OFF"
+    "-DLLVM_ENABLE_LLD=ON"
+
+    # BLAKE3 ships MASM fast paths for the MSVC ABI, and assembling them wants
+    # Microsoft's ml64, which is not part of the SDK and does not exist on this
+    # machine. LLVM's own switch for exactly this case drops them for the C
+    # implementations.
+    "-DLLVM_DISABLE_ASSEMBLY_FILES=ON"
+
+    # offload-test-suite fetches WARP (Microsoft's software rasterizer) from
+    # NuGet during a Windows configure, and guesses the package architecture
+    # from the generator -- a download in the middle of a configure, and a hard
+    # error when the guess fails. "System" means "whatever is on the machine
+    # that runs the tests", which is the right answer for binaries that are
+    # going to be carried to another machine anyway.
+    "-DWARP_VERSION=System"
+  ];
+
+  # DXC, cross-compiled. It is an LLVM 3.7 fork, so it predates
+  # LLVM_NATIVE_TOOL_DIR: it builds its own host tools by configuring a second
+  # CMake project under <build>/NATIVE, and that one inherits the cross
+  # compiler unless CROSS_TOOLCHAIN_FLAGS_NATIVE says otherwise -- clang-cl
+  # with no Windows SDK, building for this machine, which fails immediately.
+  # That sub-build is configured with only the flags named here -- not with
+  # DXC's own cache file -- so anything DXC relies on has to be repeated:
+  # exceptions and RTTI above all, since DXC's ilist.h has an unconditional
+  # try/catch and LLVM's default is -fno-exceptions ("cannot use 'try' with
+  # exceptions disabled", while building llvm-tblgen).
+  crossDXCCMakeFlags = [
+    (
+      "-DCROSS_TOOLCHAIN_FLAGS_NATIVE="
+      + "-DCMAKE_C_COMPILER=clang\${HD_SEMI}"
+      + "-DCMAKE_CXX_COMPILER=clang++\${HD_SEMI}"
+      + "-DLLVM_ENABLE_EH=ON\${HD_SEMI}"
+      + "-DLLVM_ENABLE_RTTI=ON\${HD_SEMI}"
+      + "-DLLVM_INCLUDE_TESTS=OFF"
+    )
+  ];
+
+  # DXC's PDB support uses Microsoft's DIA SDK, which ships with Visual Studio
+  # rather than with the Windows SDK, so nixpkgs' windows.sdk does not have it
+  # and there is nothing to download. DXC's own FindDiaSDK looks at
+  # MSVC_DIA_SDK_DIR, so a copy taken from a Windows machine ($HLSL_DIA_SDK) is
+  # the way through; without one, a DXC build for an MSVC platform stops at
+  # "Could NOT find DiaSDK".
+  crossDXCDiaCMakeFlags = [
+    "-DMSVC_DIA_SDK_DIR=$HD_DIA_SDK"
+  ];
+
+  # ----------------------------------------------------------------------
+  # flock
+  # ----------------------------------------------------------------------
+  # The build lock (hd_lock in scripts/hlsl-dev.sh) needs one binary out of
+  # util-linux, and putting util-linux itself in `packages` puts *two* of its
+  # outputs in the profile -- `bin` and `out`, which ship the same 119 bash
+  # completions between them. devenv's buildEnv then prints a "colliding
+  # subpath (ignored)" warning per file, over a hundred of them, every time the
+  # environment is rebuilt. Naming the output does not help: buildEnv installs
+  # the extra outputs of whatever derivation it is handed.
+  #
+  # One symlink in a single-output package is the whole fix. The closure is the
+  # same (it points straight into util-linux's bin output); what changes is
+  # that the profile now contains one file instead of a second copy of a
+  # completions directory nothing here uses.
+  flock = pkgs.runCommand "flock" { } ''
+    mkdir -p "$out/bin"
+    ln -s ${pkgs.util-linux.bin}/bin/flock "$out/bin/flock"
+  '';
+
   flagsToString = builtins.concatStringsSep " ";
 in
 {
@@ -209,7 +372,7 @@ in
     cmake
     ninja
     sccache
-    util-linux # flock, used to serialise builds of the same build dir
+    flock # just the one binary; see the note above (util-linux collides)
 
     # Required libraries & headers
     zlib
@@ -248,6 +411,28 @@ in
     HLSL_CMAKE_FLAGS_LLVM_DIST = flagsToString llvmDistCMakeFlags;
     HLSL_CMAKE_FLAGS_OFFLOAD = flagsToString offloadCMakeFlags;
     HLSL_CMAKE_FLAGS_DXC = flagsToString dxcCMakeFlags;
+
+    # Cross-compilation: appended to the lists above, in this order, by
+    # hd_cross_flags. See the "Cross-compilation" section.
+    HLSL_CMAKE_FLAGS_CROSS = flagsToString crossCMakeFlags;
+    HLSL_CMAKE_FLAGS_CROSS_LLVM = flagsToString crossLLVMCMakeFlags;
+    HLSL_CMAKE_FLAGS_CROSS_LINUX = flagsToString crossLinuxCMakeFlags;
+    HLSL_CMAKE_FLAGS_CROSS_WINDOWS = flagsToString crossWindowsCMakeFlags;
+    HLSL_CMAKE_FLAGS_CROSS_DXC = flagsToString crossDXCCMakeFlags;
+    HLSL_CMAKE_FLAGS_CROSS_DXC_DIA = flagsToString crossDXCDiaCMakeFlags;
+    HLSL_CMAKE_FLAGS_NATIVE_TOOLS = flagsToString nativeToolsCMakeFlags;
+
+    # The nixpkgs this environment is pinned to. scripts/cross/toolchains.nix is
+    # built against it by `hlsl-cross`, so a cross toolchain comes from the
+    # same revision as the native one without any of it being realised on shell
+    # entry.
+    #
+    # `toString` on purpose: interpolating would copy the whole nixpkgs tree
+    # into the store a second time, just to have it rooted. Nothing roots this
+    # path, so a garbage collection can take it away -- and that is handled
+    # where it matters, in hd_nixpkgs_path, which fetches the same revision
+    # again from the lock file.
+    HLSL_NIXPKGS_PATH = toString pkgs.path;
 
     # Fallback compiler for offload runs when no DirectXShaderCompiler worktree
     # has been built yet (`--dxc nix` selects it explicitly).
@@ -367,6 +552,23 @@ in
         for v in HLSL_CMAKE_FLAGS_LLVM_DIST HLSL_CMAKE_FLAGS_OFFLOAD HLSL_CMAKE_FLAGS_DXC; do
           test -n "''${!v}" || { echo "$v is empty" >&2; exit 1; }
         done
+
+        # Cross-compilation: the same templates, plus the pinned nixpkgs the
+        # toolchains are built from (a store path, not a channel).
+        for v in HLSL_CMAKE_FLAGS_CROSS HLSL_CMAKE_FLAGS_CROSS_LLVM \
+                 HLSL_CMAKE_FLAGS_CROSS_LINUX HLSL_CMAKE_FLAGS_CROSS_WINDOWS \
+                 HLSL_CMAKE_FLAGS_CROSS_DXC \
+                 HLSL_CMAKE_FLAGS_CROSS_DXC_DIA HLSL_CMAKE_FLAGS_NATIVE_TOOLS; do
+          test -n "''${!v}" || { echo "$v is empty" >&2; exit 1; }
+        done
+        case "$HLSL_CMAKE_FLAGS_CROSS" in
+          *'-DCMAKE_TOOLCHAIN_FILE=$HD_TOOLCHAIN_FILE'*) ;;
+          *) echo "HLSL_CMAKE_FLAGS_CROSS lost its placeholders" >&2; exit 1 ;;
+        esac
+        test -n "$HLSL_NIXPKGS_PATH" || {
+          echo "HLSL_NIXPKGS_PATH is empty" >&2; exit 1; }
+        test -f "$DEVENV_ROOT/scripts/cross/toolchains.nix"
+        hlsl-cross >/dev/null
 
         hlsl-vk
         eval "$(hlsl-vk --export)"

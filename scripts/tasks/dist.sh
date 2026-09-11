@@ -15,7 +15,7 @@ Distribution').
 
 An offload build installs a missing distribution by itself, so the reason to
 run this directly is to *refresh* one after changing Clang. It is incremental."
-HD_TASK_OPTS="in= offload= dist_prefix= build_type= fresh dry_run"
+HD_TASK_OPTS="in= offload= dist_prefix= build_type= platform= jobs= fresh dry_run"
 hd_parse "$@"
 hd_init
 

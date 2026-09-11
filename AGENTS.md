@@ -18,6 +18,7 @@ own — the code lives in git submodules and their worktrees:
 | `compiler-explorer/` | Compiler Explorer, wired to the locally built compilers |
 | `offloader-scripts/` | Python CI monitoring/triage tooling (`offloader-*` tasks) |
 | `scripts/hlsl-dev.sh` | All the real logic: option parsing, worktree/dependency resolution, prerequisites, CMake, locks |
+| `scripts/cross/toolchains.nix` | CMake toolchain files for the cross-compilation platforms, built on demand |
 | `scripts/tasks/*.sh` | One file per task; devenv puts each on PATH as `hlsl-<task>` |
 | `scripts/tests/hlsl-dev.test.sh` | Self-test for the resolution/prerequisite logic (`devenv test`) |
 | `devenv.nix` | The environment: packages, variables, CMake flag *templates* (`$HD_*` placeholders), tasks, dev container |
@@ -104,6 +105,11 @@ hlsl-test clang-vk 'log2.*'  # non-path argument => lit --filter regex
 hlsl-lit clang/test/CodeGenHLSL/RootSignature      # any lit path, from llvm
 
 hlsl-codegraph               # index/refresh the current worktree for CodeGraph
+
+hlsl-cross                   # cross-compilation: platforms, toolchains, licence
+hlsl-build --platform windows-x64 clang    # build for another machine
+hlsl-package --platform windows-x64        # zip up tools+tests to run there
+hlsl-package --in DirectXShaderCompiler --platform windows-x64   # its dxc prefix
 ```
 
 Suites: `d3d12 vk mtl warp-d3d12 clang-d3d12 clang-vk clang-mtl
@@ -152,6 +158,69 @@ that llvm worktree against its sources and work there:
 hlsl-configure --in llvm-project.my-feature --offload offload-test-suite.mine
 hlsl-test --in llvm-project.my-feature clang-vk
 ```
+
+## Cross-compilation
+
+`--platform <name>` (or `$HLSL_PLATFORM`) builds clang and the offload test
+suite for another machine. `hlsl-cross` lists the platforms and what each one
+still needs:
+
+| platform | triple | toolchain |
+|---|---|---|
+| `linux-arm64` | `aarch64-unknown-linux-gnu` | nixpkgs cross gcc |
+| `windows-x64` | `x86_64-pc-windows-msvc` | clang-cl + nixpkgs `windows.sdk` |
+| `windows-arm64` | `aarch64-pc-windows-msvc` | clang-cl + nixpkgs `windows.sdk` |
+
+The Windows platforms carry both runtime APIs: D3D12 from the SDK, and Vulkan
+via a `vulkan-1.lib` the toolchain generates from the loader's own `.def` with
+`llvm-dlltool` (the `.dll` comes from the target machine's Vulkan runtime). So
+`d3d12`, `warp-d3d12`, `vk` and `clang-vk` all exist in a Windows build tree.
+`linux-arm64` has Vulkan only.
+
+```bash
+hlsl-cross --accept-msvc-license          # once: the MSVC SDK is licence-gated
+hlsl-cross --fetch windows-x64            # build its toolchain now, not mid-build
+hlsl-build --platform windows-x64 clang
+hlsl-info  --platform windows-x64         # triple, toolchain, host tools, deps
+hlsl-clean --platform windows-x64         # only the cross tree
+```
+
+Rules that differ from a native build:
+
+1. **The build tree is `<worktree>/build.<platform>`**, with its own
+   distribution (`build-dist.<platform>`) and its own pins, falling back to the
+   native pins for anything not said twice. The native tree is never touched,
+   and `compile_commands.json` keeps pointing at it.
+2. **Tests are refused** (`hlsl-test`, `hlsl-lit`): the binaries are for another
+   machine. Build here, run there.
+3. **The first cross build of an llvm worktree also builds host tablegens**
+   into `<worktree>/build-native-tools` — a cross build cannot run its own.
+4. **Toolchains are built on demand** from `scripts/cross/toolchains.nix`
+   (pinned nixpkgs, cached and GC-rooted in `.hlsl-dev/toolchains/`). Nothing
+   is realised on shell entry. Cross-specific CMake flags are templates in
+   `devenv.nix` (`crossCMakeFlags`, `crossLLVMCMakeFlags`,
+   `crossLinuxCMakeFlags`, `crossWindowsCMakeFlags`, `crossMSVCCMakeFlags`,
+   `nativeToolsCMakeFlags`), appended to the native list so a later `-D` wins.
+5. **The Windows platforms need Microsoft's licence accepted** once
+   (`hlsl-cross --accept-msvc-license`, or `$HLSL_MSVC_LICENSE=accepted` for a
+   single command). There is no licence-free (MinGW, GNU-ABI) Windows platform
+   on purpose: D3D12 comes as MSVC import libraries from the same SDK, so such
+   a build could carry neither the offload suite (no runtime API) nor DXC
+   (`find_package(D3D12 REQUIRED)`).
+6. **`hlsl-package` is how a cross build leaves this machine.** In an llvm
+   worktree it runs `install-distribution` / `install-offload-tools` /
+   `install-offload-test-suite` into `<build dir>/install` and archives it; in
+   a DXC worktree it assembles the curated `bin/` + `lib/` prefix from
+   docs/offload-distribution.md (DXC has no install target that produces it)
+   into `<build dir>/dxc-dist`. Two archives, because Clang's HLSL headers and
+   DXC's collide in one prefix. .zip for Windows, .tar.gz otherwise.
+7. **DXC cross-builds too**, with two caveats: it configures its own
+   `<build>/NATIVE` host build (handled in `crossDXCCMakeFlags`), and for the
+   MSVC platforms it needs Microsoft's DIA SDK, which is not in nixpkgs --
+   copy it off a Windows machine and set `$HLSL_DIA_SDK`.
+8. **`--jobs N` (or `$HLSL_JOBS`) caps parallelism.** The default is one job
+   per core; in a container with a pids limit that is how a build dies as
+   `ninja: fatal: posix_spawn: Resource temporarily unavailable`.
 
 ## Worktrees
 
@@ -232,6 +301,10 @@ hlsl-d3d12 on     # back to detecting it
 | `HLSL_AUTO=0` | never build a missing prerequisite; fail and say what is missing |
 | `HLSL_INSTALL_HOOKS=0` | do not install the clang-format pre-commit hook |
 | `HLSL_VK_DRIVER` | Vulkan ICD for this command, overriding `hlsl-vk` |
+| `HLSL_PLATFORM` | cross-compile for this platform, as if `--platform` had been passed |
+| `HLSL_JOBS` | build this many targets at once, as if `--jobs` had been passed |
+| `HLSL_DIA_SDK` | DIA SDK directory (from a Visual Studio install) for a DXC cross build |
+| `HLSL_MSVC_LICENSE` | `accepted` accepts the Visual Studio licence for one command |
 
 ## Changing the environment
 

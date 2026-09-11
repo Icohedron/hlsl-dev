@@ -21,7 +21,11 @@ repository, in the order dependencies are resolved.
              it out each time: same branch name first, then the submodule
 
 This is an inventory, not a resolution: 'hlsl-info' answers what one checkout
-would build against right now, following all five rules."
+would build against right now, following all five rules.
+
+With --platform it reports that platform's cross build trees instead of this
+machine's; the two live side by side."
+HD_TASK_OPTS="platform="
 hd_parse "$@"
 hd_init
 

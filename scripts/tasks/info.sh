@@ -6,7 +6,7 @@ source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../hlsl-dev.sh"
 
 HD_TASK_DESC="Shows what the current directory (or --in <worktree>) resolves to: the target
 worktree, its build directory, and every dependency a configure would use."
-HD_TASK_OPTS="in= llvm= dxc= offload= dist_prefix="
+HD_TASK_OPTS="in= llvm= dxc= offload= dist_prefix= platform="
 hd_parse "$@"
 hd_init
 
@@ -17,6 +17,27 @@ printf '%-16s %s\n' "workspace" "$HD_ROOT"
 printf '%-16s %s (%s)\n' "worktree" "$wt" "$(hd_kind_label "$kind")"
 printf '%-16s %s\n' "branch" "$(hd_branch "$wt")"
 printf '%-16s %s\n' "build type" "$(hd_build_type "$wt")"
+if hd_is_cross; then
+    platform=$(hd_platform)
+    printf '%-16s %s\n' "platform" "$platform (cross)"
+    printf '%-16s %s\n' "triple" "$(hd_platform_triple "$platform")"
+    toolchain="$(hd_state_dir)/toolchains/$platform/toolchain.cmake"
+    if [ -f "$toolchain" ]; then
+        printf '%-16s %s\n' "toolchain" "$(readlink -f "$toolchain")"
+    else
+        printf '%-16s %s\n' "toolchain" "not built yet (the next configure builds it)"
+    fi
+    if [ "$kind" = "llvm" ]; then
+        tools=$(hd_native_tools_dir "$wt")
+        if [ -x "$tools/bin/llvm-tblgen" ]; then
+            printf '%-16s %s\n' "host tools" "$tools/bin"
+        else
+            printf '%-16s %s\n' "host tools" "$tools/bin (missing: built by the next configure)"
+        fi
+    fi
+else
+    printf '%-16s %s\n' "platform" "native ($(uname -m)-$(uname -s | tr '[:upper:]' '[:lower:]'))"
+fi
 
 case "$kind" in
 llvm)

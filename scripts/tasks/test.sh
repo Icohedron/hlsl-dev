@@ -22,12 +22,15 @@ links against if that is missing. --dry-run reports that plan instead.
 
 Suites: d3d12, vk, mtl, warp-d3d12, clang-d3d12, clang-vk, clang-mtl,
 clang-warp-d3d12, unit."
-HD_TASK_OPTS="in= dxc= llvm= dist_prefix= lit_args= dry_run no_auto"
+HD_TASK_OPTS="in= dxc= llvm= dist_prefix= lit_args= platform= jobs= dry_run no_auto"
 hd_parse "$@"
 hd_init
 
 wt=$(hd_target llvm offload)
 HD_WT=$wt
+# Tests execute what was built, so a cross build tree is the wrong one to ask.
+# Say so before configuring or building anything.
+hd_require_native "run tests"
 hd_ensure_configured "$wt"
 build=$(hd_build_dir "$wt")
 

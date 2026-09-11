@@ -21,7 +21,7 @@ To build the offload suite inside an llvm build tree instead of standalone,
 configure that llvm worktree against its sources:
 
   hlsl-configure --in llvm-project.my-feature --offload offload-test-suite.mine"
-HD_TASK_OPTS="in= llvm= dxc= offload= dist_prefix= build_type= fresh forget dry_run no_auto"
+HD_TASK_OPTS="in= llvm= dxc= offload= dist_prefix= build_type= platform= jobs= fresh forget dry_run no_auto"
 hd_parse "$@"
 hd_init
 

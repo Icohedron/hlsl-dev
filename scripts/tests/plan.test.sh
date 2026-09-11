@@ -69,6 +69,42 @@ if [ -f "$llvm/llvm/CMakeLists.txt" ]; then
     check "llvm: several targets plan too" "$rc" "0"
     contains "llvm: all of them, in one cmake" "$out" \
         "would run: cmake --build $llvm/$build --target clang llvm-dis FileCheck"
+
+    # --- cross-compilation --------------------------------------------------
+    # A plan for another machine, which must stay a plan: no toolchain is
+    # realised, no host tablegen is built, and the native build tree is not
+    # even named.
+    plan hlsl-configure --in "$llvm" --platform linux-arm64
+    check "cross: the plan succeeds" "$rc" "0"
+    contains "cross: its own build directory" "$out" \
+        "would run: cmake -S $llvm/llvm -B $llvm/$build.linux-arm64"
+    contains "cross: through a toolchain file" "$out" "-DCMAKE_TOOLCHAIN_FILE="
+    contains "cross: with host tablegens" "$out" \
+        "-DLLVM_NATIVE_TOOL_DIR=$llvm/build-native-tools/bin"
+    contains "cross: building for the target triple" "$out" \
+        "-DLLVM_HOST_TRIPLE=aarch64-unknown-linux-gnu"
+    contains "cross: the linker choice is the target's" "$out" "-DLLVM_ENABLE_LLD=OFF"
+    # Like the distribution, the host tablegens are announced rather than built
+    # -- when this workspace has not built them already.
+    if [ -x "$llvm/build-native-tools/bin/llvm-tblgen" ]; then
+        lacks "cross: existing host tools are not rebuilt" "$out" "would build: the host tablegens"
+    else
+        contains "cross: and it announces the host tools" "$out" "would build: the host tablegens"
+    fi
+    lacks "cross: no placeholder survives expansion" "$out" '$HD_'
+
+    plan hlsl-build --in "$llvm" --platform linux-arm64 clang
+    check "cross: a build plans too" "$rc" "0"
+    contains "cross: in the cross tree" "$out" \
+        "would run: cmake --build $llvm/$build.linux-arm64 --target clang"
+
+    plan hlsl-test --in "$llvm" --platform linux-arm64
+    check "cross: running tests is refused" "$rc" "1"
+    contains "cross: and says why" "$out" "cannot run tests for 'linux-arm64'"
+
+    plan hlsl-build --in "$llvm" --platform freebsd-ppc
+    check "cross: an unknown platform is refused" "$rc" "1"
+    contains "cross: with the list of real ones" "$out" "unknown platform 'freebsd-ppc'"
 else
     skip "llvm-project is not checked out"
 fi
@@ -105,6 +141,15 @@ if [ -d "$offload/tools/offloader" ]; then
     plan hlsl-test --in "$offload" clang-vk
     check "offload: a test run plans too" "$rc" "0"
     contains "offload: through the suite's target" "$out" "--target check-hlsl-clang-vk"
+
+    plan hlsl-configure --in "$offload" --platform linux-arm64
+    check "offload: a cross plan succeeds" "$rc" "0"
+    contains "offload: in its own cross tree" "$out" \
+        "would run: cmake -S $offload -B $offload/$build.linux-arm64"
+    contains "offload: against that platform's distribution" "$out" \
+        "-DCMAKE_PREFIX_PATH=$llvm/build-dist.linux-arm64/install/lib/cmake/llvm"
+    lacks "offload: a cross build needs no tablegens of its own" "$out" \
+        "-DLLVM_NATIVE_TOOL_DIR="
 else
     skip "offload-test-suite is not checked out"
 fi

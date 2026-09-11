@@ -134,12 +134,15 @@ hd_opt_desc() {
     dxc) printf 'DirectXShaderCompiler worktree, a directory holding dxc/dxv, or `nix`' ;;
     offload) printf 'offload-test-suite worktree an llvm build includes as OffloadTest' ;;
     dist_prefix) printf 'Install prefix of an LLVM standalone distribution (e.g. an unpacked CI artifact)' ;;
+    platform) printf 'Cross-compile for this platform instead of this machine (see '"'"'hlsl-cross'"'"')' ;;
     build_type) printf 'CMake build type: Debug, Release, RelWithDebInfo, MinSizeRel' ;;
     fresh) printf 'Start from scratch instead of reusing what is already there' ;;
     forget) printf 'Forget this worktree'"'"'s remembered dependencies before applying the flags' ;;
     dry_run) printf 'Print what would be built and configured, and stop' ;;
     no_auto) printf 'Fail instead of building a missing prerequisite (LLVM distribution, dxc)' ;;
     lit_args) printf 'Extra arguments for llvm-lit (default -v); use --lit-args=-x for a value starting with a dash' ;;
+    out) printf 'Write the archive here instead of next to the build tree' ;;
+    jobs) printf 'Build this many targets at once (default: one per core)' ;;
     dist) printf 'Also act on the standalone distribution build and install prefix' ;;
     all) printf 'Act on every worktree of every repository' ;;
     from) printf 'Worktree to seed a missing index from (default: any worktree of that repository that has one)' ;;
@@ -282,6 +285,21 @@ hd_init() {
     HD_OPT_DIST_PREFIX=${dist_prefix:-${HLSL_DIST_PREFIX:-}}
     HD_OPT_FRESH=${fresh:-}
 
+    # Which machine the binaries are for. Empty means this one; anything else
+    # moves the build directory, the pins and the flags (see hd_platform).
+    HD_OPT_PLATFORM=${platform:-${HLSL_PLATFORM:-native}}
+    hd_platform_check "$HD_OPT_PLATFORM"
+
+    # How many compilations at once. Ninja's default is one per core, which is
+    # the right answer on a workstation and the wrong one in a container with a
+    # process limit (a build of 64 jobs x compiler x sccache client hits a
+    # pids cgroup cap and dies as "posix_spawn: Resource temporarily
+    # unavailable"). cmake --build --parallel is what it reaches.
+    HD_OPT_JOBS=${jobs:-${HLSL_JOBS:-}}
+    case "$HD_OPT_JOBS" in
+    "" | *[!0-9]*) [ -z "$HD_OPT_JOBS" ] || hd_die "--jobs takes a number, not '$HD_OPT_JOBS'" ;;
+    esac
+
     # A missing prerequisite is built rather than reported, unless the caller
     # says otherwise. --dry-run implies it: a plan never builds anything.
     HD_DRY_RUN=${dry_run:-}
@@ -296,6 +314,18 @@ hd_init() {
     # Every task runs against the Vulkan driver chosen *now*, so switching it
     # takes effect on the next command instead of the next shell.
     hd_vk_export
+
+    # enterShell mirrors this machine's system include directories into
+    # C_INCLUDE_PATH/CPLUS_INCLUDE_PATH so that clang-tidy can find them, and
+    # nixpkgs' cmake reads NIXPKGS_CMAKE_PREFIX_PATH -- the native profile --
+    # as a search prefix for every find_package. Both are answers about *this*
+    # machine: left in place, a cross build compiles the target's sources
+    # against this machine's glibc headers and links this machine's libraries.
+    # A cross build gets all of that from its toolchain file and nowhere else.
+    if hd_is_cross; then
+        unset C_INCLUDE_PATH CPLUS_INCLUDE_PATH
+        unset NIXPKGS_CMAKE_PREFIX_PATH CMAKE_PREFIX_PATH
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -453,12 +483,22 @@ hd_key() {
     printf '%s\n' "$(printf '%s' "$p" | tr '/' '%')"
 }
 
-hd_pin_file() { printf '%s\n' "$(hd_state_dir)/pins/$(hd_key "$1").env"; }
+# A pin file belongs to one worktree *and* one platform: what a Windows build
+# was configured with is not what the native one was. The native file is the
+# fallback, so a `--llvm` said once still applies to every platform -- which
+# checkout to build against does not change because the binaries do.
+hd_pin_file() {
+    printf '%s\n' "$(hd_state_dir)/pins/$(hd_key "$1")$(hd_platform_suffix | tr . @).env"
+}
 
 # hd_pin_get <worktree> <KEY>
 hd_pin_get() {
     local f v
     f=$(hd_pin_file "$1")
+    if [ ! -f "$f" ] || ! grep -q "^$2=" "$f"; then
+        # Fall back to what the native build of this worktree remembers.
+        f="$(hd_state_dir)/pins/$(hd_key "$1").env"
+    fi
     [ -f "$f" ] || return 0
     v=$(sed -n "s/^$2=//p" "$f" | tail -n 1)
     [ -n "$v" ] || return 0
@@ -489,9 +529,17 @@ hd_pin_set() {
 }
 
 hd_pin_clear() {
-    local f
+    local f p
     f=$(hd_pin_file "$1")
     rm -f "$f"
+    # Forgetting on this machine forgets what the cross builds of the same
+    # worktree remember too: they are the same worktree, and a --forget that
+    # left half the memory behind would be the confusing one.
+    if ! hd_is_cross; then
+        for p in $HD_PLATFORMS; do
+            rm -f "$(hd_state_dir)/pins/$(hd_key "$1")@$p.env"
+        done
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -581,6 +629,238 @@ hd_vk_export() {
 }
 
 # ---------------------------------------------------------------------------
+# Cross-compilation platforms
+# ---------------------------------------------------------------------------
+# `--platform <name>` (or $HLSL_PLATFORM) builds for another machine. Only
+# clang and the offload test suite are the point of it: this is how a change is
+# checked against the platforms HLSL ships on -- Windows above all -- without
+# one of those machines.
+#
+# A platform is a name, a triple, an OS and an ABI, and everything else follows
+# from those four:
+#
+#   build directory   <worktree>/build.<platform>, so a cross build never
+#                     disturbs -- or is disturbed by -- the native one, and
+#                     both can exist at once
+#   pins              remembered per platform, falling back to the native ones
+#                     (what an offload build builds against does not change
+#                     because the binaries are for Windows)
+#   flags             the native list plus HLSL_CMAKE_FLAGS_CROSS* (devenv.nix)
+#   toolchain         scripts/cross/toolchains.nix, built on demand
+#   tests             refused: the binaries do not run on this machine
+#
+# "native" is the name of the platform that is not a cross build at all, and
+# is what every command means unless told otherwise.
+
+# shellcheck disable=SC2034 # read by the task scripts that source this file
+HD_PLATFORMS="linux-arm64 windows-x64 windows-arm64"
+
+# hd_platform -> the platform in effect for this invocation.
+hd_platform() { printf '%s\n' "${HD_OPT_PLATFORM:-native}"; }
+
+# True when that is not this machine.
+hd_is_cross() { [ "$(hd_platform)" != "native" ]; }
+
+hd_platform_triple() {
+    case "$1" in
+    linux-arm64) printf 'aarch64-unknown-linux-gnu\n' ;;
+    windows-x64) printf 'x86_64-pc-windows-msvc\n' ;;
+    windows-arm64) printf 'aarch64-pc-windows-msvc\n' ;;
+    esac
+}
+
+# linux | windows -- which family of flags the build needs.
+hd_platform_os() {
+    case "$1" in
+    linux-*) printf 'linux\n' ;;
+    windows-*) printf 'windows\n' ;;
+    esac
+}
+
+# msvc | gnu -- which ABI the binaries speak. Every Windows platform here is
+# MSVC: D3D12 is reached through the Windows SDK's import libraries, so a
+# GNU-ABI Windows build could carry neither the offload test suite nor DXC (see
+# scripts/cross/toolchains.nix).
+hd_platform_abi() {
+    case "$1" in
+    windows-*) printf 'msvc\n' ;;
+    *) printf 'gnu\n' ;;
+    esac
+}
+
+# hd_platform_check <name> -- accept it, or say what the names are.
+hd_platform_check() {
+    local p=$1
+    [ "$p" = "native" ] && return 0
+    case " $HD_PLATFORMS " in
+    *" $p "*) ;;
+    *) hd_die "unknown platform '$p'; expected native or one of:
+       $HD_PLATFORMS
+       'hlsl-cross' describes each one and what it needs." ;;
+    esac
+    [ -n "${HLSL_CMAKE_FLAGS_CROSS:-}" ] || hd_die "this environment has no cross-compilation flags;
+       leave and re-enter the developer environment ('direnv reload', or exit
+       and 'devenv shell') so devenv.nix is evaluated again"
+    [ -n "${HLSL_NIXPKGS_PATH:-}" ] || hd_die "\$HLSL_NIXPKGS_PATH is not set; re-enter the developer environment"
+}
+
+# The directory suffix a platform adds to build trees. Native adds nothing, so
+# the tree a plain `hlsl-build` uses keeps the name it has always had.
+hd_platform_suffix() {
+    hd_is_cross || return 0
+    printf '.%s\n' "$(hd_platform)"
+}
+
+# --- the Visual Studio licence ---------------------------------------------
+# nixpkgs has Microsoft's headers and import libraries (windows.sdk, an xwin
+# splat of the official packages) but will not build them until the licence at
+# https://visualstudio.microsoft.com/license-terms/mt644918/ has been accepted.
+# That is a decision for the person building, so it is asked for once and kept
+# with the workspace's other choices; $HLSL_MSVC_LICENSE=accepted does it for
+# one command (a CI job, say).
+hd_msvc_license_accepted() {
+    [ "${HLSL_MSVC_LICENSE:-}" = "accepted" ] && return 0
+    [ "$(hd_setting_get MSVC_LICENSE)" = "accepted" ]
+}
+
+# hd_nixpkgs_path -> the pinned nixpkgs the cross toolchains are built from.
+#
+# devenv exports it as a plain string, which means nothing in the store refers
+# to it and a garbage collection is free to remove the source it names -- and
+# does, sooner or later, since only evaluation ever needed it. The revision is
+# also written down in devenv.lock, so rather than failing on a path that is no
+# longer there, the same revision is fetched again (from the binary cache, in
+# seconds). Rooting it instead would mean keeping a second copy of the whole
+# nixpkgs tree for the sake of a directory this workspace reads twice a month.
+hd_nixpkgs_path() {
+    local rev path
+    if [ -n "${HLSL_NIXPKGS_PATH:-}" ] && [ -d "$HLSL_NIXPKGS_PATH" ]; then
+        printf '%s\n' "$HLSL_NIXPKGS_PATH"
+        return 0
+    fi
+    [ -f "$HD_ROOT/devenv.lock" ] ||
+        hd_die "the pinned nixpkgs ($HLSL_NIXPKGS_PATH) is not in the store and
+       there is no devenv.lock to say which revision it was"
+
+    rev=$(python3 -c '
+import json, sys
+nodes = json.load(open(sys.argv[1]))["nodes"]
+locked = nodes.get("nixpkgs", {}).get("locked", {})
+print(locked.get("rev", ""))
+' "$HD_ROOT/devenv.lock" 2>/dev/null) || rev=""
+    [ -n "$rev" ] || hd_die "could not read the nixpkgs revision from devenv.lock"
+
+    hd_log "the pinned nixpkgs is no longer in the store (garbage collected); fetching $rev again"
+    path=$(nix flake prefetch --json "github:NixOS/nixpkgs/$rev" 2>/dev/null |
+        python3 -c 'import json,sys; print(json.load(sys.stdin)["storePath"])' 2>/dev/null) || path=""
+    [ -n "$path" ] && [ -d "$path" ] ||
+        hd_die "could not fetch nixpkgs $rev; re-enter the developer environment and try again"
+    printf '%s\n' "$path"
+}
+
+# hd_toolchain_file <platform> -> the CMake toolchain file for it, building it
+# if this workspace has not built it yet.
+#
+# The result is a store path, kept as a symlink in .hlsl-dev/toolchains/<name>:
+# that is the cache (the second configure never calls nix), and it is a GC root
+# (a nix-collect-garbage does not silently remove a toolchain a build tree was
+# configured against).
+hd_toolchain_file() {
+    local p=$1 link nixpkgs args=()
+    link="$(hd_state_dir)/toolchains/$p"
+    if [ -f "$link/toolchain.cmake" ]; then
+        printf '%s\n' "$link/toolchain.cmake"
+        return 0
+    fi
+
+    if [ "$(hd_platform_abi "$p")" = "msvc" ] && ! hd_msvc_license_accepted; then
+        hd_die "$p needs Microsoft's SDK (headers and import libraries), which
+       nixpkgs will not build until its licence has been accepted. Read
+       https://visualstudio.microsoft.com/license-terms/mt644918/ and, if you
+       agree, run:  hlsl-cross --accept-msvc-license"
+    fi
+
+    if [ -n "${HD_DRY_RUN:-}" ]; then
+        hd_log "would build the $p toolchain (nix-build scripts/cross/toolchains.nix)"
+        printf '%s\n' "$link/toolchain.cmake"
+        return 0
+    fi
+
+    hd_log "building the $p cross toolchain (once; the MSVC SDK is a large download)"
+    nixpkgs=$(hd_nixpkgs_path) || return 1
+    mkdir -p "$(dirname "$link")"
+    args=(
+        "$HD_ROOT/scripts/cross/toolchains.nix"
+        --argstr nixpkgs "$nixpkgs"
+        --argstr platform "$p"
+        -o "$link"
+    )
+    hd_msvc_license_accepted && args+=(--arg acceptMsvcLicense true)
+    hd_run nix-build "${args[@]}" >/dev/null ||
+        hd_die "could not build the $p toolchain; see 'hlsl-cross' for what it needs"
+    [ -f "$link/toolchain.cmake" ] ||
+        hd_die "the $p toolchain was built but $link/toolchain.cmake is not there"
+    printf '%s\n' "$link/toolchain.cmake"
+}
+
+# ---------------------------------------------------------------------------
+# Host tools for a cross build
+# ---------------------------------------------------------------------------
+# A cross build of LLVM has to *run* llvm-tblgen, clang-tblgen and a couple of
+# generators, and the ones it builds are for the target. LLVM_NATIVE_TOOL_DIR
+# is where it looks for host copies instead; this builds them, once per llvm
+# worktree, into <worktree>/build-native-tools -- shared by every platform,
+# like build-dist is, because they are plain host binaries.
+#
+# It is a small build (no tests, no benchmarks, one target, Release) but not a
+# free one: ~10 minutes cold, seconds when sccache has seen the sources.
+
+# The tablegens every cross build of LLVM has to run, and the generators the
+# clang-tools-extra half of the HLSL cache adds. The second list is optional:
+# which generators exist moves between LLVM revisions, and a cross build that
+# does not need one must not fail here because this workspace asked for it.
+HD_NATIVE_TOOLS="llvm-min-tblgen llvm-tblgen clang-tblgen"
+HD_NATIVE_TOOLS_OPTIONAL="clang-tidy-confusable-chars-gen clang-pseudo-gen"
+
+hd_native_tools_dir() { printf '%s/build-native-tools\n' "$1"; }
+
+# hd_ensure_native_tools <llvm worktree> -> the directory holding them.
+hd_ensure_native_tools() {
+    local wt=$1 build target parallel=()
+    build=$(hd_native_tools_dir "$wt")
+    if [ -x "$build/bin/llvm-tblgen" ] && [ -x "$build/bin/clang-tblgen" ]; then
+        printf '%s\n' "$build/bin"
+        return 0
+    fi
+
+    hd_provide "the host tablegens for $(basename "$wt") -- a cross build cannot run its own" || return 1
+    if [ -z "${HD_DRY_RUN:-}" ]; then
+        # Everything below writes to stderr: this function's *stdout* is the
+        # directory it resolved, and the caller reads it with $(...).
+        {
+            export HD_LLVM_SRC=$wt
+            export HD_INSTALL_PREFIX="$build/install"
+            hd_prepare_build_dir "$build"
+            hd_lock "$build"
+            hd_cmake_flags HLSL_CMAKE_FLAGS_NATIVE_TOOLS
+            hd_run cmake -S "$wt/llvm" -B "$build" "${HD_FLAGS[@]}" ||
+                hd_die "could not configure the host tools build in $build"
+            hd_parallel_args parallel
+            # shellcheck disable=SC2086 # a list of target names; splitting is the point
+            hd_run cmake --build "$build" "${parallel[@]}" --target $HD_NATIVE_TOOLS ||
+                hd_die "could not build the host tools in $build"
+            for target in $HD_NATIVE_TOOLS_OPTIONAL; do
+                hd_run cmake --build "$build" "${parallel[@]}" --target "$target" >/dev/null 2>&1 ||
+                    hd_warn "this llvm-project has no $target; carrying on without it"
+            done
+        } >&2
+        [ -x "$build/bin/llvm-tblgen" ] ||
+            hd_die "$build was built but has no llvm-tblgen"
+    fi
+    printf '%s\n' "$build/bin"
+}
+
+# ---------------------------------------------------------------------------
 # D3D12
 # ---------------------------------------------------------------------------
 # offload-test-suite detects D3D12 at configure time and there is no switch of
@@ -609,10 +889,16 @@ hd_d3d12_available() {
 }
 
 # The flags every configure passes, so the choice is never left to whatever the
-# last configure happened to cache.
+# last configure happened to cache. A cross build answers for the platform it
+# is building for, not for this machine: Windows has D3D12 whatever this
+# machine is, and an aarch64 Linux binary has no WSL driver to find.
 hd_d3d12_flags() {
     local off=OFF
-    [ "$(hd_d3d12)" = "off" ] && off=ON
+    case "$(hd_platform)" in
+    native) [ "$(hd_d3d12)" = "off" ] && off=ON ;;
+    windows-*) off=OFF ;;
+    *) off=ON ;;
+    esac
     printf '%s\n' "-DCMAKE_DISABLE_FIND_PACKAGE_D3D12=$off"
     printf '%s\n' "-DCMAKE_DISABLE_FIND_PACKAGE_D3D12_WSL=$off"
 }
@@ -715,10 +1001,12 @@ hd_build_dir() {
         esac
         return 0
     fi
-    printf '%s/%s\n' "$wt" "${HLSL_BUILD_DIR_NAME:-build}"
+    printf '%s/%s%s\n' "$wt" "${HLSL_BUILD_DIR_NAME:-build}" "$(hd_platform_suffix)"
 }
 
-hd_dist_build_dir() { printf '%s/build-dist\n' "$1"; }
+# The distribution build is per platform as well: an offload build for Windows
+# links against LLVM libraries for Windows. The native one keeps its name.
+hd_dist_build_dir() { printf '%s/build-dist%s\n' "$1" "$(hd_platform_suffix)"; }
 
 # The install prefix of the standalone LLVM distribution belonging to an
 # llvm-project worktree. --dist-prefix (or $HLSL_DIST_PREFIX) points at a
@@ -742,7 +1030,7 @@ hd_dist_prefix() {
     if [ -n "$pinned" ]; then
         printf '%s\n' "$pinned"
     else
-        printf '%s/build-dist/install\n' "$1"
+        printf '%s/install\n' "$(hd_dist_build_dir "$1")"
     fi
 }
 
@@ -816,7 +1104,7 @@ hd_dxc_bin_dir() {
             printf '%s\n' "$bin"
             return 0
         fi
-        ( HD_WT=$wt; hd_build "$wt" ) || hd_die "could not build dxc in $wt"
+        ( HD_WT=$wt; hd_build "$wt" ) >&2 || hd_die "could not build dxc in $wt"
         [ -x "$bin/dxc" ] || hd_die "$wt built, but $bin/dxc still does not exist"
         printf '%s\n' "$bin"
         return 0
@@ -866,7 +1154,10 @@ hd_ensure_dist() {
         fi
         hd_provide "the LLVM distribution for $(basename "$llvm") -- the expensive one" || return 1
         if [ -z "${HD_DRY_RUN:-}" ]; then
-            ( HD_WT=$llvm; hd_dist "$llvm" ) || hd_die "could not build the LLVM distribution for $llvm"
+            # >&2 for the same reason as hd_ensure_native_tools: the caller
+            # reads the prefix from this function's stdout, and a cmake run
+            # would otherwise end up in the middle of it.
+            ( HD_WT=$llvm; hd_dist "$llvm" ) >&2 || hd_die "could not build the LLVM distribution for $llvm"
             [ -f "$dist/lib/cmake/llvm/LLVMConfig.cmake" ] ||
                 hd_die "$llvm installed a distribution, but $dist has no LLVMConfig.cmake"
         fi
@@ -967,6 +1258,10 @@ hd_git_exclude() {
 hd_link_cdb() {
     local wt=$1 build=${2:-} link target cand newest=""
     [ -z "${HD_DRY_RUN:-}" ] || return 0
+    # A cross build's database describes another machine's compiler and
+    # headers; pointing the editor at it would make clangd diagnose the wrong
+    # platform. The native tree keeps the link.
+    ! hd_is_cross || return 0
     link="$wt/compile_commands.json"
     [ ! -e "$link" ] || [ -L "$link" ] || return 0
 
@@ -977,6 +1272,10 @@ hd_link_cdb() {
         # what heals a worktree the *other* environment configured.
         for cand in "$wt"/build*/compile_commands.json; do
             [ -f "$cand" ] || continue
+            case "$cand" in
+            # Never a cross tree's: same reason as above.
+            "$wt"/build.* | "$wt"/build-dist*) continue ;;
+            esac
             [ -z "$newest" ] || [ "$cand" -nt "$newest" ] || continue
             newest=$cand
         done
@@ -1357,11 +1656,35 @@ hd_no_spaces() {
 # hd_expand_flags <template> -> flags, one per line
 hd_expand_flags() {
     local t=$1
+    # CMake spells a list with semicolons (LLVM_ENABLE_PROJECTS), which a
+    # template cannot contain literally: this expands with eval, and a bare
+    # semicolon there would end the command. ${HD_SEMI} is the way to write
+    # one -- it is substituted *after* the line has been parsed, so it can only
+    # ever be a character in an argument, never a separator.
+    # shellcheck disable=SC2034 # read by the eval below
+    local HD_SEMI=';'
     # shellcheck disable=SC2016 # matching the literal placeholder syntax
     case "$t" in
     *'`'* | *'$('* | *';'*) hd_die "refusing to expand a CMake flag template containing shell metacharacters" ;;
     esac
     eval "printf '%s\n' $t"
+}
+
+# hd_read_flags <template> <label> -- append its expansion to HD_FLAGS.
+#
+# The expansion runs in a subshell (it has to: it is a command substitution),
+# so an hd_die inside it ends *that* shell and nothing else. Without this check
+# a rejected template would leave the list silently empty and cmake would be
+# run with no flags at all -- which configures something, just not what was
+# asked for.
+hd_read_flags() {
+    local t=$1 label=$2 line before=${#HD_FLAGS[@]}
+    [ -n "$t" ] || return 0
+    while IFS= read -r line; do
+        [ -n "$line" ] && HD_FLAGS+=("$line")
+    done <<< "$(hd_expand_flags "$t")"
+    [ "${#HD_FLAGS[@]}" -gt "$before" ] ||
+        hd_die "the $label flag template expanded to nothing (see the error above)"
 }
 
 # hd_cmake_flags <template var name> -> populates the HD_FLAGS array
@@ -1371,11 +1694,68 @@ hd_expand_flags() {
 # "/dev/fd/63: No such file or directory". A here-string keeps the loop in the
 # current shell (so assignments survive) without needing /dev/fd.
 hd_cmake_flags() {
-    local line
     HD_FLAGS=()
-    while IFS= read -r line; do
-        [ -n "$line" ] && HD_FLAGS+=("$line")
-    done <<< "$(hd_expand_flags "${!1}")"
+    hd_read_flags "${!1}" "$1"
+}
+
+# hd_add_flags <template var name>... -- append more expanded templates to the
+# HD_FLAGS array that hd_cmake_flags started. cmake takes the last -D of a
+# repeated variable, so what is appended here overrules the native answer.
+hd_add_flags() {
+    local name
+    for name in "$@"; do
+        hd_read_flags "${!name:-}" "$name"
+    done
+}
+
+# hd_cross_flags <kind: llvm|offload|dxc> -- append everything a cross build
+# adds to the native flag list. Nothing at all when building for this machine,
+# which is what keeps the native path exactly as it was.
+#
+# The order is: what every cross build needs, then what its OS needs, then what
+# its ABI needs, and last what a build of LLVM itself needs. Each may overrule
+# the one before -- that is how, for instance, "link with lld" is off for the
+# GNU toolchains and back on for MSVC, where clang-cl has no other linker here.
+hd_cross_flags() {
+    local kind=$1 p os
+    hd_is_cross || return 0
+    p=$(hd_platform)
+    os=$(hd_platform_os "$p")
+
+    HD_TOOLCHAIN_FILE=$(hd_toolchain_file "$p") || exit 1
+    export HD_TOOLCHAIN_FILE
+    HD_TARGET_TRIPLE=$(hd_platform_triple "$p")
+    export HD_TARGET_TRIPLE
+    hd_no_spaces "toolchain file" "$HD_TOOLCHAIN_FILE"
+
+    hd_add_flags HLSL_CMAKE_FLAGS_CROSS
+    case "$os" in
+    linux) hd_add_flags HLSL_CMAKE_FLAGS_CROSS_LINUX ;;
+    windows) hd_add_flags HLSL_CMAKE_FLAGS_CROSS_WINDOWS ;;
+    esac
+    [ "$kind" = "llvm" ] && hd_add_flags HLSL_CMAKE_FLAGS_CROSS_LLVM
+    if [ "$kind" = "dxc" ]; then
+        hd_add_flags HLSL_CMAKE_FLAGS_CROSS_DXC
+        # The DIA SDK only a Windows machine has. Pass it on when this
+        # workspace has been told where it is; DXC's configure says clearly
+        # enough what is missing when it has not.
+        if [ -n "${HLSL_DIA_SDK:-}" ]; then
+            HD_DIA_SDK=$HLSL_DIA_SDK
+            export HD_DIA_SDK
+            hd_no_spaces "DIA SDK directory" "$HD_DIA_SDK"
+            hd_add_flags HLSL_CMAKE_FLAGS_CROSS_DXC_DIA
+        fi
+    fi
+    return 0
+}
+
+# What the cross build is producing, for the report a configure prints.
+hd_cross_report() {
+    hd_is_cross || return 0
+    hd_report_deps \
+        "platform" "$(hd_platform)" \
+        "triple" "$(hd_platform_triple "$(hd_platform)")" \
+        "toolchain" "${HD_TOOLCHAIN_FILE:-}"
 }
 
 # ---------------------------------------------------------------------------
@@ -1425,7 +1805,14 @@ hd_configure_llvm() {
     build=$(hd_build_dir "$wt")
     offload=$(hd_dep offload "$wt")
     golden=$(hd_dep golden "$wt")
-    dxcbin=$(hd_dxc_bin_dir "$wt" ensure)
+    # dxc is only ever *run* -- by the offload tests -- so a cross configure
+    # takes whatever dxc is already here and never builds one: the binaries it
+    # would build could not run these tests anyway.
+    if hd_is_cross; then
+        dxcbin=$(hd_dxc_bin_dir "$wt")
+    else
+        dxcbin=$(hd_dxc_bin_dir "$wt" ensure)
+    fi
 
     export HD_LLVM_SRC=$wt
     export HD_OFFLOAD_SRC=$offload
@@ -1434,6 +1821,11 @@ hd_configure_llvm() {
     export HD_INSTALL_PREFIX="$build/install"
     HD_BUILD_TYPE=$(hd_build_type "$wt")
     export HD_BUILD_TYPE
+    if hd_is_cross; then
+        HD_NATIVE_TOOL_DIR=$(hd_ensure_native_tools "$wt") || return 1
+        export HD_NATIVE_TOOL_DIR
+        hd_no_spaces "host tools directory" "$HD_NATIVE_TOOL_DIR"
+    fi
     hd_no_spaces "llvm worktree" "$wt"
     hd_no_spaces "offload-test-suite worktree" "$offload"
     hd_no_spaces "build directory" "$build"
@@ -1451,6 +1843,8 @@ hd_configure_llvm() {
     hd_lock "$build"
     hd_cmake_flags HLSL_CMAKE_FLAGS_LLVM
     while IFS= read -r flag; do HD_FLAGS+=("$flag"); done <<< "$(hd_d3d12_flags)"
+    hd_cross_flags llvm
+    hd_cross_report
     hd_run cmake -S "$wt/llvm" -B "$build" "${HD_FLAGS[@]}"
     hd_link_cdb "$wt" "$build"
 
@@ -1474,6 +1868,8 @@ hd_configure_dxc() {
     hd_prepare_build_dir "$build"
     hd_lock "$build"
     hd_cmake_flags HLSL_CMAKE_FLAGS_DXC
+    hd_cross_flags dxc
+    hd_cross_report
     hd_run cmake -S "$wt" -B "$build" "${HD_FLAGS[@]}"
     hd_link_cdb "$wt" "$build"
 
@@ -1496,7 +1892,11 @@ hd_configure_offload() {
     dist=$(hd_ensure_dist "$llvm")
     build=$(hd_build_dir "$wt")
     golden=$(hd_dep golden "$wt")
-    dxcbin=$(hd_dxc_bin_dir "$wt" ensure)
+    if hd_is_cross; then
+        dxcbin=$(hd_dxc_bin_dir "$wt")
+    else
+        dxcbin=$(hd_dxc_bin_dir "$wt" ensure)
+    fi
 
     export HD_OFFLOAD_SRC=$wt
     export HD_LLVM_SRC=$llvm
@@ -1524,6 +1924,8 @@ hd_configure_offload() {
     hd_lock "$build"
     hd_cmake_flags HLSL_CMAKE_FLAGS_OFFLOAD
     while IFS= read -r flag; do HD_FLAGS+=("$flag"); done <<< "$(hd_d3d12_flags)"
+    hd_cross_flags offload
+    hd_cross_report
     hd_run cmake -S "$wt" -B "$build" "${HD_FLAGS[@]}"
     hd_link_cdb "$wt" "$build"
 
@@ -1548,7 +1950,7 @@ hd_configure() {
 # standalone offload distribution (clang, lit tools, LLVM libraries and CMake
 # exports). Shared by every offload worktree that points at this llvm worktree.
 hd_dist() {
-    local wt=$1 build prefix offload
+    local wt=$1 build prefix offload parallel=()
     build=$(hd_dist_build_dir "$wt")
     prefix=$(hd_dist_prefix "$wt")
     offload=$(hd_dep offload "$wt")
@@ -1558,6 +1960,10 @@ hd_dist() {
     export HD_INSTALL_PREFIX=$prefix
     HD_BUILD_TYPE=${HD_OPT_BUILD_TYPE:-$(hd_cache_get "$build" CMAKE_BUILD_TYPE)}
     export HD_BUILD_TYPE=${HD_BUILD_TYPE:-Release}
+    if hd_is_cross; then
+        HD_NATIVE_TOOL_DIR=$(hd_ensure_native_tools "$wt") || return 1
+        export HD_NATIVE_TOOL_DIR
+    fi
     hd_no_spaces "llvm worktree" "$wt"
     hd_no_spaces "install prefix" "$prefix"
 
@@ -1572,8 +1978,11 @@ hd_dist() {
     hd_prepare_build_dir "$build"
     hd_lock "$build"
     hd_cmake_flags HLSL_CMAKE_FLAGS_LLVM_DIST
+    hd_cross_flags llvm
+    hd_cross_report
     hd_run cmake -S "$wt/llvm" -B "$build" "${HD_FLAGS[@]}"
-    hd_run cmake --build "$build" --target install-distribution
+    hd_parallel_args parallel
+    hd_run cmake --build "$build" "${parallel[@]}" --target install-distribution
 
     hd_pin_set "$wt" DIST_PREFIX "$prefix"
     hd_log "installed distribution: $prefix"
@@ -1599,6 +2008,16 @@ hd_ensure_configured() {
     fi
 }
 
+# hd_parallel_args <array name> -- fill it with `--parallel N`, or nothing when
+# the default (one job per core) is wanted. Every `cmake --build` in this file
+# goes through it, so --jobs means the same thing in a build, a distribution
+# install and the host tools build.
+hd_parallel_args() {
+    local -n _out=$1
+    _out=()
+    [ -z "${HD_OPT_JOBS:-}" ] || _out=(--parallel "$HD_OPT_JOBS")
+}
+
 # hd_build <worktree> [target...]
 #
 # More than one target is passed straight through: `cmake --build --target`
@@ -1617,12 +2036,14 @@ hd_build() {
     build=$(hd_build_dir "$wt")
     hd_link_cdb "$wt" "$build"
     hd_lock "$build"
+    local parallel=()
+    hd_parallel_args parallel
     if [ "${#targets[@]}" -gt 0 ]; then
         hd_log "building ${targets[*]} in $build"
-        hd_run cmake --build "$build" --target "${targets[@]}"
+        hd_run cmake --build "$build" "${parallel[@]}" --target "${targets[@]}"
     else
         hd_log "building in $build"
-        hd_run cmake --build "$build"
+        hd_run cmake --build "$build" "${parallel[@]}"
     fi
 }
 
@@ -1673,8 +2094,20 @@ hd_sync_dxc() {
 hd_lit() {
     local build=$1
     shift
+    hd_require_native "run tests"
     local lit="$build/bin/llvm-lit"
     [ -x "$lit" ] || hd_die "$lit not found; run 'hlsl-build' first"
     hd_log "$lit $*"
     hd_run "$lit" "$@"
+}
+
+# hd_require_native <what> -- stop a task that would execute what was built.
+# A cross build produces binaries for another machine; running them here is not
+# something to attempt and report as a test failure.
+hd_require_native() {
+    hd_is_cross || return 0
+    hd_die "cannot $1 for '$(hd_platform)': those binaries are for
+       $(hd_platform_triple "$(hd_platform)"), not for this machine.
+       Build them here (hlsl-build --platform $(hd_platform)) and run the tests
+       on the target, or drop --platform to work natively."
 }

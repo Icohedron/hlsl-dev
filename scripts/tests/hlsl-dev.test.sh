@@ -33,12 +33,22 @@ export HLSL_DEV_ROOT=$root
 export HLSL_DEV_STATE=$root/.hlsl-dev
 export HLSL_CMAKE_FLAGS_LLVM="-DCMAKE_BUILD_TYPE=\$HD_BUILD_TYPE"
 
+# Cross-compilation templates, in the shape devenv.nix exports them: the
+# placeholders are filled in per invocation, and each list may overrule the one
+# before it.
+export HLSL_CMAKE_FLAGS_CROSS="-DCMAKE_TOOLCHAIN_FILE=\$HD_TOOLCHAIN_FILE -DLLVM_ENABLE_ZLIB=OFF"
+export HLSL_CMAKE_FLAGS_CROSS_LLVM="-DLLVM_NATIVE_TOOL_DIR=\$HD_NATIVE_TOOL_DIR -DLLVM_HOST_TRIPLE=\$HD_TARGET_TRIPLE"
+export HLSL_CMAKE_FLAGS_CROSS_LINUX="-DLLVM_ENABLE_LLD=OFF"
+export HLSL_CMAKE_FLAGS_CROSS_WINDOWS="-DLLVM_LINK_LLVM_DYLIB=OFF -DLLVM_ENABLE_LLD=ON"
+export HLSL_NIXPKGS_PATH=/nix/store/not-a-real-nixpkgs
+
 # The caller's environment must not decide what the defaults are: the dev
 # container exports HLSL_BUILD_DIR_NAME=build-container, which moves every
 # build directory the checks below assert. The vk block does the same for its
 # own variables further down.
 unset HLSL_WT HLSL_LLVM HLSL_DXC HLSL_OFFLOAD HLSL_GOLDEN \
-    HLSL_BUILD_DIR HLSL_BUILD_DIR_NAME HLSL_BUILD_TYPE HLSL_DIST_PREFIX HLSL_AUTO
+    HLSL_BUILD_DIR HLSL_BUILD_DIR_NAME HLSL_BUILD_TYPE HLSL_DIST_PREFIX HLSL_AUTO \
+    HLSL_PLATFORM HLSL_MSVC_LICENSE
 
 llvm=$root/llvm-project
 offload=$root/offload-test-suite
@@ -56,7 +66,7 @@ check "kind: none"    "$(hd_kind "$root/scripts")" ""
 # --- dependency resolution --------------------------------------------------
 HD_OPT_LLVM="" HD_OPT_DXC="" HD_OPT_OFFLOAD="" HD_OPT_GOLDEN=""
 HD_OPT_BUILD_DIR="" HD_OPT_BUILD_TYPE="" HD_OPT_DIST_PREFIX="" HD_OPT_FRESH=""
-HD_AUTO=1 HD_DRY_RUN="" HD_WT=""
+HD_OPT_PLATFORM="" HD_AUTO=1 HD_DRY_RUN="" HD_WT=""
 
 check "dep: falls back to the submodule" "$(hd_dep llvm "$offload")" "$llvm"
 hd_pin_set "$offload" LLVM "$root/llvm-project.pinned"
@@ -104,6 +114,139 @@ HD_WT=$llvm HD_OPT_BUILD_DIR=build-debug
 check "build dir: \$HLSL_BUILD_DIR still wins for the target" \
     "$(hd_build_dir "$llvm")" "$llvm/build-debug"
 HD_WT="" HD_OPT_BUILD_DIR="" HLSL_BUILD_DIR_NAME=""
+
+# --- cross-compilation platforms --------------------------------------------
+# A platform is a name, a triple, an OS and an ABI; everything else -- where
+# the build tree is, which flags are added, what is refused -- follows.
+check "platform: native by default" "$(hd_platform)" "native"
+check "platform: and that is not a cross build" "$(hd_is_cross && echo yes || echo no)" "no"
+
+HD_OPT_PLATFORM=windows-x64
+check "platform: named" "$(hd_platform)" "windows-x64"
+check "platform: is a cross build" "$(hd_is_cross && echo yes || echo no)" "yes"
+check "platform: triple" "$(hd_platform_triple windows-x64)" "x86_64-pc-windows-msvc"
+check "platform: arm64 triple" "$(hd_platform_triple windows-arm64)" "aarch64-pc-windows-msvc"
+check "platform: linux triple" "$(hd_platform_triple linux-arm64)" "aarch64-unknown-linux-gnu"
+check "platform: os" "$(hd_platform_os windows-arm64)" "windows"
+check "platform: os, linux" "$(hd_platform_os linux-arm64)" "linux"
+check "platform: abi" "$(hd_platform_abi windows-x64)" "msvc"
+check "platform: linux is the other abi" "$(hd_platform_abi linux-arm64)" "gnu"
+contains "platform: a GNU-ABI Windows one is not offered" \
+    "$( (hd_platform_check windows-x64-mingw) 2>&1 || true)" "unknown platform"
+
+contains "platform: an unknown name is refused" \
+    "$( (hd_platform_check windows-x86) 2>&1 || true)" "unknown platform 'windows-x86'"
+check "platform: native is always accepted" \
+    "$(hd_platform_check native && echo ok)" "ok"
+
+# The cross build tree sits beside the native one rather than replacing it:
+# both can exist, and a cross build never invalidates what was built here.
+check "platform: its own build directory" "$(hd_build_dir "$llvm")" "$llvm/build.windows-x64"
+check "platform: its own distribution" "$(hd_dist_prefix "$llvm")" \
+    "$llvm/build-dist.windows-x64/install"
+check "platform: host tools are shared" "$(hd_native_tools_dir "$llvm")" "$llvm/build-native-tools"
+
+# What a cross build remembers is its own, but what it has not been told falls
+# back to the native answer: which llvm-project worktree to build against does
+# not change because the binaries are for Windows.
+HD_OPT_PLATFORM=""
+hd_pin_set "$offload" LLVM "$root/llvm-project.pinned"
+hd_pin_set "$offload" BUILD_TYPE Debug
+HD_OPT_PLATFORM=windows-x64
+check "platform: pins fall back to the native ones" \
+    "$(hd_pin_get "$offload" LLVM)" "$root/llvm-project.pinned"
+hd_pin_set "$offload" BUILD_TYPE Release
+check "platform: but its own win" "$(hd_pin_get "$offload" BUILD_TYPE)" "Release"
+HD_OPT_PLATFORM=""
+check "platform: and do not disturb the native ones" \
+    "$(hd_pin_get "$offload" BUILD_TYPE)" "Debug"
+HD_OPT_PLATFORM=windows-arm64
+check "platform: nor another platform's" "$(hd_pin_get "$offload" BUILD_TYPE)" "Debug"
+HD_OPT_PLATFORM=""
+hd_pin_clear "$offload"
+HD_OPT_PLATFORM=windows-x64
+check "platform: forgetting natively forgets everywhere" \
+    "$(hd_pin_get "$offload" BUILD_TYPE)" ""
+
+# D3D12 is a question about the machine the binaries are *for*.
+check "platform: windows always has D3D12" "$(hd_d3d12_flags | head -1)" \
+    "-DCMAKE_DISABLE_FIND_PACKAGE_D3D12=OFF"
+HD_OPT_PLATFORM=linux-arm64
+check "platform: an arm64 Linux target never does" "$(hd_d3d12_flags | head -1)" \
+    "-DCMAKE_DISABLE_FIND_PACKAGE_D3D12=ON"
+
+# The flags: the native list, then what the platform adds, in the order that
+# lets a later -D overrule an earlier one.
+HD_DRY_RUN=1
+HD_FLAGS=()
+hd_cross_flags llvm >/dev/null 2>&1
+flags="${HD_FLAGS[*]}"
+contains "cross flags: the toolchain file" "$flags" \
+    "-DCMAKE_TOOLCHAIN_FILE=$root/.hlsl-dev/toolchains/linux-arm64/toolchain.cmake"
+contains "cross flags: the common list" "$flags" "-DLLVM_ENABLE_ZLIB=OFF"
+contains "cross flags: the OS list" "$flags" "-DLLVM_ENABLE_LLD=OFF"
+contains "cross flags: the host tablegens" "$flags" "-DLLVM_NATIVE_TOOL_DIR="
+contains "cross flags: what it is building for" "$flags" \
+    "-DLLVM_HOST_TRIPLE=aarch64-unknown-linux-gnu"
+lacks "cross flags: nothing for another OS" "$flags" "-DLLVM_LINK_LLVM_DYLIB=OFF"
+
+HD_FLAGS=()
+HD_OPT_PLATFORM=windows-x64
+# The MSVC platforms refuse to resolve a toolchain until the licence has been
+# accepted (checked below); this block is about the flags, not that.
+HLSL_MSVC_LICENSE=accepted hd_cross_flags offload >/dev/null 2>&1
+flags="${HD_FLAGS[*]}"
+contains "cross flags: windows adds its own" "$flags" "-DLLVM_LINK_LLVM_DYLIB=OFF"
+contains "cross flags: with lld, the only MSVC linker here" "$flags" "-DLLVM_ENABLE_LLD=ON"
+lacks "cross flags: an offload build needs no tablegens" "$flags" "-DLLVM_NATIVE_TOOL_DIR="
+
+HD_FLAGS=()
+HD_OPT_PLATFORM=""
+hd_cross_flags llvm
+check "cross flags: a native build adds nothing" "${#HD_FLAGS[@]}" "0"
+HD_DRY_RUN=""
+
+# A cross tree's compilation database describes another machine's compiler;
+# the editor must keep following the native one.
+mkdir -p "$llvm/build" "$llvm/build.windows-x64"
+: >"$llvm/build/compile_commands.json"
+: >"$llvm/build.windows-x64/compile_commands.json"
+hd_link_cdb "$llvm" "$llvm/build"
+check "cdb: the native tree is linked" "$(readlink "$llvm/compile_commands.json")" \
+    "build/compile_commands.json"
+HD_OPT_PLATFORM=windows-x64
+hd_link_cdb "$llvm" "$llvm/build.windows-x64"
+check "cdb: a cross configure leaves it alone" \
+    "$(readlink "$llvm/compile_commands.json")" "build/compile_commands.json"
+HD_OPT_PLATFORM=""
+rm -rf "$llvm/build"
+hd_link_cdb "$llvm"
+check "cdb: and a cross tree is never fallen back to" \
+    "$([ -e "$llvm/compile_commands.json" ] || echo none)" "none"
+rm -rf "$llvm/build.windows-x64" "$llvm/compile_commands.json"
+
+# Running what was cross-built is refused, with the reason.
+HD_OPT_PLATFORM=windows-arm64
+contains "platform: tests are refused" "$( (hd_require_native "run tests") 2>&1 || true)" \
+    "cannot run tests for 'windows-arm64'"
+contains "platform: and it says what they are for" \
+    "$( (hd_require_native "run tests") 2>&1 || true)" "aarch64-pc-windows-msvc"
+HD_OPT_PLATFORM=""
+check "platform: natively they are not" "$(hd_require_native "run tests" && echo ok)" "ok"
+
+# The MSVC platforms will not build until Microsoft's licence is accepted, and
+# accepting it is a workspace setting like any other.
+check "msvc: not accepted by default" \
+    "$(hd_msvc_license_accepted && echo yes || echo no)" "no"
+HD_OPT_PLATFORM=windows-x64
+contains "msvc: and the toolchain says so" \
+    "$( (hd_toolchain_file windows-x64) 2>&1 || true)" "licence has been accepted"
+hd_setting_set MSVC_LICENSE accepted
+check "msvc: accepted" "$(hd_msvc_license_accepted && echo yes || echo no)" "yes"
+check "msvc: \$HLSL_MSVC_LICENSE does it for one command" \
+    "$(hd_setting_set MSVC_LICENSE ""; HLSL_MSVC_LICENSE=accepted hd_msvc_license_accepted && echo yes)" "yes"
+HD_OPT_PLATFORM=""
+hd_setting_set MSVC_LICENSE ""
 
 # --- the compilation database an editor can find ----------------------------
 # clangd looks beside the file, in the parents, and in their `build/` -- so a

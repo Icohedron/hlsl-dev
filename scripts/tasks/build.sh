@@ -15,7 +15,7 @@ one configure, one build lock, one dependency graph, so ninja schedules the
 whole lot in parallel rather than one target after another:
 
   hlsl-build clang llvm-dis FileCheck"
-HD_TASK_OPTS="in= llvm= dxc= offload= build_type= fresh dry_run no_auto"
+HD_TASK_OPTS="in= llvm= dxc= offload= build_type= platform= jobs= fresh dry_run no_auto"
 hd_parse "$@"
 hd_init
 
