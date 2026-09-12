@@ -537,7 +537,7 @@ hd_pin_clear() {
     # worktree remember too: they are the same worktree, and a --forget that
     # left half the memory behind would be the confusing one.
     if ! hd_is_cross; then
-        for p in $HD_PLATFORMS; do
+        for p in $HD_ALL_PLATFORMS; do
             rm -f "$(hd_state_dir)/pins/$(hd_key "$1")@$p.env"
         done
     fi
@@ -653,8 +653,42 @@ hd_vk_export() {
 # "native" is the name of the platform that is not a cross build at all, and
 # is what every command means unless told otherwise.
 
-# shellcheck disable=SC2034 # read by the task scripts that source this file
-HD_PLATFORMS="linux-arm64 windows-x64 windows-arm64"
+# Every platform this workspace knows how to build for, whatever machine it is
+# running on. One of them is usually the machine itself -- see hd_platforms.
+HD_ALL_PLATFORMS="linux-arm64 linux-x64 windows-x64 windows-arm64"
+
+# hd_host_platform -> the name of the platform this machine *is*, or empty when
+# it is something the table does not cover (a Mac, say).
+#
+# It is what makes the workspace read the same on an x86-64 workstation and on
+# an ARM laptop: "native" is this machine, and the platform that names it is
+# not offered as a cross target, because building for yourself through a cross
+# toolchain is a slower way to get the same binaries. $HLSL_HOST_PLATFORM
+# overrides it -- for the self-tests, and for a machine whose uname says
+# something unexpected.
+hd_host_platform() {
+    if [ -n "${HLSL_HOST_PLATFORM:-}" ]; then
+        printf '%s\n' "$HLSL_HOST_PLATFORM"
+        return 0
+    fi
+    case "$(uname -s)/$(uname -m)" in
+    Linux/x86_64) printf 'linux-x64\n' ;;
+    Linux/aarch64 | Linux/arm64) printf 'linux-arm64\n' ;;
+    esac
+}
+
+# hd_platforms -> the platforms worth cross-compiling for here: all of them,
+# less the one this machine already is.
+hd_platforms() {
+    local host p out=""
+    host=$(hd_host_platform)
+    for p in $HD_ALL_PLATFORMS; do
+        [ "$p" = "$host" ] && continue
+        out="$out${out:+ }$p"
+    done
+    printf '%s\n' "$out"
+}
+
 
 # hd_platform -> the platform in effect for this invocation.
 hd_platform() { printf '%s\n' "${HD_OPT_PLATFORM:-native}"; }
@@ -665,6 +699,7 @@ hd_is_cross() { [ "$(hd_platform)" != "native" ]; }
 hd_platform_triple() {
     case "$1" in
     linux-arm64) printf 'aarch64-unknown-linux-gnu\n' ;;
+    linux-x64) printf 'x86_64-unknown-linux-gnu\n' ;;
     windows-x64) printf 'x86_64-pc-windows-msvc\n' ;;
     windows-arm64) printf 'aarch64-pc-windows-msvc\n' ;;
     esac
@@ -691,12 +726,18 @@ hd_platform_abi() {
 
 # hd_platform_check <name> -- accept it, or say what the names are.
 hd_platform_check() {
-    local p=$1
+    local p=$1 host
     [ "$p" = "native" ] && return 0
-    case " $HD_PLATFORMS " in
+    host=$(hd_host_platform)
+    if [ -n "$host" ] && [ "$p" = "$host" ]; then
+        hd_die "'$p' is what this machine already is: build for it natively,
+       without --platform. (A cross toolchain aimed at the host would produce
+       the same binaries more slowly, in a second build tree.)"
+    fi
+    case " $(hd_platforms) " in
     *" $p "*) ;;
     *) hd_die "unknown platform '$p'; expected native or one of:
-       $HD_PLATFORMS
+       $(hd_platforms)
        'hlsl-cross' describes each one and what it needs." ;;
     esac
     [ -n "${HLSL_CMAKE_FLAGS_CROSS:-}" ] || hd_die "this environment has no cross-compilation flags;

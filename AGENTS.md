@@ -170,8 +170,17 @@ still needs:
 | platform | triple | toolchain |
 |---|---|---|
 | `linux-arm64` | `aarch64-unknown-linux-gnu` | nixpkgs cross gcc |
+| `linux-x64` | `x86_64-unknown-linux-gnu` | nixpkgs cross gcc |
 | `windows-x64` | `x86_64-pc-windows-msvc` | clang-cl + nixpkgs `windows.sdk` |
 | `windows-arm64` | `aarch64-pc-windows-msvc` | clang-cl + nixpkgs `windows.sdk` |
+
+The platform this machine *is* (`hd_host_platform`, from `uname`, overridable
+with `$HLSL_HOST_PLATFORM`) is not offered: a cross toolchain aimed at the host
+would produce the same binaries more slowly. So the workspace reads the same on
+an x86-64 and on an ARM machine -- only which Linux platform is "native" and
+which is a cross target swaps over. `hlsl-clean --platform all` and
+`--forget` still walk *every* platform, including the host's, since a tree or a
+pin may have been left there by a machine of the other architecture.
 
 The Windows platforms carry both runtime APIs: D3D12 from the SDK, and Vulkan
 via a `vulkan-1.lib` the toolchain generates from the loader's own `.def` with

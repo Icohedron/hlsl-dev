@@ -20,8 +20,14 @@
 # The platforms:
 #
 #   linux-arm64     aarch64-unknown-linux-gnu   nixpkgs' cross gcc
+#   linux-x64       x86_64-unknown-linux-gnu    nixpkgs' cross gcc
 #   windows-x64     x86_64-pc-windows-msvc      clang-cl + nixpkgs' windows.sdk
 #   windows-arm64   aarch64-pc-windows-msvc     clang-cl + nixpkgs' windows.sdk
+#
+# The two Linux platforms are symmetric on purpose: whichever of them is the
+# machine you are on is the *native* build, and the other is the cross one, so
+# this file reads the same on an x86-64 workstation and on an ARM laptop.
+# `hd_host_platform` in scripts/hlsl-dev.sh is what decides which is which.
 #
 # The Windows pair needs Microsoft's headers and import libraries. nixpkgs has
 # them (`windows.sdk`: an `xwin` splat of the official packages), but they are
@@ -274,23 +280,39 @@ let
       set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
     '';
 
-  platforms = {
-    # The offload test suite needs a runtime API for the machine it is built
-    # *for*: on Linux that is Vulkan, so the target's loader and headers are
-    # part of the toolchain rather than something to find afterwards.
-    linux-arm64 = gnu {
-      cross = pkgs.pkgsCross.aarch64-multiplatform;
+  # The offload test suite needs a runtime API for the machine it is built
+  # *for*: on Linux that is Vulkan, so the target's loader and headers are part
+  # of the toolchain rather than something to find afterwards. Both Linux
+  # platforms need the same set, so they are one function of the package set.
+  linux =
+    {
+      cross,
+      processor,
+    }:
+    gnu {
+      inherit cross;
       systemName = "Linux";
-      processor = "aarch64";
+      inherit processor;
       extraRootPaths = [
-        pkgs.pkgsCross.aarch64-multiplatform.vulkan-headers
-        pkgs.pkgsCross.aarch64-multiplatform.vulkan-loader
+        cross.vulkan-headers
+        cross.vulkan-loader
         # The suite vendors libpng, which links the target's zlib (it vendors
         # zlib as well, but only on Windows). nixpkgs splits the headers into
         # a `dev` output, so both halves have to be findable.
-        pkgs.pkgsCross.aarch64-multiplatform.zlib
-        pkgs.pkgsCross.aarch64-multiplatform.zlib.dev
+        cross.zlib
+        cross.zlib.dev
       ];
+    };
+
+  platforms = {
+    linux-arm64 = linux {
+      cross = pkgs.pkgsCross.aarch64-multiplatform;
+      processor = "aarch64";
+    };
+
+    linux-x64 = linux {
+      cross = pkgs.pkgsCross.gnu64;
+      processor = "x86_64";
     };
 
     # Each MSVC platform takes the SDK built for its own architecture: the

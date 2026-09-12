@@ -36,7 +36,10 @@ HD_WT=$wt
 kind=$(hd_kind "$wt")
 
 platforms=$(hd_platform)
-[ -z "$every" ] || platforms="native $HD_PLATFORMS"
+# Every platform the workspace knows, not just the ones worth building for
+# here: a tree or a pin may have been left by a machine of another
+# architecture, and cleaning should still reach it.
+[ -z "$every" ] || platforms="native $HD_ALL_PLATFORMS"
 
 removed=0
 for p in $platforms; do

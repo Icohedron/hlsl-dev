@@ -79,9 +79,9 @@ HD_OPT_PLATFORM=""
 # --- what `hlsl-clean --platform all` walks ---------------------------------
 # The task resolves 'all' into this list before hd_init sees it, so the names
 # have to keep matching what the build directories are called.
-check "clean: every platform, native first" "native $HD_PLATFORMS" \
+check "clean: every platform, native first" "native $(HLSL_HOST_PLATFORM=linux-x64 hd_platforms)" \
     "native linux-arm64 windows-x64 windows-arm64"
-for p in native $HD_PLATFORMS; do
+for p in native $(HLSL_HOST_PLATFORM=linux-x64 hd_platforms); do
     HD_OPT_PLATFORM=$p
     case "$(hd_build_dir "$root/offload-test-suite")" in
     "$root/offload-test-suite/build") [ "$p" = native ] || fail=1 ;;

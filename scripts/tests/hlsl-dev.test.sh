@@ -127,12 +127,39 @@ check "platform: is a cross build" "$(hd_is_cross && echo yes || echo no)" "yes"
 check "platform: triple" "$(hd_platform_triple windows-x64)" "x86_64-pc-windows-msvc"
 check "platform: arm64 triple" "$(hd_platform_triple windows-arm64)" "aarch64-pc-windows-msvc"
 check "platform: linux triple" "$(hd_platform_triple linux-arm64)" "aarch64-unknown-linux-gnu"
+check "platform: the other linux triple" "$(hd_platform_triple linux-x64)" "x86_64-unknown-linux-gnu"
 check "platform: os" "$(hd_platform_os windows-arm64)" "windows"
 check "platform: os, linux" "$(hd_platform_os linux-arm64)" "linux"
 check "platform: abi" "$(hd_platform_abi windows-x64)" "msvc"
 check "platform: linux is the other abi" "$(hd_platform_abi linux-arm64)" "gnu"
 contains "platform: a GNU-ABI Windows one is not offered" \
     "$( (hd_platform_check windows-x64-mingw) 2>&1 || true)" "unknown platform"
+
+# --- the machine this is running on -----------------------------------------
+# Everything the workspace offers depends on what it already is: the platform
+# naming this machine is a build, not a cross build, so it is not on the list
+# and asking for it says so.
+check "host: the override names the machine" \
+    "$(HLSL_HOST_PLATFORM=linux-x64 hd_host_platform)" "linux-x64"
+check "host: otherwise uname does" \
+    "$(unset HLSL_HOST_PLATFORM; hd_host_platform)" \
+    "$(case "$(uname -s)/$(uname -m)" in
+       Linux/x86_64) echo linux-x64 ;;
+       Linux/aarch64 | Linux/arm64) echo linux-arm64 ;;
+       esac)"
+check "host: platforms exclude it" \
+    "$(HLSL_HOST_PLATFORM=linux-x64 hd_platforms)" "linux-arm64 windows-x64 windows-arm64"
+check "host: and on ARM the other way round" \
+    "$(HLSL_HOST_PLATFORM=linux-arm64 hd_platforms)" "linux-x64 windows-x64 windows-arm64"
+check "host: an unknown machine offers all of them" \
+    "$(HLSL_HOST_PLATFORM=none hd_platforms)" "$HD_ALL_PLATFORMS"
+contains "host: its own platform is refused" \
+    "$( (HLSL_HOST_PLATFORM=linux-x64 hd_platform_check linux-x64) 2>&1 || true)" \
+    "is what this machine already is"
+check "host: but the other one is accepted" \
+    "$(HLSL_HOST_PLATFORM=linux-x64 hd_platform_check linux-arm64 && echo ok)" "ok"
+contains "host: and a Windows one always is" \
+    "$( (HLSL_HOST_PLATFORM=linux-arm64 hd_platform_check windows-x64) 2>&1; echo ok)" "ok"
 
 contains "platform: an unknown name is refused" \
     "$( (hd_platform_check windows-x86) 2>&1 || true)" "unknown platform 'windows-x86'"

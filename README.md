@@ -502,8 +502,22 @@ hlsl-build --platform windows-x64           # the suite, for Windows
 | platform | triple | toolchain |
 |---|---|---|
 | `linux-arm64` | `aarch64-unknown-linux-gnu` | nixpkgs' cross gcc |
+| `linux-x64` | `x86_64-unknown-linux-gnu` | nixpkgs' cross gcc |
 | `windows-x64` | `x86_64-pc-windows-msvc` | clang-cl + nixpkgs' `windows.sdk` |
 | `windows-arm64` | `aarch64-pc-windows-msvc` | clang-cl + nixpkgs' `windows.sdk` |
+
+**Whichever of the two Linux platforms this machine already is, is not on the
+list** — building for yourself is a build, not a cross build. On an x86-64
+workstation `hlsl-cross` offers `linux-arm64`; on an ARM laptop it offers
+`linux-x64`, and the Windows pair either way, because clang-cl does not care
+what it runs on. `$HLSL_HOST_PLATFORM` overrides the detection if `uname` says
+something unexpected, and asking for your own platform explains itself:
+
+```
+$ hlsl-build --platform linux-x64          # on an x86-64 machine
+error: 'linux-x64' is what this machine already is: build for it natively,
+       without --platform.
+```
 
 A cross build is the native build plus a toolchain file, so everything else is
 what it always was: which `llvm-project` worktree an offload build uses, which

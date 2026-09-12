@@ -73,7 +73,7 @@ state_of() { # state_of <platform> -> one word about its toolchain
 # --- build one --------------------------------------------------------------
 if [ -n "${fetch:-}" ] || [ -n "${refresh:-}" ]; then
     [ "${#HD_ARGV[@]}" -ge 1 ] ||
-        hd_die "which platform? one of: $HD_PLATFORMS"
+        hd_die "which platform? one of: $(hd_platforms)"
     platform=${HD_ARGV[0]}
     HD_OPT_PLATFORM=$platform
     hd_platform_check "$platform"
@@ -109,12 +109,19 @@ if [ "${#HD_ARGV[@]}" -ge 1 ]; then
 fi
 
 # --- the inventory ----------------------------------------------------------
+host=$(hd_host_platform)
 printf '%-16s %-28s %-6s %s\n' "platform" "triple" "abi" "toolchain"
-printf '%-16s %-28s %-6s %s\n' "native" "this machine" "-" "ready"
-for p in $HD_PLATFORMS; do
+printf '%-16s %-28s %-6s %s\n' "native" \
+    "${host:+$(hd_platform_triple "$host")}" "-" "ready"
+for p in $(hd_platforms); do
     printf '%-16s %-28s %-6s %s\n' \
         "$p" "$(hd_platform_triple "$p")" "$(hd_platform_abi "$p")" "$(state_of "$p")"
 done
+if [ -n "$host" ]; then
+    echo
+    echo "This machine is '$host', so that platform is not listed: building for"
+    echo "it is just a build, without --platform."
+fi
 
 echo
 printf '%-16s %s\n' "MSVC licence" "$license"
