@@ -185,6 +185,7 @@ hlsl-cross --fetch windows-x64            # build its toolchain now, not mid-bui
 hlsl-build --platform windows-x64 clang
 hlsl-info  --platform windows-x64         # triple, toolchain, host tools, deps
 hlsl-clean --platform windows-x64         # only the cross tree
+hlsl-clean --platform all --dist          # every platform's tree, distributions too
 ```
 
 Rules that differ from a native build:

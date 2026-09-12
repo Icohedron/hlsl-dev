@@ -75,4 +75,21 @@ check "staged: symlinks materialised for windows" "$(find "$root/staged-win" -ty
 check "staged: and the alias is a real file" \
     "$([ -f "$root/staged-win/bin/clang++" ] && [ ! -L "$root/staged-win/bin/clang++" ] && echo yes)" "yes"
 HD_OPT_PLATFORM=""
+
+# --- what `hlsl-clean --platform all` walks ---------------------------------
+# The task resolves 'all' into this list before hd_init sees it, so the names
+# have to keep matching what the build directories are called.
+check "clean: every platform, native first" "native $HD_PLATFORMS" \
+    "native linux-arm64 windows-x64 windows-arm64"
+for p in native $HD_PLATFORMS; do
+    HD_OPT_PLATFORM=$p
+    case "$(hd_build_dir "$root/offload-test-suite")" in
+    "$root/offload-test-suite/build") [ "$p" = native ] || fail=1 ;;
+    "$root/offload-test-suite/build.$p") ;;
+    *) echo "FAIL clean: $p resolves to $(hd_build_dir "$root/offload-test-suite")"; fail=1 ;;
+    esac
+done
+HD_OPT_PLATFORM=""
+check "clean: each platform has its own build tree" "$fail" "0"
+
 exit "$fail"

@@ -546,6 +546,15 @@ hlsl-cross --accept-msvc-license     # once, per workspace
 hlsl-cross --fetch windows-x64       # download it now rather than mid-build
 ```
 
+Cross build trees accumulate one per platform, and they are large (a Windows
+LLVM tree is ~10 GB). `hlsl-clean --platform all` removes every one of them,
+native included, and with `--dist` the LLVM distributions beside them:
+
+```bash
+hlsl-clean --platform windows-x64        # one platform
+hlsl-clean --platform all --dist         # all of them, distributions too
+```
+
 The acceptance is recorded in `.hlsl-dev/settings.env` like the other workspace
 choices (`$HLSL_MSVC_LICENSE=accepted` does it for one command, for CI).
 
