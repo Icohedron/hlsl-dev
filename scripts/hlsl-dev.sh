@@ -828,6 +828,77 @@ hd_materialise_symlinks() {
 }
 
 # ---------------------------------------------------------------------------
+# A runnable prefix: what leaves this machine
+# ---------------------------------------------------------------------------
+# `hlsl-package` and `hlsl-repro` both need the same thing -- a directory that
+# runs the offload suite on another machine -- and where its parts come from
+# depends on which checkout is being packaged:
+#
+#   llvm-project        one build tree holds everything: LLVM's
+#                       install-distribution provides clang and lit's tooling,
+#                       OffloadTest's two install targets the offloader and
+#                       the tests.
+#   offload-test-suite  a standalone build has *only* the suite's own targets
+#                       (install-distribution is LLVM's and does not exist
+#                       here). clang, FileCheck, split-file and the resource
+#                       headers come from the LLVM distribution it was built
+#                       against, which is on disk precisely because the build
+#                       links against it.
+
+# hd_install_targets <kind> -> the install targets that fill <build>/install.
+hd_install_targets() {
+    case "$1" in
+    llvm) printf 'install-distribution install-offload-tools install-offload-test-suite\n' ;;
+    offload) printf 'install-offload-tools install-offload-test-suite\n' ;;
+    *) hd_die "nothing to package in a $(hd_kind_label "$1") checkout" ;;
+    esac
+}
+
+# hd_stage_prefix <worktree> <dest> -- assemble the prefix in <dest>.
+#
+# Staged rather than archived in place for three reasons: an offload build's
+# prefix is two prefixes merged, a Windows archive may not contain the
+# symlinks LLVM installs, and neither of those is a thing to do to the install
+# directory someone might still be testing against.
+hd_stage_prefix() {
+    local wt=$1 dest=$2 kind build prefix llvm dist
+    kind=$(hd_kind "$wt")
+    build=$(hd_build_dir "$wt")
+    prefix="$build/install"
+
+    rm -rf "$dest"
+    mkdir -p "$dest"
+
+    if [ "$kind" = "offload" ]; then
+        llvm=$(hd_dep llvm "$wt")
+        dist=$(hd_dist_prefix "$llvm")
+        [ -x "$dist/bin/clang-dxc" ] || [ -x "$dist/bin/clang-dxc.exe" ] ||
+            hd_die "the LLVM distribution this suite builds against has no clang-dxc
+       ($dist). Refresh it with 'hlsl-dist --in $(basename "$llvm")'."
+        hd_log "taking the compiler and lit tooling from $dist"
+        # Only what a test run needs: the tools and the resource headers. The
+        # distribution also carries LLVM's libraries and headers, which are
+        # for *building* the suite and are hundreds of megabytes.
+        mkdir -p "$dest/bin"
+        cp -a "$dist/bin/." "$dest/bin/"
+        if [ -d "$dist/lib/clang" ]; then
+            mkdir -p "$dest/lib"
+            cp -a "$dist/lib/clang" "$dest/lib/"
+        fi
+    fi
+
+    [ -d "$prefix" ] || hd_die "nothing installed in $prefix"
+    cp -a "$prefix/." "$dest/"
+
+    # A .zip cannot carry LLVM's driver symlinks to Windows: what comes out the
+    # other side is not an executable, and the error it produces
+    # ("The operation was canceled by the user") says nothing about why.
+    if [ "$(hd_platform_os "$(hd_platform)")" = "windows" ]; then
+        hd_materialise_symlinks "$dest"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Host tools for a cross build
 # ---------------------------------------------------------------------------
 # A cross build of LLVM has to *run* llvm-tblgen, clang-tblgen and a couple of

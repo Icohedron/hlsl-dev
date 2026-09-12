@@ -9,14 +9,14 @@ docs/offload-distribution.md -- build here, run there, which is the point of a
 cross build. What it packages depends on the checkout you are standing in:
 
   llvm-project            the tools, the clang resource headers, the tests and
-                          the golden images (install-distribution,
-                          install-offload-tools, install-offload-test-suite)
-                          -> hlsl-<platform>.zip / .tar.gz
+                          the golden images, out of one build tree
+  offload-test-suite      the same prefix, assembled from a standalone build
+                          plus the LLVM distribution it was built against
   DirectXShaderCompiler   dxc, dxv and the libraries they load
-                          -> hlsl-dxc-<platform>.zip / .tar.gz
 
-Both prefixes are needed on the test runner, and they are deliberately two
-archives: Clang's HLSL headers and DXC's would collide in one tree.
+Two archives reach the test runner -- the suite prefix and the DXC one -- and
+they are deliberately separate: Clang's HLSL headers and DXC's would collide in
+one tree.
 
   hlsl-package --platform windows-x64                      # the suite
   hlsl-package --platform windows-x64 --in DirectXShaderCompiler   # its dxc
@@ -32,7 +32,7 @@ HD_TASK_OPTS="in= platform= jobs= out= dry_run no_auto"
 hd_parse "$@"
 hd_init
 
-wt=$(hd_target llvm dxc)
+wt=$(hd_target llvm offload dxc)
 HD_WT=$wt
 kind=$(hd_kind "$wt")
 build=$(hd_build_dir "$wt")
@@ -53,38 +53,7 @@ else
 fi
 
 # --- what to build, and what ends up in the archive -------------------------
-if [ "$kind" = "llvm" ]; then
-    # LLVM has install targets for exactly this, and they run the build first,
-    # so there is no separate "build everything" step to remember.
-    hd_build "$wt" install-distribution install-offload-tools install-offload-test-suite
-    prefix="$build/install"
-    default_archive="$build/hlsl-$label.$ext"
-
-    # A Windows archive cannot carry LLVM's driver symlinks (clang-dxc.exe ->
-    # clang.exe): what comes out of the .zip on the other side is not an
-    # executable. Stage a copy of the prefix and make them real files -- which
-    # is what a Windows install of LLVM has anyway. The staging copy is also
-    # why the install prefix itself is left untouched.
-    if [ "$(hd_platform_os "$platform")" = "windows" ] && [ -z "${HD_DRY_RUN:-}" ]; then
-        staged="$build/package"
-        hd_log "staging $prefix with its symlinks made into copies"
-        rm -rf "$staged"
-        cp -a "$prefix" "$staged"
-        hd_materialise_symlinks "$staged"
-
-        # ... but not five copies of a 135 MB binary. clang, clang++, clang-cl,
-        # clang-cpp and clang-dxc are one executable choosing a driver from its
-        # own name; the suite calls clang-dxc, a person poking at the failure
-        # calls clang, and the other three are `copy clang.exe clang-cl.exe`
-        # away on the target if anyone ever wants them.
-        for f in clang++ clang-cl clang-cpp; do
-            [ -e "$staged/bin/$f.exe" ] || continue
-            rm -f "$staged/bin/$f.exe"
-            hd_log "left out of the archive: bin/$f.exe (a copy of clang.exe)"
-        done
-        prefix=$staged
-    fi
-else
+if [ "$kind" = "dxc" ]; then
     # DXC has no install target that produces this: `ninja install` walks every
     # cmake_install.cmake (including LLVM tools that the default target never
     # built) and fails, install-dxc covers a subset, dxv has no install target
@@ -98,12 +67,10 @@ else
     # Everything the test runner loads, by the layout in
     # docs/offload-distribution.md. Windows keeps the DLLs beside the
     # executables so the app-directory search finds them without $PATH; on
-    # Linux the binaries have a RUNPATH of ../lib. A file that this build does
-    # not produce is skipped rather than fatal: dxil is Windows-only (and
-    # unsigned builds have none), and PDBs exist only in a config that emits
-    # them.
-    if [ "$(hd_platform_os "$platform")" = "windows" ] ||
-        { [ "$platform" = "native" ] && case "$(uname -s)" in *NT* | MINGW* | MSYS* | CYGWIN*) true ;; *) false ;; esac; }; then
+    # Linux the binaries have a RUNPATH of ../lib. A file this build does not
+    # produce is skipped rather than fatal: dxil is Windows-only, and PDBs
+    # exist only in a config that emits them.
+    if [ "$(hd_platform_os "$platform")" = "windows" ]; then
         bin_files="dxc.exe dxv.exe dxcompiler.dll dxil.dll dxc.pdb dxv.pdb dxcompiler.pdb dxil.pdb"
         lib_files="dxcompiler.lib dxil.lib"
     else
@@ -115,9 +82,9 @@ else
         rm -rf "$prefix"
         mkdir -p "$prefix/bin" "$prefix/lib"
         missing=""
-        # -L, because `bin/dxc` in a build tree is a symlink to the
-        # versioned `dxc-3.7` beside it: copying the link would put a dangling
-        # one in the archive, and the file it points at is not in the list.
+        # -L, because `bin/dxc` in a build tree is a symlink to the versioned
+        # `dxc-3.7` beside it: copying the link would put a dangling one in the
+        # archive, and the file it points at is not in the list.
         for f in $bin_files; do
             if [ -e "$build/bin/$f" ]; then
                 cp -aL "$build/bin/$f" "$prefix/bin/"
@@ -134,10 +101,37 @@ else
         done
         [ -n "$(ls -A "$prefix/bin")" ] ||
             hd_die "nothing to package: $build/bin has no dxc"
-        [ -z "$missing" ] ||
-            hd_log "not in this build, left out:$missing"
+        [ -z "$missing" ] || hd_log "not in this build, left out:$missing"
     else
         hd_log "would copy dxc, dxv and their libraries into $prefix"
+    fi
+else
+    # The install targets run the build first, so there is no separate "build
+    # everything" step to remember. Which ones exist depends on the layout: a
+    # standalone offload build has no install-distribution, because that is
+    # LLVM's target (see hd_install_targets).
+    # shellcheck disable=SC2046 # a list of target names; splitting is the point
+    hd_build "$wt" $(hd_install_targets "$kind")
+    prefix="$build/package"
+    default_archive="$build/hlsl-$label.$ext"
+
+    if [ -z "${HD_DRY_RUN:-}" ]; then
+        hd_log "staging the prefix in $prefix"
+        hd_stage_prefix "$wt" "$prefix"
+
+        # Not five copies of a 135 MB binary: clang, clang++, clang-cl,
+        # clang-cpp and clang-dxc are one executable choosing a driver from its
+        # own name. The suite calls clang-dxc, a person poking at the failure
+        # calls clang, and the other three are one `copy` away on the target.
+        for f in clang++ clang-cl clang-cpp; do
+            for ff in "$prefix/bin/$f" "$prefix/bin/$f.exe"; do
+                [ -e "$ff" ] || continue
+                rm -f "$ff"
+                hd_log "left out of the archive: bin/$(basename "$ff") (a copy of clang)"
+            done
+        done
+    else
+        hd_log "would stage the prefix in $prefix"
     fi
 fi
 
@@ -147,35 +141,33 @@ case "$archive" in
 *) archive="$PWD/$archive" ;;
 esac
 
-if [ -z "${HD_DRY_RUN:-}" ] && [ ! -d "$prefix" ]; then
-    hd_die "nothing was installed into $prefix"
+if [ -n "${HD_DRY_RUN:-}" ]; then
+    hd_log "packaging $prefix"
+    hd_run cmake -E tar cf "$archive" -- .
+    exit 0
 fi
+
+[ -d "$prefix" ] || hd_die "nothing was assembled in $prefix"
 
 hd_log "packaging $prefix"
 rm -f "$archive"
 # cmake's own archiver, so this needs no zip/tar of a particular flavour on
 # PATH and produces the same layout everywhere.
-if [ -n "${HD_DRY_RUN:-}" ]; then
-    hd_run cmake -E tar cf "$archive" -- .
-    exit 0
-fi
 if [ "$ext" = "zip" ]; then
     ( cd "$prefix" && hd_run cmake -E tar cf "$archive" --format=zip -- . )
 else
     ( cd "$prefix" && hd_run cmake -E tar czf "$archive" -- . )
 fi
 
-if [ -z "${HD_DRY_RUN:-}" ]; then
-    printf '%-16s %s\n' "archive" "$archive"
-    printf '%-16s %s\n' "size" "$(du -h "$archive" | cut -f1)"
-    if hd_is_cross; then
-        printf '%-16s %s\n' "platform" "$platform"
-    else
-        printf '%-16s %s\n' "platform" "native ($label)"
-    fi
-    if [ "$kind" = "llvm" ]; then
-        printf '%-16s %s\n' "contents" "bin/ lib/clang/<ver>/include/ share/hlsl-test-suite/"
-    else
-        printf '%-16s %s\n' "contents" "$(cd "$prefix" && find bin lib -type f | sort | tr '\n' ' ')"
-    fi
+printf '%-16s %s\n' "archive" "$archive"
+printf '%-16s %s\n' "size" "$(du -h "$archive" | cut -f1)"
+if hd_is_cross; then
+    printf '%-16s %s\n' "platform" "$platform"
+else
+    printf '%-16s %s\n' "platform" "native ($label)"
+fi
+if [ "$kind" = "dxc" ]; then
+    printf '%-16s %s\n' "contents" "$(cd "$prefix" && find bin lib -type f | sort | tr '\n' ' ')"
+else
+    printf '%-16s %s\n' "contents" "bin/ lib/clang/<ver>/include/ share/hlsl-test-suite/"
 fi

@@ -187,6 +187,14 @@ let
     # clang-tidy is shipped by the distribution, but running it on every
     # translation unit defeats the point of the fast standalone loop.
     "-DOFFLOADTEST_USE_CLANG_TIDY=OFF"
+
+    # Where the suite's install rules put binaries. In an LLVM build tree this
+    # comes from LLVM ("bin"); standalone there is nobody to set it, so the
+    # tools would install into the root of the prefix -- and the Agility SDK
+    # rule, which appends to it, would install into the absolute path /D3D12
+    # ("file cannot create directory: /D3D12. Maybe need administrative
+    # privileges"). The installed prefix is meant to look the same either way.
+    "-DLLVM_TOOLS_INSTALL_DIR=bin"
   ];
 
   dxcCMakeFlags = commonCMakeFlags ++ [
@@ -610,9 +618,16 @@ in
       exec = ''bash "$DEVENV_ROOT/scripts/tests/hlsl-dev.test.sh"'';
     };
 
+    "hlsl:check:stage" = {
+      description = "The prefix hlsl-package/hlsl-repro archive (fake checkouts)";
+      after = [ "hlsl:check:selftest@completed" ];
+      showOutput = true;
+      exec = ''bash "$DEVENV_ROOT/scripts/tests/stage.test.sh"'';
+    };
+
     "hlsl:check:trim" = {
       description = "hlsl-trim against a real build graph in a throwaway tree";
-      after = [ "hlsl:check:selftest@completed" ];
+      after = [ "hlsl:check:stage@completed" ];
       showOutput = true;
       exec = ''bash "$DEVENV_ROOT/scripts/tests/trim.test.sh"'';
     };

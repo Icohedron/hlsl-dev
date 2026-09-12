@@ -90,8 +90,12 @@ for arg in "${HD_ARGV[@]}"; do
 done
 
 # --- build what the tests run against -----------------------------------------
-hd_build "$wt" install-distribution install-offload-tools install-offload-test-suite
-prefix="$build/install"
+# Which install targets exist depends on the layout: a standalone offload build
+# has no install-distribution (that is LLVM's), and its compiler comes from the
+# distribution it was built against. hd_stage_prefix knows both.
+# shellcheck disable=SC2046 # a list of target names; splitting is the point
+hd_build "$wt" $(hd_install_targets "$kind")
+prefix="$build/repro-prefix"
 
 if hd_is_cross; then
     label=$platform
@@ -126,6 +130,7 @@ if [ -n "${HD_DRY_RUN:-}" ]; then
     exit 0
 fi
 
+hd_stage_prefix "$wt" "$prefix"
 [ -d "$prefix/share/hlsl-test-suite" ] ||
     hd_die "$prefix has no installed test suite; is this an offload-enabled build?"
 
@@ -154,6 +159,10 @@ for f in "$repro"/bin/*; do
     case " $keep " in
     *" ${base%.exe} "*) continue ;;
     esac
+    # A directory here is a runtime the tools load rather than a tool of its
+    # own -- bin/D3D12 is the Agility SDK, which offloader.exe picks up from
+    # beside itself -- so it stays.
+    [ -d "$f" ] && continue
     dropped="$dropped ${base}"
     rm -f "$f"
 done

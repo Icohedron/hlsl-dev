@@ -618,6 +618,22 @@ machine's build, and names the archive after the machine rather than after the
 word "native" — `hlsl-x86_64-linux.tar.gz`, which still means something once
 the file has been copied to a test runner.
 
+It works the same in an **offload-test-suite** worktree — verified end to end
+for `windows-x64` — where the prefix comes from two places: a standalone build has only its own install targets
+(`install-distribution` is LLVM's and does not exist there), so the tools and
+tests come from that build and clang, FileCheck, split-file and the resource
+headers from the LLVM distribution it was built against — which is on disk
+precisely because the build links against it. `hlsl-repro` follows the same
+rule. What is *not* copied from the distribution is LLVM's own libraries and
+headers: those are for building the suite, not for running it.
+
+Two details a standalone Windows build needs, both set in `devenv.nix`:
+`LLVM_TOOLS_INSTALL_DIR=bin`, because nobody sets it outside an LLVM tree and
+the suite's install rules would otherwise put the tools in the root of the
+prefix and the Agility SDK in the absolute path `/D3D12`; and `bin/D3D12/`
+(the Agility SDK runtime `offloader.exe` loads from beside itself) is kept
+even when `hlsl-repro` prunes the rest of `bin/`.
+
 The same task in a `DirectXShaderCompiler` checkout packages the *second*
 prefix the runner needs:
 

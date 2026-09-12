@@ -210,7 +210,9 @@ Rules that differ from a native build:
    (`find_package(D3D12 REQUIRED)`).
 6. **`hlsl-package` is how a cross build leaves this machine.** In an llvm
    worktree it runs `install-distribution` / `install-offload-tools` /
-   `install-offload-test-suite` into `<build dir>/install` and archives it; in
+   `install-offload-test-suite`; in an offload worktree only the latter two
+   exist, and the compiler comes from the LLVM distribution that build links
+   against (`hd_stage_prefix` merges them). In
    a DXC worktree it assembles the curated `bin/` + `lib/` prefix from
    docs/offload-distribution.md (DXC has no install target that produces it)
    into `<build dir>/dxc-dist`. Two archives, because Clang's HLSL headers and
