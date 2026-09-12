@@ -29,7 +29,10 @@
 # ---------------------------------------------------------------------------
 
 hd_log()  { printf '==> %s\n' "$*" >&2; }
-hd_warn() { printf 'warning: %s\n' "$*" >&2; }
+# $HD_QUIET_WARNINGS silences the advisory ones: a task that asks the same
+# question about the same worktree once per platform would otherwise repeat the
+# same paragraph a screenful of times.
+hd_warn() { [ -n "${HD_QUIET_WARNINGS:-}" ] || printf 'warning: %s\n' "$*" >&2; }
 hd_die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
@@ -47,6 +50,22 @@ hd_repo_name() {
     golden) printf '%s\n' "${HLSL_REPO_GOLDEN:-offload-golden-images}" ;;
     *) hd_die "unknown repository kind '$1'" ;;
     esac
+}
+
+# hd_kind_named <name> -> llvm|dxc|offload|golden for a repository named by
+# its kind ("llvm") or by its directory ("llvm-project"), 1 when it is
+# neither. For tasks that act on a whole repository rather than one worktree.
+hd_kind_named() {
+    local k name=${1%/}
+    for k in llvm dxc offload golden; do
+        if [ "$name" = "$k" ] ||
+            [ "$name" = "$(hd_kind_label "$k")" ] ||
+            [ "$name" = "$(hd_repo_name "$k")" ]; then
+            printf '%s\n' "$k"
+            return 0
+        fi
+    done
+    return 1
 }
 
 hd_kind_label() {
@@ -146,6 +165,7 @@ hd_opt_desc() {
     jobs) printf 'Build this many targets at once (default: one per core)' ;;
     dist) printf 'Also act on the standalone distribution build and install prefix' ;;
     all) printf 'Act on every worktree of every repository' ;;
+    all_build_dirs) printf 'Every build tree of the worktree whatever its name (build, build-container, the cross trees), not just this environment'"'"'s' ;;
     from) printf 'Worktree to seed a missing index from (default: any worktree of that repository that has one)' ;;
     restore_gitignore) printf 'Restore .gitignore exactly as git has it, and stop hiding it' ;;
     fetch) printf 'Fetch from origin afterwards' ;;
@@ -172,7 +192,7 @@ hd_opt_kind() {
 }
 
 hd_usage() {
-    local entry name flag
+    local entry name flag override
     printf 'usage: %s%s%s\n' "$HD_TASK_NAME" \
         "${HD_TASK_OPTS:+ [options]}" "${HD_TASK_ARGS:+ $HD_TASK_ARGS}"
     [ -z "${HD_TASK_DESC:-}" ] || printf '\n%s\n' "$HD_TASK_DESC"
@@ -182,7 +202,11 @@ hd_usage() {
             name=${entry%=}
             flag="--${name//_/-}"
             [ "$entry" = "$name" ] || flag="$flag <value>"
-            printf '  %-24s %s\n' "$flag" "$(hd_opt_desc "$name")"
+            # A task may say what a shared flag means *there* by setting
+            # HD_DESC_<name>: --dry-run prints a build plan in one task and a
+            # list of directories in another.
+            override="HD_DESC_$name"
+            printf '  %-24s %s\n' "$flag" "${!override:-$(hd_opt_desc "$name")}"
         done
     fi
     printf '  %-24s %s\n' "--help" "Show this message"

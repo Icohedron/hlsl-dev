@@ -632,9 +632,16 @@ in
       exec = ''bash "$DEVENV_ROOT/scripts/tests/trim.test.sh"'';
     };
 
+    "hlsl:check:clean" = {
+      description = "hlsl-clean and its sweeps against throwaway build trees";
+      after = [ "hlsl:check:trim@completed" ];
+      showOutput = true;
+      exec = ''bash "$DEVENV_ROOT/scripts/tests/clean.test.sh"'';
+    };
+
     "hlsl:check:hook" = {
       description = "The clang-format hook, driven by a real commit";
-      after = [ "hlsl:check:trim@completed" ];
+      after = [ "hlsl:check:clean@completed" ];
       showOutput = true;
       exec = ''bash "$DEVENV_ROOT/scripts/tests/format-hook.test.sh"'';
     };
