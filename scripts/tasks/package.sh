@@ -10,6 +10,8 @@ cross build. What it packages depends on the checkout you are standing in:
 
   llvm-project            the tools, the clang resource headers, the tests and
                           the golden images, out of one build tree
+                          (--no-offload leaves the suite out: just the
+                          compiler and lit's tooling)
   offload-test-suite      the same prefix, assembled from a standalone build
                           plus the LLVM distribution it was built against
   DirectXShaderCompiler   dxc, dxv and the libraries they load
@@ -28,13 +30,19 @@ to the build tree so it is never part of the checkout; --out puts it elsewhere.
 On the target machine, unpack both and point the suite at the dxc prefix:
 
   python share/hlsl-test-suite/configure-test-suite.py --dxc-path <dxc-dist>/bin/dxc"
-HD_TASK_OPTS="in= platform= jobs= out= dry_run no_auto"
+HD_TASK_OPTS="in= platform= jobs= out= no_offload dry_run no_auto"
 hd_parse "$@"
 hd_init
 
 wt=$(hd_target llvm offload dxc)
 HD_WT=$wt
 kind=$(hd_kind "$wt")
+
+# --no-offload is about what an llvm build tree contains; the other two
+# checkouts *are* the thing it would leave out.
+if [ -n "${no_offload:-}" ] && [ "$kind" != "llvm" ]; then
+    hd_die "--no-offload applies to an llvm-project checkout; this is $(hd_kind_label "$kind")"
+fi
 build=$(hd_build_dir "$wt")
 platform=$(hd_platform)
 
@@ -110,14 +118,34 @@ else
     # everything" step to remember. Which ones exist depends on the layout: a
     # standalone offload build has no install-distribution, because that is
     # LLVM's target (see hd_install_targets).
-    # shellcheck disable=SC2046 # a list of target names; splitting is the point
-    hd_build "$wt" $(hd_install_targets "$kind")
+    if [ -n "${no_offload:-}" ]; then
+        install_targets="install-distribution"
+    else
+        install_targets=$(hd_install_targets "$kind")
+    fi
+    # shellcheck disable=SC2086 # a list of target names; splitting is the point
+    hd_build "$wt" $install_targets
     prefix="$build/package"
-    default_archive="$build/hlsl-$label.$ext"
+    default_archive="$build/hlsl${no_offload:+-llvm}-$label.$ext"
 
     if [ -z "${HD_DRY_RUN:-}" ]; then
         hd_log "staging the prefix in $prefix"
         hd_stage_prefix "$wt" "$prefix"
+
+        # The install prefix is cumulative -- an earlier full package left the
+        # suite in it -- so leaving the suite out means taking it out of the
+        # staged copy, not merely not installing it again.
+        if [ -n "${no_offload:-}" ]; then
+            rm -rf "$prefix/share/hlsl-test-suite"
+            for f in offloader api-query imgdiff; do
+                rm -f "$prefix/bin/$f" "$prefix/bin/$f.exe"
+            done
+            rm -rf "$prefix/bin/D3D12"
+            # ... and the directories that held them, so the archive does not
+            # carry an empty share/ that suggests something is missing.
+            find "$prefix" -depth -type d -empty -delete 2>/dev/null || true
+            hd_log "left out: the offload test suite (--no-offload)"
+        fi
 
         # Not five copies of a 135 MB binary: clang, clang++, clang-cl,
         # clang-cpp and clang-dxc are one executable choosing a driver from its
@@ -168,6 +196,8 @@ else
 fi
 if [ "$kind" = "dxc" ]; then
     printf '%-16s %s\n' "contents" "$(cd "$prefix" && find bin lib -type f | sort | tr '\n' ' ')"
+elif [ -n "${no_offload:-}" ]; then
+    printf '%-16s %s\n' "contents" "bin/ lib/clang/<ver>/include/ (no offload test suite)"
 else
     printf '%-16s %s\n' "contents" "bin/ lib/clang/<ver>/include/ share/hlsl-test-suite/"
 fi

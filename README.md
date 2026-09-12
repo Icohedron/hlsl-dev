@@ -610,6 +610,24 @@ real files, as an install on Windows would. `clang++.exe`, `clang-cl.exe` and
 135 MB binary; on the target they are one `copy clang.exe clang-cl.exe` away.
 `hlsl-repro` goes further and keeps only the tools its tests invoke.
 
+`--no-offload`, in an llvm-project checkout, packages only the compiler and
+lit's tooling — `install-distribution` and nothing else — for when the archive
+is meant for compiling rather than for running the suite:
+
+```bash
+hlsl-package --platform windows-x64 --no-offload    # -> hlsl-llvm-windows-x64.zip
+```
+
+```
+bin/    clang.exe clang-dxc.exe FileCheck.exe not.exe obj2yaml.exe split-file.exe
+lib/clang/<ver>/include/    the HLSL resource headers
+```
+
+110 MB rather than 130 MB, and the name says which one it is. The install
+prefix is cumulative, so this also *removes* what an earlier full package left
+in it (`share/hlsl-test-suite`, the offload tools, `bin/D3D12`) rather than
+trusting that it was never installed.
+
 The archive is written inside the build tree, so it is never something `git
 status` has an opinion about, and `--out <path>` puts it somewhere else.
 

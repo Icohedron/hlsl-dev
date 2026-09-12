@@ -142,6 +142,7 @@ hd_opt_desc() {
     no_auto) printf 'Fail instead of building a missing prerequisite (LLVM distribution, dxc)' ;;
     lit_args) printf 'Extra arguments for llvm-lit (default -v); use --lit-args=-x for a value starting with a dash' ;;
     out) printf 'Write the archive here instead of next to the build tree' ;;
+    no_offload) printf 'Package only the compiler and lit tooling, leaving the offload test suite out' ;;
     jobs) printf 'Build this many targets at once (default: one per core)' ;;
     dist) printf 'Also act on the standalone distribution build and install prefix' ;;
     all) printf 'Act on every worktree of every repository' ;;

@@ -111,6 +111,7 @@ hlsl-build --platform windows-x64 clang    # build for another machine
 hlsl-package --platform windows-x64        # zip up tools+tests to run there
 hlsl-repro Feature/HLSLLib/log2.32.test    # one test + tools + provenance, for a bug
 hlsl-package --in DirectXShaderCompiler --platform windows-x64   # its dxc prefix
+hlsl-package --no-offload                  # compiler + lit tooling only
 ```
 
 Suites: `d3d12 vk mtl warp-d3d12 clang-d3d12 clang-vk clang-mtl
