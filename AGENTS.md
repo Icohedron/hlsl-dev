@@ -19,6 +19,7 @@ own — the code lives in git submodules and their worktrees:
 | `offloader-scripts/` | Python CI monitoring/triage tooling (`offloader-*` tasks) |
 | `scripts/hlsl-dev.sh` | All the real logic: option parsing, worktree/dependency resolution, prerequisites, CMake, locks |
 | `scripts/cross/toolchains.nix` | CMake toolchain files for the cross-compilation platforms, built on demand |
+| `scripts/package/*.py` | `hlsl-precompile`: rewrite a lit config to be relocatable, run every test's compile step here, replay its verdict there |
 | `scripts/tasks/*.sh` | One file per task; devenv puts each on PATH as `hlsl-<task>` |
 | `scripts/tests/hlsl-dev.test.sh` | Self-test for the resolution/prerequisite logic (`devenv test`) |
 | `devenv.nix` | The environment: packages, variables, CMake flag *templates* (`$HD_*` placeholders), tasks, dev container |
@@ -110,6 +111,9 @@ hlsl-cross                   # cross-compilation: platforms, toolchains, licence
 hlsl-build --platform windows-x64 clang    # build for another machine
 hlsl-package --platform windows-x64        # zip up tools+tests to run there
 hlsl-repro Feature/HLSLLib/log2.32.test    # one test + tools + provenance, for a bug
+hlsl-precompile --platform windows-x64     # shaders compiled here, so the target
+                                           # needs only a GPU driver: no compiler,
+                                           # no DXC, no signing
 hlsl-package --in DirectXShaderCompiler --platform windows-x64   # its dxc prefix
 hlsl-package --no-offload                  # compiler + lit tooling only
 ```
@@ -219,7 +223,16 @@ Rules that differ from a native build:
    on purpose: D3D12 comes as MSVC import libraries from the same SDK, so such
    a build could carry neither the offload suite (no runtime API) nor DXC
    (`find_package(D3D12 REQUIRED)`).
-6. **`hlsl-package` is how a cross build leaves this machine.** In an llvm
+6. **`hlsl-precompile` is the other way a build leaves this machine**: it runs
+   every test's compile step *here* and ships the objects, so the target needs
+   only a GPU driver. DXIL and SPIR-V are machine-independent and so is `dxv`'s
+   signature, which is what D3D12 refuses a shader for lacking. The compile
+   step becomes `bin/precompiled-cc.py`, replaying the status the compiler
+   exited with -- a failing compile is what many of these tests expect, and
+   clang writes its object before the validator rejects it, so faking success
+   silently turns expected failures into passes. Same pass/XFAIL/fail counts
+   as running the suite with a compiler, at a third of the size.
+7. **`hlsl-package` is how a cross build leaves this machine.** In an llvm
    worktree it runs `install-distribution` / `install-offload-tools` /
    `install-offload-test-suite`; in an offload worktree only the latter two
    exist, and the compiler comes from the LLVM distribution that build links
@@ -228,11 +241,11 @@ Rules that differ from a native build:
    docs/offload-distribution.md (DXC has no install target that produces it)
    into `<build dir>/dxc-dist`. Two archives, because Clang's HLSL headers and
    DXC's collide in one prefix. .zip for Windows, .tar.gz otherwise.
-7. **DXC cross-builds too**, with two caveats: it configures its own
+8. **DXC cross-builds too**, with two caveats: it configures its own
    `<build>/NATIVE` host build (handled in `crossDXCCMakeFlags`), and for the
    MSVC platforms it needs Microsoft's DIA SDK, which is not in nixpkgs --
    copy it off a Windows machine and set `$HLSL_DIA_SDK`.
-8. **`--jobs N` (or `$HLSL_JOBS`) caps parallelism.** The default is one job
+9. **`--jobs N` (or `$HLSL_JOBS`) caps parallelism.** The default is one job
    per core; in a container with a pids limit that is how a build dies as
    `ninja: fatal: posix_spawn: Resource temporarily unavailable`.
 

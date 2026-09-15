@@ -625,9 +625,16 @@ in
       exec = ''bash "$DEVENV_ROOT/scripts/tests/stage.test.sh"'';
     };
 
+    "hlsl:check:precompile" = {
+      description = "The precompiled-package machinery (fake compiler, no GPU)";
+      after = [ "hlsl:check:stage@completed" ];
+      showOutput = true;
+      exec = ''bash "$DEVENV_ROOT/scripts/tests/precompile.test.sh"'';
+    };
+
     "hlsl:check:trim" = {
       description = "hlsl-trim against a real build graph in a throwaway tree";
-      after = [ "hlsl:check:stage@completed" ];
+      after = [ "hlsl:check:precompile@completed" ];
       showOutput = true;
       exec = ''bash "$DEVENV_ROOT/scripts/tests/trim.test.sh"'';
     };

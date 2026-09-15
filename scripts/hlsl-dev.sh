@@ -28,6 +28,11 @@
 # Output helpers
 # ---------------------------------------------------------------------------
 
+# Where this library lives, which is where its helpers live too (the Python
+# that rewrites a lit configuration, for one). Not derived from the workspace
+# root: the self-tests run against a fake one.
+HD_LIB_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd -P)
+
 hd_log()  { printf '==> %s\n' "$*" >&2; }
 # $HD_QUIET_WARNINGS silences the advisory ones: a task that asks the same
 # question about the same worktree once per platform would otherwise repeat the
@@ -162,6 +167,8 @@ hd_opt_desc() {
     lit_args) printf 'Extra arguments for llvm-lit (default -v); use --lit-args=-x for a value starting with a dash' ;;
     out) printf 'Write the archive here instead of next to the build tree' ;;
     no_offload) printf 'Package only the compiler and lit tooling, leaving the offload test suite out' ;;
+    no_dxc) printf 'Do not bundle DXC; package only the suites that compile with clang' ;;
+    no_archive) printf 'Leave the assembled directory where it is instead of compressing it' ;;
     jobs) printf 'Build this many targets at once (default: one per core)' ;;
     dist) printf 'Also act on the standalone distribution build and install prefix' ;;
     all) printf 'Act on every worktree of every repository' ;;
@@ -964,6 +971,274 @@ hd_stage_prefix() {
     fi
 }
 
+# hd_stage_dxc <dest> <dxc bin dir> -- put DXC under <dest> (bin/ and lib/).
+#
+# DXC has no install target that produces this: `ninja install` walks every
+# cmake_install.cmake (including LLVM tools the default target never built) and
+# fails, install-dxc covers a subset, dxv has no install target at all and dxil
+# is a prebuilt signing library with no install rule. The documented answer
+# (offload-test-suite/docs/offload-distribution.md) is to copy the handful of
+# files out of the build tree, which is what this does.
+#
+# A file this build does not produce is skipped rather than fatal: dxil is
+# Windows-only, and PDBs exist only in a config that emits them.
+hd_stage_dxc() {
+    local dest=$1 srcbin=$2 srclib bin_files lib_files f missing=""
+    srclib=$(dirname "$srcbin")/lib
+
+    if [ "$(hd_platform_os "$(hd_platform)")" = "windows" ]; then
+        bin_files="dxc.exe dxv.exe dxcompiler.dll dxil.dll dxc.pdb dxv.pdb dxcompiler.pdb dxil.pdb"
+        lib_files="dxcompiler.lib dxil.lib"
+    else
+        bin_files="dxc dxv"
+        lib_files="libdxcompiler.so libdxcompiler.dylib libdxil.so libdxil.dylib"
+    fi
+
+    rm -rf "$dest"
+    mkdir -p "$dest/bin" "$dest/lib"
+    # -L, because `bin/dxc` in a build tree is a symlink to the versioned
+    # `dxc-3.7` beside it: copying the link would put a dangling one in the
+    # archive, and the file it points at is not in the list.
+    for f in $bin_files; do
+        if [ -e "$srcbin/$f" ]; then
+            cp -aL "$srcbin/$f" "$dest/bin/"
+        else
+            missing="$missing bin/$f"
+        fi
+    done
+    for f in $lib_files; do
+        if [ -e "$srclib/$f" ]; then
+            cp -aL "$srclib/$f" "$dest/lib/"
+        else
+            missing="$missing lib/$f"
+        fi
+    done
+    [ -n "$(ls -A "$dest/bin")" ] ||
+        hd_die "nothing to package: $srcbin has no dxc"
+    [ -z "$missing" ] || hd_log "not in this dxc build, left out:$missing"
+    # The signing chain the D3D12 suites depend on is clang-dxc -> dxv ->
+    # dxcompiler + dxil, and dxv says so itself ("dxil.dll path ... could not
+    # be found"). A container nothing has signed is refused by D3D12 with
+    # "Compute Shader is unsigned ... and experimental shader models are not
+    # enabled", which says nothing about packaging -- so it is said here.
+    if [ "$(hd_platform_os "$(hd_platform)")" = "windows" ] &&
+        [ ! -f "$dest/bin/dxil.dll" ]; then
+        hd_warn "no dxil.dll beside $srcbin: dxv cannot sign, so every D3D12 test in this
+         package will fail with 'Compute Shader is unsigned'. It is the 'dxildll'
+         target of that DXC build (OUTPUT_NAME dxil); build it, or point --dxc at a
+         directory that has one."
+    fi
+    rmdir "$dest/lib" 2>/dev/null || true
+}
+
+# hd_stage_python <dest> <llvm worktree> -- the Python a test run needs.
+#
+# The point of the package is that the target machine types a lit command and
+# nothing else, so what lit.cfg.py imports travels with it:
+#
+#   yaml    pure Python, copied out of this environment (the C extension is
+#           optional and left behind). The packaged lit config puts this
+#           directory at the *end* of sys.path, so an installed PyYAML wins.
+#   psutil  *not* bundled: it is a C extension, so the copy in this
+#           environment does not run on the machine the package is going to,
+#           and a stand-in written against taskkill/killpg was tried and
+#           reverted. lit needs it to enforce the per-test timeout
+#           lit.cfg.py asks for; without it the packaged configuration runs
+#           without a timeout and says so, and `pip install psutil` on the
+#           test machine turns it on.
+#   lit     LLVM's own, from the sources the compiler in this package was built
+#           from, reached through bin/lit rather than sys.path -- two copies of
+#           lit on one path is how a run ends up half in each.
+hd_stage_python() {
+    local dest=$1 llvm=${2:-} pydir="$1/share/hlsl-test-suite/python" yamldir litdir
+
+    mkdir -p "$pydir"
+    yamldir=$(python3 -c 'import os,yaml;print(os.path.dirname(yaml.__file__))' 2>/dev/null) || yamldir=""
+    if [ -n "$yamldir" ] && [ -d "$yamldir" ]; then
+        rm -rf "$pydir/yaml"
+        mkdir -p "$pydir/yaml"
+        # The .py files only: _yaml*.so is this machine's C accelerator, and
+        # yaml/__init__.py already falls back when it is not importable.
+        cp -a "$yamldir"/*.py "$pydir/yaml/"
+    else
+        hd_warn "no PyYAML in this environment: the package will need 'pip install pyyaml'"
+    fi
+
+    litdir=""
+    [ -n "$llvm" ] && [ -d "$llvm/llvm/utils/lit/lit" ] && litdir="$llvm/llvm/utils/lit"
+    if [ -n "$litdir" ]; then
+        rm -rf "$dest/share/hlsl-test-suite/lit"
+        mkdir -p "$dest/share/hlsl-test-suite/lit"
+        cp -a "$litdir/lit" "$dest/share/hlsl-test-suite/lit/lit"
+        find "$dest/share/hlsl-test-suite/lit" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+        cat >"$dest/share/hlsl-test-suite/lit/lit.py" <<'PY'
+#!/usr/bin/env python3
+# The lit that came with this package's compiler. bin/lit runs it.
+#
+# The bundled lit goes first on sys.path and the bundled dependencies last:
+# this lit is the one to run, and a real PyYAML or psutil installed on this
+# machine is the one to import. The dependencies are put here rather than left
+# to the lit configuration because `--timeout` is checked against psutil
+# before any configuration is read.
+import os
+import sys
+
+_here = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _here)
+_deps = os.path.join(os.path.dirname(_here), "python")
+if os.path.isdir(_deps) and _deps not in sys.path:
+    sys.path.append(_deps)
+
+from lit.main import main
+
+if __name__ == "__main__":
+    main()
+PY
+        mkdir -p "$dest/bin"
+        cat >"$dest/bin/lit" <<'SH'
+#!/bin/sh
+# lit, out of this package: no pip install, no PATH to set up.
+here=$(cd "$(dirname "$0")" && pwd)
+exec "${PYTHON:-python3}" "$here/../share/hlsl-test-suite/lit/lit.py" "$@"
+SH
+        chmod +x "$dest/bin/lit"
+        printf '@echo off\r\nREM lit, out of this package: no pip install, no PATH to set up.\r\npython "%%~dp0..\\share\\hlsl-test-suite\\lit\\lit.py" %%*\r\n' \
+            >"$dest/bin/lit.cmd"
+    else
+        hd_warn "no lit sources in ${llvm:-the llvm worktree}: the package will need 'pip install lit'"
+    fi
+}
+
+# hd_stage_suites <worktree> <dest> [dxc bin dir that was staged] -- the
+# pre-configured lit trees.
+#
+# One <dest>/test/<suite>/lit.site.cfg.py per suite this build configured,
+# rewritten by scripts/package/relocate-lit-config.py so every path in it is
+# relative to the file itself. That is what removes configure-test-suite.py
+# from the target machine's list of steps: the configuration CMake produced
+# here (SPIR-V support as probed, the WARP architecture, the debug layers) is
+# the configuration that ships, pointed at the package's own bin/, dxc/ and
+# share/. Prints the suite names it staged.
+hd_stage_suites() {
+    local wt=$1 dest=$2 staged_dxc=${3:-} build test_root src llvm dist dxcbin golden suite dir staged=""
+    local -a maps extra=()
+    # $HD_PRECOMPILED: the package carries objects rather than a compiler, so
+    # the compile step in every test becomes a no-op (see hlsl-precompile).
+    [ -z "${HD_PRECOMPILED:-}" ] || extra=(--precompiled)
+
+    build=$(hd_build_dir "$wt")
+    test_root=$(hd_test_root "$wt" "$build")
+    [ -d "$test_root" ] ||
+        hd_die "$build has no configured test suites; is the offload test suite part of this build?"
+
+    if [ "$(hd_kind "$wt")" = "llvm" ]; then
+        src=$(hd_dep offload "$wt")
+        llvm=$wt
+    else
+        src=$wt
+        llvm=$(hd_dep llvm "$wt")
+        dist=$(hd_dist_prefix "$llvm")
+    fi
+    dxcbin=$(hd_dxc_bin_dir "$wt" 2>/dev/null) || dxcbin=""
+    golden=$(hd_dep golden "$wt" 2>/dev/null) || golden=""
+
+    maps=(--map "$build/bin=bin" --map "$src=share/hlsl-test-suite")
+    [ -n "${dist:-}" ] && maps+=(--map "$dist/bin=bin" --map "$dist/lib/clang=lib/clang")
+    [ -n "$dxcbin" ] && maps+=(--map "$dxcbin=dxc/bin")
+    # A cross build configured against a dxc that runs *here* and packages one
+    # that runs *there*; both spellings have to land in the package's dxc/.
+    [ -n "$staged_dxc" ] && [ "$staged_dxc" != "$dxcbin" ] &&
+        maps+=(--map "$staged_dxc=dxc/bin")
+    [ -n "$golden" ] && maps+=(--map "$golden=share/hlsl-test-suite/golden-images")
+
+    for dir in "$test_root"/*/; do
+        [ -f "$dir/lit.site.cfg.py" ] || continue
+        suite=$(basename "$dir")
+        case "$suite" in
+        Unit)
+            # The unit tests are gtest binaries in the build tree, which the
+            # install targets do not carry.
+            continue
+            ;;
+        *-lavapipe)
+            # These suites are a device choice, not a configuration: the build
+            # tree's target passes OFFLOADTEST_GPU_NAME, and nothing in the
+            # config file says so. Run the plain suite with that variable set.
+            continue
+            ;;
+        esac
+        python3 "$HD_LIB_DIR/package/relocate-lit-config.py" \
+            --in "$dir/lit.site.cfg.py" \
+            --out "$dest/test/$suite/lit.site.cfg.py" \
+            --root "$dest" "${maps[@]}" "${extra[@]}" ||
+            hd_die "could not make $suite's lit configuration relocatable"
+        staged="${staged:+$staged }$suite"
+    done
+    [ -n "$staged" ] || hd_die "no suites were configured in $test_root"
+    printf '%s\n' "$staged"
+}
+
+# hd_provenance <worktree> -- "<label>\t<value>" lines describing what went
+# into a package: the revision of every checkout it was built from, and the
+# version the compilers report. A cross build's binaries cannot be run here,
+# so the versions come from the native build of the same worktree when there
+# is one, and are left out when there is not.
+hd_provenance() {
+    local wt=$1 kind llvm src golden dxcbin build
+    kind=$(hd_kind "$wt")
+    build=$(hd_build_dir "$wt")
+
+    if [ "$kind" = "llvm" ]; then
+        llvm=$wt
+        src=$(hd_dep offload "$wt" 2>/dev/null) || src=""
+    else
+        llvm=$(hd_dep llvm "$wt" 2>/dev/null) || llvm=""
+        src=$wt
+    fi
+    golden=$(hd_dep golden "$wt" 2>/dev/null) || golden=""
+    dxcbin=$(hd_dxc_bin_dir "$wt" 2>/dev/null) || dxcbin=""
+
+    printf 'platform\t%s\n' "$(hd_platform)"
+    printf 'build type\t%s\n' "$(hd_build_type "$wt")"
+    printf 'llvm-project\t%s\n' "$(hd_revision "$llvm")"
+    printf 'offload-test-suite\t%s\n' "$(hd_revision "$src")"
+    printf 'golden images\t%s\n' "$(hd_revision "$golden")"
+    if [ -n "$dxcbin" ]; then
+        printf 'DirectXShaderCompiler\t%s\n' "$(hd_revision "$(hd_wt_from "$dxcbin")")"
+    fi
+    printf 'clang version\t%s\n' "$(hd_tool_version "$build/bin/clang" "$(hd_dist_prefix "${llvm:-$wt}")/bin/clang")"
+    printf 'dxc version\t%s\n' "$(hd_tool_version "${dxcbin:+$dxcbin/dxc}")"
+}
+
+# hd_revision <checkout> -> "branch @ shortsha (+ uncommitted changes)"
+hd_revision() {
+    local d=${1:-} b s dirty=""
+    [ -n "$d" ] && [ -d "$d" ] || { printf 'not present\n'; return 0; }
+    b=$(hd_branch "$d")
+    s=$(git -C "$d" rev-parse --short HEAD 2>/dev/null) || s="(no commit)"
+    git -C "$d" diff --quiet 2>/dev/null || dirty=" + uncommitted changes"
+    printf '%s @ %s%s\n' "$b" "$s" "$dirty"
+}
+
+# hd_tool_version <candidate>... -> the first --version line of the first
+# candidate that exists. A cross build's binaries are for another machine, so
+# they are not run: the revisions above already say what they are.
+hd_tool_version() {
+    local candidate out
+    if hd_is_cross; then
+        printf 'not reported (built for %s)\n' "$(hd_platform)"
+        return 0
+    fi
+    for candidate in "$@"; do
+        [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+        out=$("$candidate" --version 2>/dev/null | grep -v '^ *$' | head -n 1) || out=""
+        [ -n "$out" ] || continue
+        printf '%s\n' "$out"
+        return 0
+    done
+    printf 'unknown\n'
+}
+
 # ---------------------------------------------------------------------------
 # Host tools for a cross build
 # ---------------------------------------------------------------------------
@@ -1245,7 +1520,9 @@ hd_dxc_bin_dir() {
         return 0
         ;;
     esac
-    if [ -n "$spec" ] && [ -x "$spec/dxc" ]; then
+    # A directory holding dxc counts, whichever machine it is for: an
+    # unpacked DXC release for Windows has dxc.exe and no executable bit.
+    if [ -n "$spec" ] && { [ -x "$spec/dxc" ] || [ -f "$spec/dxc.exe" ]; }; then
         hd_abs "$spec"
         return 0
     fi
@@ -1275,6 +1552,60 @@ hd_dxc_bin_dir() {
     hd_warn "$(basename "$wt") has no built dxc yet, using the dev shell's prebuilt one
          (build it with 'hlsl-build --in $(basename "$wt")', or pass --dxc <worktree>)"
     printf '%s\n' "$HLSL_DXC_PREBUILT_DIR"
+}
+
+# hd_dxc_package_dir <from worktree> -> the bin/ whose dxc belongs in a
+# package for this platform.
+#
+# Not hd_dxc_bin_dir: that answers "which dxc should this build *use*", which
+# for a cross build is a dxc that runs here (CMake compiles a probe shader with
+# it at configure time). What goes in the archive has to run on the *target*,
+# so a cross package takes the dxc worktree's tree for that platform and says
+# so when there is not one.
+hd_dxc_package_dir() {
+    local from=$1 wt bin spec=$HD_OPT_DXC
+    # An explicit directory wins before anything is resolved or built, and for
+    # a cross package it is usually the whole answer: an unpacked DXC release
+    # for the target platform. On Windows that is the only source of dxil.dll,
+    # the signing library Microsoft ships and no build of these sources
+    # produces -- without which D3D12 refuses every shader clang compiles.
+    if [ -n "$spec" ] && { [ -x "$spec/dxc" ] || [ -f "$spec/dxc.exe" ]; }; then
+        hd_abs "$spec"
+        return 0
+    fi
+    hd_is_cross || { hd_dxc_bin_dir "$from" ensure; return $?; }
+
+    wt=$(hd_dep dxc "$from") || return 1
+    bin="$(hd_build_dir "$wt")/bin"
+    if [ ! -x "$bin/dxc" ] && [ ! -x "$bin/dxc.exe" ]; then
+        # The MSVC platforms cannot get past `find_package(DiaSDK REQUIRED)`
+        # without Microsoft's DIA SDK, which is not in nixpkgs. Said here
+        # rather than discovered 20 seconds into a configure, because the
+        # answer is a directory to fetch or a flag to pass, not a retry.
+        if [ "$(hd_platform_os "$(hd_platform)")" = "windows" ] && [ -z "${HLSL_DIA_SDK:-}" ]; then
+            hd_die "a $(hd_platform) dxc cannot be built here: DXC's PDB support needs
+       Microsoft's DIA SDK, which ships with Visual Studio and is not in
+       nixpkgs, and \$HLSL_DIA_SDK is not set. In order of least work:
+         - point --dxc at a directory that already holds a $(hd_platform) DXC:
+           dxc.exe, dxv.exe, dxcompiler.dll and dxil.dll, from a release
+           (github.com/microsoft/DirectXShaderCompiler/releases) or from a
+           build made on that machine. All four matter for the D3D12 suites:
+           clang-dxc signs DXIL by running dxv, and dxv loads dxcompiler.dll
+           and dxil.dll to do it.
+         - copy the 'DIA SDK' directory off a Windows machine (a path without
+           spaces) and set \$HLSL_DIA_SDK to it, and DXC is built here.
+         - package without DXC:  hlsl-package --no-dxc  (leaves only the
+           suites that need neither DXC's compiler nor its signer: clang-vk)"
+        fi
+        hd_provide "dxc for $(basename "$wt") ($(hd_platform))" || return 1
+        if [ -z "${HD_DRY_RUN:-}" ]; then
+            # dxildll too: it is what dxv loads to validate and sign, and
+            # without it the D3D12 suites fail on every test.
+            ( HD_WT=$wt; hd_build "$wt" dxc dxv dxcompiler dxildll ) >&2 ||
+                hd_die "could not cross-build dxc in $wt for $(hd_platform)"
+        fi
+    fi
+    printf '%s\n' "$bin"
 }
 
 # ---------------------------------------------------------------------------

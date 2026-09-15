@@ -735,6 +735,79 @@ HLSL_DIA_SDK=/opt/dia-sdk hlsl-build --platform windows-x64 dxc
 
 
 
+### Shipping a suite that needs no compiler
+
+`hlsl-package` ships what upstream's split build/test layout describes, and
+that layout expects the test machine to compile: the archive contains
+`clang-dxc`, the tests call it, and on Windows a D3D12 test then needs DXC's
+`dxv` and `dxil.dll` to sign the result as well — D3D12 refuses a shader that
+nothing has signed. `hlsl-precompile` removes that half of the problem by
+doing it here:
+
+```bash
+hlsl-precompile --platform windows-x64               # every suite the build has
+hlsl-precompile --platform windows-x64 clang-d3d12   # one of them
+hlsl-precompile                                      # for this machine
+```
+
+On the target, unpack and run:
+
+```
+./bin/lit -v test/clang-d3d12          # bin\lit.cmd -v test\clang-d3d12 on Windows
+```
+
+A GPU driver is the entire prerequisite. No compiler, no DXC, no DIA SDK, no
+signing, no `pip install`, no configure step — and the archive is a third of
+the size, because the 135 MB compiler and its resource headers are not in it
+(49 MB for all six `windows-x64` suites, 23 seconds to make).
+
+It works because a test is two halves and only one of them belongs to the test
+machine:
+
+```
+# RUN: split-file %s %t                     <- runs there (a 200 KB tool)
+# RUN: %dxc_target -T cs_6_5 -Fo %t.o ...   <- ran here
+# RUN: %offloader %t/pipeline.yaml %t.o     <- runs there, on the GPU
+```
+
+DXIL and SPIR-V are the same bytes on every machine, and so is `dxv`'s
+signature, so the compile can happen on this one and its object can sit in the
+package at exactly the path the test writes it to. The suite's 653 tests all
+have that shape, and not one pipes the compiler's output anywhere, which is
+what makes the swap safe.
+
+Three details carry the correctness:
+
+- **The compiler's verdict travels, not just its output.** A compile that
+  *fails* is how a good many of these tests are expected to end (`XFAIL: Clang
+  && Vulkan`, on a shader SPIR-V validation rejects), and clang writes its
+  object *before* the validator rejects it — so "the object is there" does not
+  mean "the compile passed". `%dxc_target` therefore expands to
+  `bin/precompiled-cc.py`, which replays the recorded status and message, and
+  the object of a rejected compile is deleted rather than shipped. An `echo`
+  in place of the compiler instead turns 14 expected failures into passes,
+  which is how this was caught.
+- **A test this cannot account for is not guessed at.** An unexpandable
+  substitution, or a `-Fo` inside `%t` (which `split-file` recreates on the
+  target), leaves the test uncompiled and named in `PRECOMPILED.md`, and it
+  then fails there with a message that says so. lit's `%if` is answered only
+  for what the *suite* fixes — `%if Clang`, `%if Vulkan` — never for a device
+  capability, which is the target's business.
+- **The flags are lit's own.** `-spirv -fspv-target-env=vulkan1.3` for the
+  Vulkan suites, `-fspv-extension=DXC` for clang's, `--dxv-path` so the DXIL
+  is signed: a shader compiled with different flags is a different test.
+
+Verified against the same suite run the ordinary way on the same machine:
+**397 passed, 175 expectedly failed, 1 failed, 99 unsupported — identical
+either way**, with no compiler in the package and none on `PATH`. Every DXIL
+container in a `windows-x64` package carries a non-zero signature digest,
+signed here by `dxv`.
+
+What it does *not* do is exercise the compiler on the target: that is pinned to
+the revision that made the package, and what the target tests is the runtime.
+`PRECOMPILED.md` records which revision that was, along with the tests left
+uncompiled and why.
+
 ### Packaging one test for a bug report
 
 A whole suite is the wrong thing to attach to an issue. `hlsl-repro` takes the
@@ -746,9 +819,17 @@ hlsl-repro --suite clang-d3d12 Feature/HLSLLib/log2.32.test Feature/HLSLLib/exp2
 hlsl-repro --platform windows-x64 --suite vk Feature/Basic/DescriptorTable.test
 ```
 
-Inside is the same install prefix as `hlsl-package`, with the test tree cut
-down to what was named (each test, the `lit.local.cfg` files above it, the
-golden images), plus three things a bug report needs:
+Inside is a cut-down `hlsl-precompile` package: the named tests, the
+`lit.local.cfg` files above them, the golden images, the offloader and lit —
+and **the shaders already compiled**, by the compiler under test, on this
+machine. So the reproducer runs on a machine with no compiler, no DXC and no
+Python packages, whatever platform it was built for:
+
+```bash
+./run.sh                    # or ./bin/lit -v test/clang-vk
+```
+
+Plus four things a bug report needs:
 
 - **`REPRO.md`** — what it is, the exact revision of every checkout it was
   built from (`llvm-project`, `offload-test-suite`, the golden images), the
@@ -761,14 +842,20 @@ golden images), plus three things a bug report needs:
   dependency list. A test using a substitution this expansion does not know is
   left out of the script and named in `REPRO.md` rather than guessed at.
 - **`run.sh` / `run.cmd`** — the same tests through lit, which is what CI runs
-  and therefore the authority on feature detection and XFAILs. This is the
-  path that wants Python with `lit` and `pyyaml`; an argument overrides the
-  suite and anything after it goes to `configure-test-suite.py`
-  (`--dxc-path …`).
+  and therefore the authority on feature detection and XFAILs. Nothing to
+  configure: arguments go straight to lit (`-a`, `--time-tests`).
+- **`shaders/<test>/`** — the shader sources as `split-file` pulled them out of
+  the `.test` file, and in `REPRO.md` the exact command line that compiled each
+  one, with this machine's `dxv` path replaced by a placeholder. Run it with
+  your own build, drop the object into `test/<suite>/…/Output/`, and the suite
+  runs it unchanged — which is how you find out whether the failure is the
+  compiler's or the runtime's.
 
-Pick a `clang-*` suite when the compiler under test should be the one in the
-archive; the DXC-compiled suites (`d3d12`, `vk`, `mtl`) need a `dxc` for that
-machine as well, which `REPRO.md` says.
+The DXC-compiled suites (`d3d12`, `vk`, `mtl`) need no `dxc` on the other
+machine either: their shaders are compiled here too, by the `dxc` this
+worktree resolves. `REPRO.md` records which compiler, at which revision, and
+`run-nolit.sh` still works — its compile line became a note, and it reads the
+object beside the test.
 
 ### What the suite needs on the other side
 
