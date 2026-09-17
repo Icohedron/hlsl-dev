@@ -211,6 +211,7 @@ Rules that differ from a native build:
    machine. Build here, run there.
 3. **The first cross build of an llvm worktree also builds host tablegens**
    into `<worktree>/build-native-tools` — a cross build cannot run its own.
+   Later cross builds refresh them incrementally after source changes.
 4. **Toolchains are built on demand** from `scripts/cross/toolchains.nix`
    (pinned nixpkgs, cached and GC-rooted in `.hlsl-dev/toolchains/`). Nothing
    is realised on shell entry. Cross-specific CMake flags are templates in

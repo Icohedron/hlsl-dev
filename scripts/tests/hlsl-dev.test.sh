@@ -489,6 +489,45 @@ hd_prepare_build_dir "$root/dry-build"
 check "otherwise the build directory is made" \
     "$([ -d "$root/dry-build" ] && echo made || echo clean)" "made"
 
+# --- existing host tools are kept in sync with their checkout ---------------
+# A cross build used to accept the presence of llvm-tblgen as proof that it was
+# current. After an LLVM update that let an old generator consume new .td files
+# and fail on definitions it did not know. Stub the expensive operations here:
+# an existing build must still pass through CMake and Ninja incrementally.
+native_build=$(hd_native_tools_dir "$llvm")
+cross_build="$llvm/build.windows-x64"
+mkdir -p "$native_build/bin" "$cross_build"
+: >"$native_build/bin/llvm-tblgen"
+: >"$native_build/bin/clang-tblgen"
+: >"$cross_build/build.ninja"
+chmod +x "$native_build/bin/llvm-tblgen" "$native_build/bin/clang-tblgen"
+out=$(
+    (
+        hd_prepare_build_dir() {
+            printf 'prepare fresh=%s: %s\n' "${HD_OPT_FRESH:-unset}" "$1"
+        }
+        hd_lock() { :; }
+        hd_cmake_flags() { HD_FLAGS=(-DNATIVE_TOOLS_TEST=1); }
+        hd_parallel_args() {
+            local -n result=$1
+            # shellcheck disable=SC2034 # nameref writes the caller's array
+            result=(--parallel 2)
+        }
+        hd_run() { printf 'run: %s\n' "$*"; }
+        HD_CONFIGURED="" HD_OPT_PLATFORM=windows-x64 HD_OPT_FRESH=1 \
+            hd_ensure_configured "$llvm"
+    ) 2>&1
+)
+contains "host tools: an existing cross build checks for updates" "$out" \
+    "checking the host tablegens for llvm-project for updates"
+contains "host tools: existing build is reconfigured" "$out" \
+    "run: cmake -S $llvm/llvm -B $native_build -DNATIVE_TOOLS_TEST=1"
+contains "host tools: required generators are rebuilt incrementally" "$out" \
+    "run: cmake --build $native_build --parallel 2 --target $HD_NATIVE_TOOLS"
+contains "host tools: cross --fresh does not remove the shared build" "$out" \
+    "prepare fresh=unset: $native_build"
+rm -rf "$native_build" "$cross_build"
+
 # --- several targets go to cmake in one invocation ---------------------------
 HD_DRY_RUN=1
 out=$(hd_build "$llvm" clang opt llvm-dis 2>&1)

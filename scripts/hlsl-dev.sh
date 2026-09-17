@@ -1244,9 +1244,12 @@ hd_tool_version() {
 # ---------------------------------------------------------------------------
 # A cross build of LLVM has to *run* llvm-tblgen, clang-tblgen and a couple of
 # generators, and the ones it builds are for the target. LLVM_NATIVE_TOOL_DIR
-# is where it looks for host copies instead; this builds them, once per llvm
-# worktree, into <worktree>/build-native-tools -- shared by every platform,
-# like build-dist is, because they are plain host binaries.
+# is where it looks for host copies instead; this keeps them, once per llvm
+# worktree, in <worktree>/build-native-tools -- shared by every platform,
+# like build-dist is, because they are plain host binaries. An existing build
+# is configured and built again incrementally: a checkout can change the table
+# definitions and their generators together, and reusing the old executable
+# against the new definitions produces errors that look like bad source input.
 #
 # It is a small build (no tests, no benchmarks, one target, Release) but not a
 # free one: ~10 minutes cold, seconds when sccache has seen the sources.
@@ -1263,13 +1266,20 @@ hd_native_tools_dir() { printf '%s/build-native-tools\n' "$1"; }
 # hd_ensure_native_tools <llvm worktree> -> the directory holding them.
 hd_ensure_native_tools() {
     local wt=$1 build target parallel=()
+    # --fresh belongs to the cross build the user named, not these host tools,
+    # which are shared by every target platform and only need an incremental
+    # refresh.
+    local HD_OPT_FRESH=""
     build=$(hd_native_tools_dir "$wt")
-    if [ -x "$build/bin/llvm-tblgen" ] && [ -x "$build/bin/clang-tblgen" ]; then
+    if [ ! -x "$build/bin/llvm-tblgen" ] || [ ! -x "$build/bin/clang-tblgen" ]; then
+        hd_provide "the host tablegens for $(basename "$wt") -- a cross build cannot run its own" || return 1
+    elif [ -n "${HD_DRY_RUN:-}" ]; then
         printf '%s\n' "$build/bin"
         return 0
+    else
+        hd_log "checking the host tablegens for $(basename "$wt") for updates"
     fi
 
-    hd_provide "the host tablegens for $(basename "$wt") -- a cross build cannot run its own" || return 1
     if [ -z "${HD_DRY_RUN:-}" ]; then
         # Everything below writes to stderr: this function's *stdout* is the
         # directory it resolved, and the caller reads it with $(...).
@@ -2497,6 +2507,12 @@ hd_ensure_configured() {
     build=$(hd_build_dir "$wt")
     if [ ! -f "$build/build.ninja" ] && [ ! -f "$build/Makefile" ]; then
         hd_configure "$wt"
+    elif hd_is_cross && [ "$(hd_kind "$wt")" = "llvm" ]; then
+        # Ninja can re-run the cross CMake project after a source update, but
+        # its host tablegens live in a separate build and are not refreshed by
+        # that re-run. Bring them up to date before they consume the new .td
+        # files. This is also the path hlsl-package and hlsl-precompile take.
+        hd_ensure_native_tools "$wt" >/dev/null
     fi
 }
 

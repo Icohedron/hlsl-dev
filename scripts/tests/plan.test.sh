@@ -84,10 +84,11 @@ if [ -f "$llvm/llvm/CMakeLists.txt" ]; then
     contains "cross: building for the target triple" "$out" \
         "-DLLVM_HOST_TRIPLE=aarch64-unknown-linux-gnu"
     contains "cross: the linker choice is the target's" "$out" "-DLLVM_ENABLE_LLD=OFF"
-    # Like the distribution, the host tablegens are announced rather than built
-    # -- when this workspace has not built them already.
+    # Like the distribution, missing host tablegens are announced rather than
+    # built. Existing ones need no provisioning in a dry run; a real build
+    # asks CMake/Ninja to refresh them incrementally.
     if [ -x "$llvm/build-native-tools/bin/llvm-tblgen" ]; then
-        lacks "cross: existing host tools are not rebuilt" "$out" "would build: the host tablegens"
+        lacks "cross: existing host tools need no provisioning" "$out" "would build: the host tablegens"
     else
         contains "cross: and it announces the host tools" "$out" "would build: the host tablegens"
     fi

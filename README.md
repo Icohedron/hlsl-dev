@@ -544,8 +544,10 @@ unavailable` means.
 A cross build of LLVM has to *run* tablegen, and the tablegens it builds are
 for the target, so the first one also builds host copies into
 `<llvm worktree>/build-native-tools` (Release, no tests, one target — minutes,
-and shared by every platform). `hlsl-info --platform <name>` shows where they
-are, along with the toolchain and the triple.
+and shared by every platform). Later cross builds refresh those tools
+incrementally, so an updated checkout never runs an old tablegen against new
+`.td` files. `hlsl-info --platform <name>` shows where they are, along with the
+toolchain and the triple.
 
 ### The Windows SDK
 
