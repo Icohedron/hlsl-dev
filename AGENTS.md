@@ -394,3 +394,17 @@ These are upstream projects; follow *their* conventions, not this repository's:
   `devenv.nix` or any `env`: that writes it into the Nix store. There is no
   dotenv integration — `.hlsl-dev/settings.env` holds workspace choices, a
   provider holds secrets.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as local markdown files under `.scratch/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage uses the five default role names. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: use root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.

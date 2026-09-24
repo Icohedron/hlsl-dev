@@ -44,3 +44,6 @@ compile_commands.json
 reports/
 _site/
 __pycache__/
+
+# matt pocock issue tracker scratch space
+.scratch/
