@@ -15,6 +15,8 @@ own — the code lives in git submodules and their worktrees:
 | `offload-test-suite/` | GPU execution tests (`check-hlsl-*` suites) |
 | `offload-golden-images/` | Reference images for the offload suite |
 | `wg-hlsl/` | HLSL working group docs and proposals (documentation only) |
+| `tc57/` | HLSL proposals and specification documents (documentation only) |
+| `hlsl-specs/` | Earlier HLSL proposals and specification documents (documentation only) |
 | `compiler-explorer/` | Compiler Explorer, wired to the locally built compilers |
 | `offloader-scripts/` | Python CI monitoring/triage tooling (`offloader-*` tasks) |
 | `scripts/hlsl-dev.sh` | All the real logic: option parsing, worktree/dependency resolution, prerequisites, CMake, locks |
@@ -365,6 +367,14 @@ container live in the same file.
    runs on creation, and it never builds a compiler. While iterating, run one
    check on its own with
    `devenv tasks run hlsl:check:shellcheck --mode single`.
+
+## HLSL proposals and specifications
+
+For every HLSL-related change, consult the relevant proposals and specification
+text in all three repositories: `wg-hlsl/`, `tc57/`, and `hlsl-specs/`.
+`tc57/` is intended to supersede `hlsl-specs/`, but `hlsl-specs/` still
+contains material not yet in `tc57/`. Where their documentation conflicts,
+follow `tc57/`.
 
 ## Working on the submodules
 
