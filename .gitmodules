@@ -24,3 +24,6 @@
 [submodule "tc57"]
 	path = tc57
 	url = https://github.com/hlsl-tc57/tc57.git
+[submodule "hlsl-specs"]
+	path = hlsl-specs
+	url = https://github.com/microsoft/hlsl-specs.git
