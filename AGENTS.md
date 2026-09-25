@@ -368,6 +368,14 @@ container live in the same file.
    check on its own with
    `devenv tasks run hlsl:check:shellcheck --mode single`.
 
+## Coding standards (all code)
+
+For every code change in this workspace, its submodules, or their worktrees,
+read and follow both `llvm-project/llvm/docs/CodingStandards.md` and
+`llvm-project/llvm/docs/ProgrammersManual.md`. These are the baseline for all
+agents and all code here. Apply guidance relevant to the language; use local
+project conventions where those documents do not specify a rule.
+
 ## HLSL proposals and specifications
 
 For every HLSL-related change, consult the relevant proposals and specification
@@ -378,9 +386,10 @@ follow `tc57/`.
 
 ## Working on the submodules
 
-These are upstream projects; follow *their* conventions, not this repository's:
+These are upstream projects; follow their additional conventions alongside the
+LLVM standards above:
 
-- LLVM/Clang: LLVM coding standards, `clang-format` on the diff, commit subjects
+- LLVM/Clang: `clang-format` on the diff, commit subjects
   like `[HLSL] …`, tests under `clang/test/…` or `llvm/test/…` alongside the
   change. `hlsl-format` reports where the staged diff disagrees with
   `.clang-format` and `hlsl-format --fix` applies it; a pre-commit hook prints
