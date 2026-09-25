@@ -21,3 +21,6 @@
 [submodule "wg-hlsl"]
 	path = wg-hlsl
 	url = https://github.com/llvm/wg-hlsl.git
+[submodule "tc57"]
+	path = tc57
+	url = https://github.com/hlsl-tc57/tc57.git
