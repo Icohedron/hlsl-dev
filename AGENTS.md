@@ -376,6 +376,10 @@ read and follow both `llvm-project/llvm/docs/CodingStandards.md` and
 agents and all code here. Apply guidance relevant to the language; use local
 project conventions where those documents do not specify a rule.
 
+In code reviews, every finding that cites a violation of either LLVM document
+must identify the violated rule by its section heading or line number(s) in
+that document, as well as the location of the offending code.
+
 ## HLSL proposals and specifications
 
 For every HLSL-related change, consult the relevant proposals and specification
@@ -383,6 +387,10 @@ text in all three repositories: `wg-hlsl/`, `tc57/`, and `hlsl-specs/`.
 `tc57/` is intended to supersede `hlsl-specs/`, but `hlsl-specs/` still
 contains material not yet in `tc57/`. Where their documentation conflicts,
 follow `tc57/`.
+
+In code reviews, every finding that claims an inconsistency with a HLSL spec
+or proposal must include a link to the relevant source and/or its line
+number(s), as well as the location of the offending code.
 
 ## Working on the submodules
 
