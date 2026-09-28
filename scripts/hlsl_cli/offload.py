@@ -26,6 +26,13 @@ from .command import Request
 
 
 OFFLOAD_INSTALL_TARGETS = ("install-offload-tools", "install-offload-test-suite")
+# A standalone offload build needs LLVM's CMake exports and static libraries;
+# installed Clang also needs the two dylibs when linked against them.
+LLVM_INSTALL_COMPONENTS = frozenset((
+    "clang", "clang-resource-headers", "hlsl-resource-headers", "FileCheck",
+    "split-file", "obj2yaml", "not", "llvm-headers", "LLVMSupport",
+    "LLVMObject", "cmake-exports",
+))
 
 
 @dataclass(frozen=True)
@@ -140,7 +147,9 @@ def _install_plan(request):
         raise BuildError(f"{build}: CMakeCache.txt is missing; reconfigure first")
     values = dict(line.split("=", 1) for line in cache.read_text().splitlines()
                   if line.startswith(("CMAKE_INSTALL_PREFIX:",
-                                      "CMAKE_HOME_DIRECTORY:")) and "=" in line)
+                                      "CMAKE_HOME_DIRECTORY:",
+                                      "LLVM_DISTRIBUTION_COMPONENTS:",
+                                      "LLVM_LINK_LLVM_DYLIB:")) and "=" in line)
     installed_to = next((value for key, value in values.items()
                          if key.startswith("CMAKE_INSTALL_PREFIX:")), None)
     source = values.get("CMAKE_HOME_DIRECTORY:INTERNAL")
@@ -152,6 +161,20 @@ def _install_plan(request):
         raise BuildError(f"{build}: configured install prefix is "
                          f"{installed_to or '(missing)'}, not {prefix}; "
                          "reconfigure before installing")
+    if tree.kind == "llvm":
+        configured_components = set(values.get(
+            "LLVM_DISTRIBUTION_COMPONENTS:STRING", ""
+        ).split(";"))
+        required = set(LLVM_INSTALL_COMPONENTS)
+        if values.get("LLVM_LINK_LLVM_DYLIB:BOOL") == "ON":
+            required.update(("LLVM", "clang-cpp"))
+        missing = sorted(required - configured_components)
+        if missing:
+            raise BuildError(
+                f"{build}: configured LLVM distribution lacks "
+                f"{', '.join(missing)}; run 'hlsl configure --in {tree.path}' "
+                "to include standalone LLVM components before installing"
+            )
     jobs = native._jobs(request)
     targets = (("install-distribution",) if tree.kind == "llvm"
                else OFFLOAD_INSTALL_TARGETS)

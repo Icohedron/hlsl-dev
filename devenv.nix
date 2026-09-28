@@ -104,6 +104,21 @@ let
     "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" # Generates compile_commands.json for clangd
   ];
 
+  # The standalone cache's LLVM distribution components, also used by the
+  # integrated build. An explicit -D is needed: -C cache scripts do not replace
+  # an existing build tree's cached (runtime-only) component list.
+  llvmDistComponents = [
+    "clang" "clang-resource-headers" "clang-tidy" "hlsl-resource-headers"
+    "FileCheck" "split-file" "obj2yaml" "not" "llvm-headers"
+    "LLVMSupport" "LLVMDemangle" "LLVMObject" "LLVMBitReader"
+    "LLVMBitstreamReader" "LLVMCore" "LLVMRemarks" "LLVMMC"
+    "LLVMDebugInfoDWARFLowLevel" "LLVMIRReader" "LLVMAsmParser"
+    "LLVMBinaryFormat" "LLVMMCParser" "LLVMTargetParser" "LLVMTextAPI"
+    "cmake-exports"
+  ];
+  llvmDistFlag = components:
+    "-DLLVM_DISTRIBUTION_COMPONENTS=${lib.concatStringsSep "\${HD_SEMI}" components}";
+
   # The integrated build: LLVM + Clang with the offload test suite pulled in as
   # an external project. Provides check-clang, check-llvm and the check-hlsl-*
   # suites, and installs the standalone LLVM distribution from the same tree.
@@ -150,6 +165,9 @@ let
     # by standalone offload builds. Preserve the integrated build's DirectX
     # target: the standalone cache otherwise replaces the target list.
     "-DLLVM_TARGETS_TO_BUILD=Native\${HD_SEMI}SPIRV\${HD_SEMI}DirectX"
+    # Installed clang links to these dylibs on native/Linux builds. Windows
+    # turns dylib linking off and uses the base component list below.
+    (llvmDistFlag (llvmDistComponents ++ [ "LLVM" "clang-cpp" ]))
     "-C $HD_OFFLOAD_SRC/cmake/caches/StandaloneDistribution.cmake"
     # HLSL cache reads the -D flags above, and adds portable test components.
     # The standalone cache already supplies their superset (including libraries).
@@ -303,6 +321,10 @@ let
   # exceptions and RTTI above all, since DXC's ilist.h has an unconditional
   # try/catch and LLVM's default is -fno-exceptions ("cannot use 'try' with
   # exceptions disabled", while building llvm-tblgen).
+  # Do not request the LLVM/clang dylib install targets on Windows: neither
+  # library is built there. This override applies only to LLVM cross builds.
+  crossLLVMWindowsCMakeFlags = [ (llvmDistFlag llvmDistComponents) ];
+
   crossDXCCMakeFlags = [
     (
       "-DCROSS_TOOLCHAIN_FLAGS_NATIVE="
@@ -407,6 +429,7 @@ in
     # the Python build support. See the "Cross-compilation" section.
     HLSL_CMAKE_FLAGS_CROSS = flagsToString crossCMakeFlags;
     HLSL_CMAKE_FLAGS_CROSS_LLVM = flagsToString crossLLVMCMakeFlags;
+    HLSL_CMAKE_FLAGS_CROSS_LLVM_WINDOWS = flagsToString crossLLVMWindowsCMakeFlags;
     HLSL_CMAKE_FLAGS_CROSS_LINUX = flagsToString crossLinuxCMakeFlags;
     HLSL_CMAKE_FLAGS_CROSS_WINDOWS = flagsToString crossWindowsCMakeFlags;
     HLSL_CMAKE_FLAGS_CROSS_DXC = flagsToString crossDXCCMakeFlags;
@@ -529,7 +552,7 @@ in
         esac
         for v in HLSL_CMAKE_FLAGS_OFFLOAD HLSL_CMAKE_FLAGS_DXC \
                  HLSL_CMAKE_FLAGS_CROSS HLSL_CMAKE_FLAGS_CROSS_LLVM \
-                 HLSL_CMAKE_FLAGS_CROSS_LINUX HLSL_CMAKE_FLAGS_CROSS_WINDOWS \
+                 HLSL_CMAKE_FLAGS_CROSS_LLVM_WINDOWS HLSL_CMAKE_FLAGS_CROSS_LINUX HLSL_CMAKE_FLAGS_CROSS_WINDOWS \
                  HLSL_CMAKE_FLAGS_CROSS_DXC HLSL_CMAKE_FLAGS_CROSS_DXC_DIA \
                  HLSL_CMAKE_FLAGS_NATIVE_TOOLS; do
           test -n "''${!v}" || { echo "$v is empty" >&2; exit 1; }

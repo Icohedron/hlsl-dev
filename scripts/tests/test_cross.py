@@ -23,6 +23,8 @@ def cross_env(workspace, monkeypatch):
     monkeypatch.delenv("HLSL_MSVC_LICENSE", raising=False)
     monkeypatch.delenv("HLSL_DIA_SDK", raising=False)
     monkeypatch.setenv("HLSL_CMAKE_FLAGS_CROSS_LLVM", "-DLLVM_NATIVE_TOOL_DIR=$HD_NATIVE_TOOL_DIR -DLLVM_HOST_TRIPLE=$HD_TARGET_TRIPLE")
+    monkeypatch.setenv("HLSL_CMAKE_FLAGS_CROSS_LLVM_WINDOWS",
+                       "-DLLVM_DISTRIBUTION_COMPONENTS=clang${HD_SEMI}cmake-exports")
     monkeypatch.setenv("HLSL_CMAKE_FLAGS_CROSS_DXC", "-DCROSS_TOOLCHAIN_FLAGS_NATIVE=-DLLVM_ENABLE_EH=ON${HD_SEMI}-DLLVM_ENABLE_RTTI=ON")
     monkeypatch.setenv("HLSL_CMAKE_FLAGS_NATIVE_TOOLS", "-G Ninja -DLLVM_ENABLE_PROJECTS=clang${HD_SEMI}clang-tools-extra")
     tools = workspace / "fake-bin"
@@ -56,7 +58,11 @@ def cross_env(workspace, monkeypatch):
         "    if (build / '.prefix').is_file():\n"
         "        (build / 'CMakeCache.txt').write_text(\n"
         "            'CMAKE_HOME_DIRECTORY:INTERNAL=' + sys.argv[sys.argv.index('-S') + 1] + '\\n'\n"
-        "            + 'CMAKE_INSTALL_PREFIX:PATH=' + (build / '.prefix').read_text() + '\\n')\n"
+        "            + 'CMAKE_INSTALL_PREFIX:PATH=' + (build / '.prefix').read_text() + '\\n'\n"
+        "            + 'LLVM_DISTRIBUTION_COMPONENTS:STRING=clang;clang-resource-headers;'\n"
+        "              'hlsl-resource-headers;FileCheck;split-file;obj2yaml;not;'\n"
+        "              'llvm-headers;LLVMSupport;LLVMObject;cmake-exports;LLVM;clang-cpp\\n'\n"
+        "            + 'LLVM_LINK_LLVM_DYLIB:BOOL=ON\\n')\n"
         "if '--build' in sys.argv:\n"
         "    build = pathlib.Path(sys.argv[sys.argv.index('--build') + 1])\n"
         "    (build / 'bin').mkdir(exist_ok=True)\n"
@@ -80,6 +86,17 @@ def cross_env(workspace, monkeypatch):
 
 def calls(path):
     return [ast.literal_eval(line) for line in path.read_text().splitlines()]
+
+
+def test_windows_distribution_component_override_applies_only_to_llvm(cross_env):
+    from hlsl_cli import cross, workspace as ws
+
+    llvm = checkout(cross_env, "llvm-project", "llvm")
+    tree = ws.Worktree(llvm, "llvm", "")
+    llvm_flags = cross.flags(cross_env, "windows-x64", "llvm", llvm=tree)
+    offload_flags = cross.flags(cross_env, "windows-x64", "offload")
+    assert llvm_flags[-1] == "-DLLVM_DISTRIBUTION_COMPONENTS=clang;cmake-exports"
+    assert not any("LLVM_DISTRIBUTION_COMPONENTS" in flag for flag in offload_flags)
 
 
 def test_list_and_dry_runs_are_read_only(cross_env):

@@ -359,7 +359,11 @@ def fake_cmake(root, *, fail=False):
         "    if (build / '.prefix').is_file():\n"
         "        (build / 'CMakeCache.txt').write_text(\n"
         "            'CMAKE_HOME_DIRECTORY:INTERNAL=' + sys.argv[sys.argv.index('-S') + 1] + '\\n'\n"
-        "            + 'CMAKE_INSTALL_PREFIX:PATH=' + (build / '.prefix').read_text() + '\\n')\n"
+        "            + 'CMAKE_INSTALL_PREFIX:PATH=' + (build / '.prefix').read_text() + '\\n'\n"
+        "            + 'LLVM_DISTRIBUTION_COMPONENTS:STRING=clang;clang-resource-headers;'\n"
+        "              'hlsl-resource-headers;FileCheck;split-file;obj2yaml;not;'\n"
+        "              'llvm-headers;LLVMSupport;LLVMObject;cmake-exports;LLVM;clang-cpp\\n'\n"
+        "            + 'LLVM_LINK_LLVM_DYLIB:BOOL=ON\\n')\n"
         "if '--build' in sys.argv:\n"
         "    build = pathlib.Path(sys.argv[sys.argv.index('--build') + 1])\n"
         "    if 'install-distribution' in sys.argv and (build / '.prefix').is_file():\n"
@@ -1671,6 +1675,19 @@ def test_standalone_external_prefix_and_no_auto_are_safe(workspace, monkeypatch)
                                "--dry-run").stdout
 
 
+def test_devenv_llvm_distribution_components_cover_standalone_build():
+    native = os.getenv("HLSL_CMAKE_FLAGS_LLVM", "")
+    windows = os.getenv("HLSL_CMAKE_FLAGS_CROSS_LLVM_WINDOWS", "")
+    if not native or not windows:
+        pytest.skip("enter the updated devenv shell for CMake flag templates")
+    required = ("clang", "hlsl-resource-headers", "llvm-headers", "LLVMSupport",
+                "LLVMObject", "cmake-exports")
+    for name in required:
+        assert name in native and name in windows
+    assert "LLVM${HD_SEMI}clang-cpp" in native
+    assert "LLVM${HD_SEMI}clang-cpp" not in windows
+
+
 def test_distribution_install_requires_configured_llvm_build(workspace, monkeypatch):
     llvm = checkout(workspace, "llvm-project", "llvm")
     offload, _, dxc = native_inputs(workspace)
@@ -1755,6 +1772,15 @@ def test_distribution_install_rejects_wrong_cache_and_unvalidated_build(workspac
                           *extra)
             assert refused.returncode != 0 and expected in refused.stderr
         assert len(log.read_text().splitlines()) == 1
+    cache.write_text(original +
+                     "LLVM_DISTRIBUTION_COMPONENTS:STRING=clang;hlsl-resource-headers;"
+                     "FileCheck;split-file;obj2yaml;not\n"
+                     "LLVM_LINK_LLVM_DYLIB:BOOL=ON\n")
+    for extra in (("--dry-run",), ()):
+        missing = cli(workspace, "distribution", "install", "--in", str(llvm),
+                      *extra)
+        assert missing.returncode != 0 and "cmake-exports" in missing.stderr
+    assert len(log.read_text().splitlines()) == 1
     cache.write_text(original)
     selection = workspace / ".hlsl-dev/selections/llvm-project.json"
     saved = json.loads(selection.read_text())

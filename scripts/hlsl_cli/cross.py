@@ -162,8 +162,10 @@ def flags(root, platform, kind, *, llvm=None):
     for label in ("HLSL_CMAKE_FLAGS_CROSS",
                   "HLSL_CMAKE_FLAGS_CROSS_WINDOWS" if is_windows(platform)
                   else "HLSL_CMAKE_FLAGS_CROSS_LINUX",
-                  *(('HLSL_CMAKE_FLAGS_CROSS_LLVM',) if kind == "llvm" else ()),
-                  *(('HLSL_CMAKE_FLAGS_CROSS_DXC',) if kind == "dxc" else ())):
+                  *(("HLSL_CMAKE_FLAGS_CROSS_LLVM",) if kind == "llvm" else ()),
+                  *(("HLSL_CMAKE_FLAGS_CROSS_LLVM_WINDOWS",)
+                    if kind == "llvm" and is_windows(platform) else ()),
+                  *(("HLSL_CMAKE_FLAGS_CROSS_DXC",) if kind == "dxc" else ())):
         result.extend(expand_flags(os.getenv(label), values, label))
     if kind == "dxc" and is_windows(platform):
         dia = os.getenv("HLSL_DIA_SDK")

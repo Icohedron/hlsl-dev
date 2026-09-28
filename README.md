@@ -158,7 +158,11 @@ configured build tree: `install-distribution` in LLVM, or
 The CLI does not invoke configure, change build selections, fetch toolchains
 or provision missing LLVM/DXC dependencies. CMake may regenerate its build
 files when sources have changed. Run `hlsl configure --in <worktree>` first if
-necessary (LLVM before standalone offload). `--in`, `--d3d12 on|off` and
+necessary (LLVM before standalone offload). If an existing LLVM cache lacks
+`cmake-exports` or LLVM libraries, preview
+`hlsl configure --in llvm-project --dxc nix --dry-run`, then explicitly
+configure before retrying the install;
+install itself will not rewrite the cache. `--in`, `--d3d12 on|off` and
 `--platform` select the existing tree; `--jobs` limits parallel work. Preview
 with `--dry-run` to verify its build directory and install prefix. A custom
 build selected with `HLSL_BUILD_DIR` installs to its own `install/`; standalone
