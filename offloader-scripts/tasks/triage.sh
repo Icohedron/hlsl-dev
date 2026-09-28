@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # summary: Triage a report produced by offloader-monitor
 set -eo pipefail
-# shellcheck source=../../scripts/hlsl-dev.sh
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/hlsl-dev.sh"
+# shellcheck source=../common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../common.sh"
 
 HD_TASK_ARGS="<report>"
 HD_TASK_DESC="Triages a report produced by monitor_failures.py (offloader-monitor). Writes

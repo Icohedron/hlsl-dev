@@ -1,9 +1,9 @@
-# CMake toolchain files for the cross-compilation platforms `hlsl-cross` lists.
+# CMake toolchain files for the cross-compilation platforms `hlsl cross list` lists.
 #
 # This is deliberately *not* part of devenv.nix: everything devenv.nix
 # references is realised when the environment is entered, and a cross toolchain
 # (the MSVC SDK above all) is gigabytes that most sessions never touch. The
-# tasks build one on demand instead --
+# Python CLI builds one on demand instead --
 #
 #     nix-build scripts/cross/toolchains.nix \
 #       --argstr nixpkgs "$HLSL_NIXPKGS_PATH" --argstr platform windows-x64 \
@@ -27,14 +27,13 @@
 # The two Linux platforms are symmetric on purpose: whichever of them is the
 # machine you are on is the *native* build, and the other is the cross one, so
 # this file reads the same on an x86-64 workstation and on an ARM laptop.
-# `hd_host_platform` in scripts/hlsl-dev.sh is what decides which is which.
+# `host_platform()` in scripts/hlsl_cli/workspace.py makes that choice.
 #
 # The Windows pair needs Microsoft's headers and import libraries. nixpkgs has
 # them (`windows.sdk`: an `xwin` splat of the official packages), but they are
 # unfree and gated on accepting the Visual Studio licence, which is a decision
 # for the person building, not for this file: `acceptMsvcLicense` is false
-# here, and `hlsl-cross --accept-msvc-license` is what turns it on, once, in
-# the workspace settings.
+# here, and `HLSL_MSVC_LICENSE=accepted` is an explicit per-call acceptance.
 #
 # There is no MinGW (GNU-ABI Windows) platform, although nixpkgs has those
 # toolchains and they did work. Everything worth cross-compiling for Windows

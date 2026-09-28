@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # summary: Survey the llvm/offload-test-suite scheduled workflows
 set -eo pipefail
-# shellcheck source=../../scripts/hlsl-dev.sh
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/hlsl-dev.sh"
+# shellcheck source=../common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../common.sh"
 
 HD_TASK_ARGS="[full|fast|status]"
 HD_TASK_DESC="Runs monitor_failures.py -- surveys the latest completed scheduled run of every

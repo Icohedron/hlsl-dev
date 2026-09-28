@@ -12,7 +12,7 @@ let
   # The vk / clang-vk suites execute SPIR-V, so they need a driver (an "ICD").
   # Which one is not a Nix question -- it changes between machines and between
   # runs -- so the choice, and the reasons it has to be made at all, live in
-  # `hlsl-vk` and scripts/hlsl-dev.sh. This file only says where Mesa's ICD
+  # `hlsl gpu vulkan` and scripts/hlsl_cli/gpu.py. This file only says where Mesa's ICD
   # manifests and the validation layers are.
   mesaIcdDir = "${pkgs.mesa}/share/vulkan/icd.d";
   vulkanLayerPath = "${pkgs.vulkan-validation-layers}/share/vulkan/explicit_layer.d";
@@ -20,10 +20,11 @@ let
   # ----------------------------------------------------------------------
   # Build Dependencies
   # ----------------------------------------------------------------------
-  # Python with the packages LLVM's lit testing framework and the scripts need.
+  # Python with LLVM's lit dependencies and pytest for public CLI tests.
   pythonDeps = pkgs.python3.withPackages (
     python-pkgs: with python-pkgs; [
       pyyaml
+      pytest
       virtualenv
     ]
   );
@@ -31,14 +32,8 @@ let
   # ----------------------------------------------------------------------
   # Task scripts
   # ----------------------------------------------------------------------
-  # Every executable in scripts/tasks/ becomes an `hlsl-<name>` command, every
-  # one in offloader-scripts/tasks/ an `offloader-<name>` command. The wrapper
-  # devenv puts on PATH only dispatches: the body is read from the checkout at
-  # run time, so editing a task takes effect immediately, and `--help` and the
-  # option parsing come from scripts/hlsl-dev.sh.
-  #
-  # The one-line `# summary:` comment in each script is what `devenv info` and
-  # `hlsl` (the umbrella command) list, so it lives in exactly one place.
+  # Offloader CI tasks remain separate. HLSL has one checkout-source Python
+  # command; devenv registers no legacy task wrappers.
   summaryOf =
     file:
     let
@@ -58,8 +53,7 @@ let
       fileName: _:
       let
         base = lib.removeSuffix ".sh" fileName;
-        # `hlsl.sh` is the umbrella command itself, not `hlsl-hlsl`.
-        name = if base == prefix then base else "${prefix}-${base}";
+        name = "${prefix}-${base}";
       in
       lib.nameValuePair name {
         description = summaryOf (dir + "/${fileName}");
@@ -74,7 +68,7 @@ let
   # CMake Configurations
   # ----------------------------------------------------------------------
   # These lists are *templates*: the `$HD_...` placeholders are left unexpanded
-  # in the environment and are filled in per invocation by scripts/hlsl-dev.sh,
+  # in the environment and are filled in per invocation by scripts/hlsl_cli/build_support.py,
   # once it has worked out which worktrees the command applies to. That is what
   # lets one flag list serve every worktree of a repository instead of one
   # hard-coded checkout.
@@ -143,7 +137,7 @@ let
     "-DLLVM_LINK_LLVM_DYLIB=ON"
 
     # Offload Test Suite & DXC Integration. DXC_EXECUTABLE/DXV_EXECUTABLE are
-    # spelled out so that `hlsl-test --dxc <worktree>` can retarget an existing
+    # spelled out so that `hlsl test --dxc <worktree>` can retarget an existing
     # build tree at another DXC without a fresh configure.
     "-DLLVM_EXTERNAL_PROJECTS=OffloadTest"
     "-DLLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR=$HD_OFFLOAD_SRC"
@@ -205,7 +199,7 @@ let
   # ----------------------------------------------------------------------
   # Cross-compilation
   # ----------------------------------------------------------------------
-  # `hlsl-build --platform windows-x64` (and linux-arm64, windows-arm64)
+  # `hlsl build --platform windows-x64` (and linux-arm64, windows-arm64)
   # appends these to the flags above, so a cross build is
   # the native one plus a toolchain file and the handful of decisions that
   # change when the binaries are not for this machine. Later -D flags win, so
@@ -252,7 +246,7 @@ let
   # Extra flags for the builds that compile LLVM itself (the integrated build
   # and the standalone distribution). A cross build cannot run the tablegens it
   # needs, so it is handed the ones built for this machine
-  # (see hd_ensure_native_tools in scripts/hlsl-dev.sh), and it has to be told
+  # (see scripts/hlsl_cli/build_support.py), and it has to be told
   # what it is producing: LLVM would otherwise ask the build machine.
   crossLLVMCMakeFlags = [
     "-DLLVM_NATIVE_TOOL_DIR=$HD_NATIVE_TOOL_DIR"
@@ -343,7 +337,7 @@ let
   # ----------------------------------------------------------------------
   # flock
   # ----------------------------------------------------------------------
-  # The build lock (hd_lock in scripts/hlsl-dev.sh) needs one binary out of
+  # Build locks (scripts/hlsl_cli/build_support.py) need one binary out of
   # util-linux, and putting util-linux itself in `packages` puts *two* of its
   # outputs in the profile -- `bin` and `out`, which ship the same 119 bash
   # completions between them. devenv's buildEnv then prints a "colliding
@@ -400,7 +394,7 @@ in
     cvise
     directx-shader-compiler
     clang-tools
-    shellcheck # the task layer is bash; `devenv test` lints it
+    shellcheck # the offloader task wrappers are Bash; `devenv test` lints them
     nodejs_22 # Required for Compiler Explorer (pinned to v22 LTS)
   ];
 
@@ -421,7 +415,7 @@ in
     HLSL_CMAKE_FLAGS_DXC = flagsToString dxcCMakeFlags;
 
     # Cross-compilation: appended to the lists above, in this order, by
-    # hd_cross_flags. See the "Cross-compilation" section.
+    # the Python build support. See the "Cross-compilation" section.
     HLSL_CMAKE_FLAGS_CROSS = flagsToString crossCMakeFlags;
     HLSL_CMAKE_FLAGS_CROSS_LLVM = flagsToString crossLLVMCMakeFlags;
     HLSL_CMAKE_FLAGS_CROSS_LINUX = flagsToString crossLinuxCMakeFlags;
@@ -431,22 +425,21 @@ in
     HLSL_CMAKE_FLAGS_NATIVE_TOOLS = flagsToString nativeToolsCMakeFlags;
 
     # The nixpkgs this environment is pinned to. scripts/cross/toolchains.nix is
-    # built against it by `hlsl-cross`, so a cross toolchain comes from the
+    # built against it by `hlsl cross fetch`, so a cross toolchain comes from the
     # same revision as the native one without any of it being realised on shell
     # entry.
     #
     # `toString` on purpose: interpolating would copy the whole nixpkgs tree
     # into the store a second time, just to have it rooted. Nothing roots this
     # path, so a garbage collection can take it away -- and that is handled
-    # where it matters, in hd_nixpkgs_path, which fetches the same revision
-    # again from the lock file.
+    # where it matters, when fetching the pinned toolchain.
     HLSL_NIXPKGS_PATH = toString pkgs.path;
 
     # Fallback compiler for offload runs when no DirectXShaderCompiler worktree
     # has been built yet (`--dxc nix` selects it explicitly).
     HLSL_DXC_PREBUILT_DIR = "${pkgs.directx-shader-compiler}/bin";
 
-    # Where `hlsl-vk` looks for Mesa's ICD manifests.
+    # Where `hlsl gpu vulkan` looks for Mesa's ICD manifests.
     HLSL_VK_ICD_DIR = mesaIcdDir;
 
     # Explicit layer manifests for `offloader -validation-layer`: the shell sets
@@ -455,7 +448,7 @@ in
   };
 
   # No dotenv integration. Nothing here needs one any more: the choices tasks
-  # make (the Vulkan driver, D3D12) live in .hlsl-dev/settings.env, where they
+  # make (the Vulkan driver, D3D12) live in .hlsl-dev/gpu.json, where they
   # apply to the next command rather than the next shell, and the one secret is
   # secretspec's (see secretspec.toml). A `.env` would be a third place to look
   # for the same kind of thing. devenv still points it out if one appears.
@@ -469,9 +462,8 @@ in
     # Pin the Vulkan loader to one driver, so that a plain vulkaninfo, offloader
     # or llvm-lit run in this shell is as safe as one made through a task (the
     # loader calls into *every* manifest it discovers, and under WSL one of them
-    # segfaults). `hlsl-vk` owns the choice and the resolution; this only asks
-    # it what the answer is.
-    eval "$(hlsl-vk --export)"
+    # segfaults). The Python GPU command owns the selection and exports.
+    eval "$(hlsl gpu vulkan --export)"
 
     # clang-tidy runs its own bare frontend and ignores the cc-wrapper's
     # NIX_CFLAGS_COMPILE, so it cannot find libstdc++, glibc, directx-headers,
@@ -490,21 +482,18 @@ in
   # ------------------------------------------------------------------------
   # Tasks
   # ------------------------------------------------------------------------
-  scripts =
-    mkTasks {
-      subdir = "scripts/tasks";
-      prefix = "hlsl";
-    }
-    // mkTasks {
-      subdir = "offloader-scripts/tasks";
-      prefix = "offloader";
+  scripts = {
+    hlsl = {
+      description = "HLSL workspace CLI (checkout-source Python)";
+      exec = ''exec python3 -B "''${DEVENV_ROOT:?not in the developer environment; run 'devenv shell'}/scripts/hlsl.py" "$@"'';
     };
+  } // mkTasks {
+    subdir = "offloader-scripts/tasks";
+    prefix = "offloader";
+  };
 
-  # No `processes` here. Compiler Explorer is the one long-running thing in the
-  # workspace, and it is `hlsl-compiler-explorer`: registering it as a devenv
-  # process would also start it from `devenv test` -- which npm-installs the
-  # checkout and boots a server -- and `devenv test` is what the dev container
-  # runs on creation. One way to start it is also one way fewer to explain.
+  # Compiler Explorer is started explicitly with `hlsl tools explorer`, not
+  # as a devenv process (which would run during `devenv test`).
 
   # ------------------------------------------------------------------------
   # `devenv test`
@@ -537,7 +526,7 @@ in
   # in the workspace.
   tasks = {
     "hlsl:check:env" = {
-      description = "Toolchain, workspace layout, CMake flag templates, GPU setup";
+      description = "Toolchain, workspace layout, CMake flags and GPU setup";
       showOutput = true;
       exec = ''
         set -e
@@ -547,151 +536,81 @@ in
         sccache --version
         python3 --version
         wt --version >/dev/null && echo "worktrunk ok"
-
         test "$HLSL_DEV_ROOT" = "$DEVENV_ROOT"
-        test -f "$HLSL_DEV_ROOT/devenv.nix"
-
-        # The flag templates must reach the environment with their placeholders
-        # intact: expanding them is scripts/hlsl-dev.sh's job, per invocation.
+        test -f "$DEVENV_ROOT/scripts/hlsl.py"
         case "$HLSL_CMAKE_FLAGS_LLVM" in
           *'-DCMAKE_BUILD_TYPE=$HD_BUILD_TYPE'*) ;;
           *) echo "HLSL_CMAKE_FLAGS_LLVM lost its placeholders" >&2; exit 1 ;;
         esac
-        for v in HLSL_CMAKE_FLAGS_LLVM_DIST HLSL_CMAKE_FLAGS_OFFLOAD HLSL_CMAKE_FLAGS_DXC; do
-          test -n "''${!v}" || { echo "$v is empty" >&2; exit 1; }
-        done
-
-        # Cross-compilation: the same templates, plus the pinned nixpkgs the
-        # toolchains are built from (a store path, not a channel).
-        for v in HLSL_CMAKE_FLAGS_CROSS HLSL_CMAKE_FLAGS_CROSS_LLVM \
+        for v in HLSL_CMAKE_FLAGS_LLVM_DIST HLSL_CMAKE_FLAGS_OFFLOAD HLSL_CMAKE_FLAGS_DXC \
+                 HLSL_CMAKE_FLAGS_CROSS HLSL_CMAKE_FLAGS_CROSS_LLVM \
                  HLSL_CMAKE_FLAGS_CROSS_LINUX HLSL_CMAKE_FLAGS_CROSS_WINDOWS \
-                 HLSL_CMAKE_FLAGS_CROSS_DXC \
-                 HLSL_CMAKE_FLAGS_CROSS_DXC_DIA HLSL_CMAKE_FLAGS_NATIVE_TOOLS; do
+                 HLSL_CMAKE_FLAGS_CROSS_DXC HLSL_CMAKE_FLAGS_CROSS_DXC_DIA \
+                 HLSL_CMAKE_FLAGS_NATIVE_TOOLS; do
           test -n "''${!v}" || { echo "$v is empty" >&2; exit 1; }
         done
         case "$HLSL_CMAKE_FLAGS_CROSS" in
           *'-DCMAKE_TOOLCHAIN_FILE=$HD_TOOLCHAIN_FILE'*) ;;
           *) echo "HLSL_CMAKE_FLAGS_CROSS lost its placeholders" >&2; exit 1 ;;
         esac
-        test -n "$HLSL_NIXPKGS_PATH" || {
-          echo "HLSL_NIXPKGS_PATH is empty" >&2; exit 1; }
+        test -n "$HLSL_NIXPKGS_PATH"
         test -f "$DEVENV_ROOT/scripts/cross/toolchains.nix"
-        hlsl-cross >/dev/null
-
-        hlsl-vk
-        eval "$(hlsl-vk --export)"
+        hlsl cross list >/dev/null
+        eval "$(hlsl gpu vulkan --export)"
         test -e "''${VK_DRIVER_FILES:-$HLSL_VK_ICD_DIR}"
-        hlsl-d3d12
+        hlsl gpu d3d12 status >/dev/null
       '';
     };
 
-    "hlsl:check:tasks" = {
-      description = "Every task is on PATH and answers --help";
+    "hlsl:check:commands" = {
+      description = "Public CLI and offloader commands answer --help";
       after = [ "hlsl:check:env@completed" ];
       showOutput = true;
       exec = ''
         set -e
-        hlsl >/dev/null
-        for t in "$DEVENV_ROOT"/scripts/tasks/*.sh; do
-          t=$(basename "$t" .sh)
-          [ "$t" = "hlsl" ] || "hlsl-$t" --help >/dev/null
+        hlsl --help >/dev/null
+        for command in list info setup workspace format tools cross configure build \
+                       test lit gpu distribution clean trim package; do
+          hlsl "$command" --help >/dev/null
         done
         for t in "$DEVENV_ROOT"/offloader-scripts/tasks/*.sh; do
           "offloader-$(basename "$t" .sh)" --help >/dev/null
         done
-        hlsl-ls >/dev/null
-        echo "$(hlsl | grep -c '^  [a-z]') tasks, all with --help"
+        hlsl list >/dev/null
+        echo "CLI and offloader help ok"
       '';
     };
 
-    "hlsl:check:plan" = {
-      description = "Dry-run a configure and a build for each real checkout";
-      after = [ "hlsl:check:tasks@completed" ];
+    "hlsl:check:python" = {
+      description = "Public CLI regression suite (disposable worktrees)";
+      after = [ "hlsl:check:commands@completed" ];
       showOutput = true;
-      exec = ''bash "$DEVENV_ROOT/scripts/tests/plan.test.sh"'';
-    };
-
-    "hlsl:check:selftest" = {
-      description = "scripts/hlsl-dev.sh self-test (fake checkouts, no compiler)";
-      after = [ "hlsl:check:plan@completed" ];
-      showOutput = true;
-      exec = ''bash "$DEVENV_ROOT/scripts/tests/hlsl-dev.test.sh"'';
-    };
-
-    "hlsl:check:stage" = {
-      description = "The prefix hlsl-package/hlsl-repro archive (fake checkouts)";
-      after = [ "hlsl:check:selftest@completed" ];
-      showOutput = true;
-      exec = ''bash "$DEVENV_ROOT/scripts/tests/stage.test.sh"'';
-    };
-
-    "hlsl:check:precompile" = {
-      description = "The precompiled-package machinery (fake compiler, no GPU)";
-      after = [ "hlsl:check:stage@completed" ];
-      showOutput = true;
-      exec = ''bash "$DEVENV_ROOT/scripts/tests/precompile.test.sh"'';
-    };
-
-    "hlsl:check:trim" = {
-      description = "hlsl-trim against a real build graph in a throwaway tree";
-      after = [ "hlsl:check:precompile@completed" ];
-      showOutput = true;
-      exec = ''bash "$DEVENV_ROOT/scripts/tests/trim.test.sh"'';
-    };
-
-    "hlsl:check:clean" = {
-      description = "hlsl-clean and its sweeps against throwaway build trees";
-      after = [ "hlsl:check:trim@completed" ];
-      showOutput = true;
-      exec = ''bash "$DEVENV_ROOT/scripts/tests/clean.test.sh"'';
+      exec = ''python3 -B -m pytest -q "$DEVENV_ROOT/scripts/tests"/test_*.py'';
     };
 
     "hlsl:check:hook" = {
-      description = "The clang-format hook, driven by a real commit";
-      after = [ "hlsl:check:clean@completed" ];
+      description = "Warning-only formatting hook via Python regression tests";
+      after = [ "hlsl:check:python@completed" ];
       showOutput = true;
-      exec = ''bash "$DEVENV_ROOT/scripts/tests/format-hook.test.sh"'';
+      exec = ''python3 -B -m pytest -q "$DEVENV_ROOT/scripts/tests/test_formatting.py"'';
     };
 
-    # Last: it is by far the slowest, and everything above gives faster
-    # feedback on the thing you just changed.
     "hlsl:check:shellcheck" = {
-      description = "ShellCheck over the task layer";
+      description = "ShellCheck for offloader task wrappers";
       after = [ "hlsl:check:hook@completed" ];
       showOutput = true;
-      exec = ''
-        set -e
-        shellcheck --shell=bash "$DEVENV_ROOT"/scripts/hlsl-dev.sh \
-          "$DEVENV_ROOT"/scripts/tasks/*.sh "$DEVENV_ROOT"/offloader-scripts/tasks/*.sh \
-          "$DEVENV_ROOT"/scripts/tests/*.sh
-        echo "clean"
-      '';
+      exec = ''shellcheck --shell=bash "$DEVENV_ROOT"/offloader-scripts/tasks/*.sh'';
     };
 
-    # Keep the clang-format pre-commit hook in place in every checkout that has
-    # a .clang-format. It warns and lets the commit through; `hlsl-format` is
-    # the same check by hand. Opt out with HLSL_INSTALL_HOOKS=0 (in .env, say).
-    "hlsl:hooks" = {
-      description = "Install the clang-format pre-commit hook in the checkouts";
-      after = [ "devenv:enterShell" ];
-      showOutput = true;
-      status = ''
-        [ "''${HLSL_INSTALL_HOOKS:-1}" = "0" ] || hlsl-format --check-hooks
-      '';
-      exec = ''hlsl-format --install-hooks'';
-    };
+    # Hooks are installed explicitly with `hlsl format --install-hooks`.
+    # Shell entry stays read-only, including before legacy-state migration.
 
-    # Not part of the tests: a hint on shell entry, once, when the workspace has
-    # no sources yet. `status` exiting 0 skips the task, so it costs one `test`
-    # per shell in the normal case.
     "hlsl:submodules" = {
-      description = "Point at hlsl-setup when the submodules are not checked out";
+      description = "Point at hlsl setup when submodules are missing";
       after = [ "devenv:enterShell" ];
       showOutput = true;
       status = ''test -f "$DEVENV_ROOT/llvm-project/llvm/CMakeLists.txt"'';
-      exec = ''
-        echo "The submodules are not checked out yet: run 'hlsl-setup'."
-      '';
+      exec = ''echo "The submodules are not checked out yet: run 'hlsl setup'."'';
     };
   };
 
@@ -725,7 +644,7 @@ in
     # directory it was created in, ninja records the source paths it was given,
     # compile_commands.json records both, and a `wt` worktree's .git file
     # records the gitdir it belongs to. Mount the same tree somewhere else and
-    # all of it points into thin air -- a `hlsl-build` in a worktree the host
+    # all of it points into thin air -- `hlsl build` in a worktree the host
     # configured fails with "the current CMakeCache.txt directory is different
     # than the directory where CMakeCache.txt was created", and git in that
     # worktree with "not a git repository". Path parity makes the container and
@@ -774,7 +693,7 @@ in
     ];
 
     # HLSL_VK_DRIVER is deliberately not set here: lavapipe is the default
-    # anyway, and an ambient value would override what `hlsl-vk` records.
+    # anyway, and an ambient value would override what `hlsl gpu vulkan` records.
     containerEnv.SCCACHE_IDLE_TIMEOUT = "0";
 
     # Builds here go to <worktree>/build-container, not <worktree>/build.
@@ -789,15 +708,13 @@ in
     # leaves the host's tree alone.
     #
     # It is the *name* rather than one directory, so it holds for every
-    # worktree: what `hlsl-ls` calls built in here is what is built in here,
+    # worktree: what `hlsl list` calls built in here is what is built in here,
     # and the same command on the host still reports the host's trees. What
     # they do share is the memory of what builds against what,
     # <llvm worktree>/build-dist, the plain-LLVM distribution an offload
     # worktree builds against, and <worktree>/compile_commands.json -- the
     # symlink a configure leaves at the root of the worktree, because clangd
-    # looks in `build/` and its own directory and nowhere else, so an editor
-    # opened on the host would otherwise never find what was built in here
-    # (see hd_link_cdb in scripts/hlsl-dev.sh).
+    # looks in `build/` and its own directory and nowhere else.
     containerEnv.HLSL_BUILD_DIR_NAME = "build-container";
 
     # Empty when unset on the host, which offloader-scripts reads as "no token".

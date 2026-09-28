@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # summary: Assemble the GitHub Pages site from the reports
 set -eo pipefail
-# shellcheck source=../../scripts/hlsl-dev.sh
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/hlsl-dev.sh"
+# shellcheck source=../common.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../common.sh"
 
 HD_TASK_DESC="Assembles the GitHub Pages site from offloader-scripts/reports/ into _site/:
 copies each report's self-contained HTML (and its JSON/CSV/MD siblings, minus
