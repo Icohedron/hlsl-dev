@@ -48,7 +48,7 @@ def make_install(root, kind="llvm", platform="native"):
     test_root = build / ("tools/OffloadTest/test" if kind == "llvm" else "test")
     site = test_root / "clang-vk/lit.site.cfg.py"
     site.parent.mkdir(parents=True)
-    dist_build = "build-dist" + ("." + platform if platform != "native" else "")
+    dist_build = "build" + ("." + platform if platform != "native" else "")
     bin_dir = build / "bin" if kind == "llvm" else llvm / dist_build / "install/bin"
     dxc = root / "host-dxc/bin"
     dxc.mkdir(parents=True)
@@ -329,7 +329,7 @@ def test_standalone_windows_merges_both_installs_without_host_paths(workspace, t
     # An old copy in the offload prefix must not replace the compiler's headers.
     (build / "install/lib/clang/1/include").mkdir(parents=True)
     (build / "install/lib/clang/1/include/hlsl.h").write_text("stale")
-    dist = llvm / "build-dist.windows-x64/install"
+    dist = llvm / "build.windows-x64/install"
     (dist / "bin/clang-dxc.exe").unlink()
     (dist / "bin/clang.exe").write_bytes(b"MZ")
     (dist / "bin/clang-dxc.exe").symlink_to("clang.exe")
@@ -387,7 +387,7 @@ def test_standalone_build_and_package_lock_prefix_before_build(workspace, monkey
     from hlsl_cli import offload, package
 
     llvm, tree, _, build, _ = make_install(workspace, "offload")
-    prefix = llvm / "build-dist/install"
+    prefix = llvm / "build/install"
     (prefix / "lib/cmake/llvm").mkdir(parents=True)
     (prefix / "lib/cmake/llvm/LLVMConfig.cmake").touch()
     dxc = workspace / "host-dxc/bin"
@@ -478,7 +478,7 @@ def test_offload_replans_selected_distribution_before_build(workspace, monkeypat
     from hlsl_cli import offload
 
     llvm, tree, _, _, _ = make_install(workspace, "offload")
-    prefix = llvm / "build-dist/install"
+    prefix = llvm / "build/install"
     (prefix / "lib/cmake/llvm").mkdir(parents=True)
     (prefix / "lib/cmake/llvm/LLVMConfig.cmake").touch()
     dxc = workspace / "host-dxc/bin"
@@ -510,7 +510,7 @@ def test_standalone_external_distribution_and_missing_prefix(workspace, tmp_path
     (external / "lib/clang/1/include/hlsl.h").write_text("selected header")
     # This build was configured against the selected external prefix.
     site.write_text(site.read_text().replace(
-        str(llvm / "build-dist/install/bin"), str(external / "bin")
+        str(llvm / "build/install/bin"), str(external / "bin")
     ))
     archive = tmp_path / "external.tar.gz"
     archive.write_bytes(b"previous archive")
@@ -532,12 +532,12 @@ def test_standalone_external_distribution_and_missing_prefix(workspace, tmp_path
     assert all(str(workspace).encode() not in path.read_bytes()
                for path in moved.rglob("*") if path.is_file())
     assert not (build / "install/bin/clang-dxc").exists()
-    assert (llvm / "build-dist/install/bin/clang-dxc").is_file()
+    assert (llvm / "build/install/bin/clang-dxc").is_file()
 
 
 def test_standalone_windows_rejects_distribution_host_symlink(workspace, tmp_path):
     llvm, offload, _, _, _ = make_install(workspace, "offload", "windows-x64")
-    dist_bin = llvm / "build-dist.windows-x64/install/bin"
+    dist_bin = llvm / "build.windows-x64/install/bin"
     (dist_bin / "host-only.exe").symlink_to(tmp_path / "host-only.exe")
     (tmp_path / "host-only.exe").write_text("not for target")
     archive = tmp_path / "full.zip"
@@ -785,7 +785,7 @@ def precompiled_fixture(workspace, platform="native"):
     llvm, offload, _, build, site = make_install(workspace, "llvm", platform)
     # Keep the native host compiler separate from the target install so a
     # missing host tool can be tested without invalidating the full package.
-    native = llvm / "build-dist/install/bin"
+    native = llvm / "build/install/bin"
     native.mkdir(parents=True, exist_ok=True)
     split = native / "split-file"
     split.write_text(
@@ -864,9 +864,7 @@ def test_precompiled_archive_replays_host_verdicts_without_dxc(workspace, tmp_pa
 
 def test_precompiled_archive_runs_with_real_lit_and_no_target_compiler(workspace, tmp_path):
     llvm, build, native = precompiled_fixture(workspace)
-    lit_source = Path(
-        "/var/home/aikoh/my-distrobox/hlsl-dev/llvm-project/llvm/utils/lit/lit"
-    )
+    lit_source = Path(__file__).resolve().parents[2] / "llvm-project/llvm/utils/lit/lit"
     assert (lit_source / "main.py").is_file()
     lit_checkout = llvm / "llvm/utils/lit/lit"
     shutil.rmtree(lit_checkout)
@@ -897,7 +895,6 @@ def test_precompiled_archive_runs_with_real_lit_and_no_target_compiler(workspace
         "# RUN: %dxc_target -T cs_6_5 -Fo %t.o %t/reject.hlsl\n"
         "# RUN: %offloader %t/pipeline.yaml %t.o\n"
     )
-    shutil.copy2(native / "split-file", installed / "bin/split-file")
     offloader = installed / "bin/offloader"
     offloader.write_text(
         f"#!{sys.executable}\n"
@@ -954,7 +951,7 @@ def test_precompiled_missing_native_compiler_does_not_replace_archive(workspace,
     result = cli(workspace, "package", "precompiled", "clang-vk", "--in", str(llvm),
                  "--no-auto", "--out", str(archive))
     assert result.returncode != 0
-    assert "native compiler missing" in result.stderr
+    assert "missing full install" in result.stderr
     assert archive.read_bytes() == b"old"
 
 
@@ -1069,9 +1066,7 @@ def test_repro_refuses_uncompiled_named_tests(workspace, tmp_path):
 
 def test_repro_falls_back_to_lit_for_all_named_tests(workspace, tmp_path):
     llvm, build, native = precompiled_fixture(workspace)
-    lit_source = Path(
-        "/var/home/aikoh/my-distrobox/hlsl-dev/llvm-project/llvm/utils/lit/lit"
-    )
+    lit_source = Path(__file__).resolve().parents[2] / "llvm-project/llvm/utils/lit/lit"
     lit_checkout = llvm / "llvm/utils/lit/lit"
     shutil.rmtree(lit_checkout)
     shutil.copytree(lit_source, lit_checkout,
@@ -1094,7 +1089,6 @@ def test_repro_falls_back_to_lit_for_all_named_tests(workspace, tmp_path):
         "config.substitutions.append(('FileCheck', "
         "os.path.join(config.llvm_tools_dir, 'FileCheck')))\n"
     )
-    shutil.copy2(native / "split-file", installed / "bin/split-file")
     offloader = installed / "bin/offloader"
     offloader.write_text("#!/bin/sh\nif [ -e \"$2\" ]; then cat \"$2\"; else exit 0; fi\n")
     offloader.chmod(0o755)

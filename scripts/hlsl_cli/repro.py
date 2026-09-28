@@ -434,12 +434,14 @@ def execute(request):
             dist_prefix=request.dist_prefix,
         ))
     full = initial.full
-    locks = sorted({str(path) for path in (
-        initial.native_bin.parent, full.distribution or full.build, full.build
+    prefixes = sorted({str(path) for path in (
+        initial.native_bin.parent,
+        full.distribution or full.build / "install",
     )})
     with ExitStack() as held:
-        for path in locks:
+        for path in prefixes:
             held.enter_context(build_lock(full.root, Path(path)))
+        held.enter_context(build_lock(full.root, full.build))
         current, selected, current_parsed, current_unsupported, destination = _plan(request)
         if (current.full.needs_install or current.full.tree != full.tree or
                 current.native_bin != initial.native_bin or

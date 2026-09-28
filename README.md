@@ -97,7 +97,7 @@ explicitly accept Microsoft's licence again before fetching a Windows SDK
 |---|---|
 | `hlsl-setup`, `hlsl-update-submodules` | `hlsl setup`, `hlsl workspace update` |
 | `hlsl-ls`, `hlsl-info` | `hlsl list`, `hlsl info` |
-| `hlsl-configure`, `hlsl-build`, `hlsl-dist` | `hlsl configure`, `hlsl build`, `hlsl distribution refresh` |
+| `hlsl-configure`, `hlsl-build`, `hlsl-dist` | `hlsl configure`, `hlsl build`, `hlsl distribution install` |
 | `hlsl-test`, `hlsl-lit` | `hlsl test`, `hlsl lit` |
 | `hlsl-clean`, `hlsl-trim` | `hlsl clean`, `hlsl trim` |
 | `hlsl-vk`, `hlsl-d3d12`, `hlsl-cross` | `hlsl gpu vulkan status`, `hlsl gpu d3d12`, `hlsl cross list/fetch/refresh` |
@@ -138,23 +138,49 @@ the same-branch worktree and finally the submodule checkout are considered.
 an appropriate worktree or directory containing both binaries. Windows cross
 builds need **target** DXC, never host `nix` DXC. Standalone offload builds link
 against an installed distribution of the selected LLVM worktree, created on
-demand unless `--no-auto` or `HLSL_AUTO=0` forbids it. After an LLVM change:
+demand unless `--no-auto` or `HLSL_AUTO=0` forbids it. From already-configured
+LLVM and standalone offload build trees, install their prefixes:
 
 ```bash
-hlsl distribution refresh --in llvm-project --dry-run
-hlsl distribution refresh --in llvm-project
+hlsl distribution install --in llvm-project --dry-run
+hlsl distribution install --in llvm-project
+hlsl distribution install --in offload-test-suite --dry-run
+hlsl distribution install --in offload-test-suite
+# Select the other native build tree explicitly:
+hlsl distribution install --in llvm-project --d3d12 on --dry-run
+# For a custom LLVM build directory (relative to the LLVM worktree):
+HLSL_BUILD_DIR=custom-build hlsl distribution install --in llvm-project --dry-run
 ```
 
+`hlsl distribution install` **only builds install targets** from a validated,
+configured build tree: `install-distribution` in LLVM, or
+`install-offload-tools` and `install-offload-test-suite` in standalone offload.
+The CLI does not invoke configure, change build selections, fetch toolchains
+or provision missing LLVM/DXC dependencies. CMake may regenerate its build
+files when sources have changed. Run `hlsl configure --in <worktree>` first if
+necessary (LLVM before standalone offload). `--in`, `--d3d12 on|off` and
+`--platform` select the existing tree; `--jobs` limits parallel work. Preview
+with `--dry-run` to verify its build directory and install prefix. A custom
+build selected with `HLSL_BUILD_DIR` installs to its own `install/`; standalone
+offload builds can select that LLVM prefix with `--dist-prefix` at configure
+time. For current options see `hlsl distribution install --help`.
+
 Build output stays inside the selected worktree (`build` with D3D12 off,
-`build-d3d12` with D3D12 on, their `.<platform>` cross variants, and
-`build-dist[.<platform>]`). Linux cross builds always use `build.<platform>`
-because they cannot enable D3D12. The CLI locks a build directory while using
-it; separate worktrees have separate build trees, but standalone
-offload worktrees sharing an LLVM distribution serialize on its prefix lock.
+`build-d3d12` with D3D12 on, and their `.<platform>` cross variants).
+Each LLVM build installs its distribution in its own `install/` directory;
+standalone offload builds use the corresponding LLVM mode and platform.
+Linux cross builds always use `build.<platform>` because they cannot enable
+D3D12. Existing `build-dist[.<platform>]/install` directories are left intact;
+select one explicitly with `--dist-prefix` if needed. The CLI locks a build
+directory while using it; separate worktrees have separate build trees, but
+standalone offload worktrees sharing an LLVM distribution serialize on its
+prefix lock.
 Never reconfigure/clean someone else's worktree. A native configure links `compile_commands.json` for
 clangd; the link is locally excluded from Git. Use `hlsl info --in ...` to see
 its target. `hlsl trim --in llvm-project --dry-run` previews unused ELF build
-binaries; `hlsl clean --in llvm-project --dry-run` previews a disposable tree.
+binaries. `hlsl clean --in llvm-project --d3d12 on --dry-run` previews only
+the D3D12 build tree; `--d3d12 off` selects the portable tree.
+`--all-build-dirs` covers both modes and cannot be combined with `--d3d12`.
 
 ## HLSL offload tests
 
@@ -199,9 +225,9 @@ lavapipe-only failure does not establish a compiler defect on a real driver.
 D3D12 tests need Windows or WSL D3D12, unavailable on ordinary Linux. Inspect
 with `hlsl gpu d3d12 status --in offload-test-suite`; use
 `hlsl gpu d3d12 off --in offload-test-suite` to save the choice and select
-`build/`, or `on` to select `build-d3d12/`. If the selected tree is already
-configured, the CLI reconciles it; it never rewrites the other tree. Applicable
-configure/build/test commands also accept `--d3d12 on|off` for that call; the
+`build/`, or `on` to select `build-d3d12/`. Switching the saved choice never
+configures either tree; use `hlsl configure` explicitly if a tree needs it.
+Applicable configure/build/test commands also accept `--d3d12 on|off` for that call; the
 override selects the matching tree without saving the choice. The container's
 `HLSL_D3D12=off` overrides saved choices; unset it before using
 `hlsl gpu d3d12 on` inside the container. Existing `build-container/` trees are

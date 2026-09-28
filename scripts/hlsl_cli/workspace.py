@@ -149,10 +149,10 @@ def dependency(root, from_tree, kind):
     return trees[0] if trees else None
 
 
-def distribution_prefix(tree, platform="native"):
-    """Installed LLVM distribution for this checkout and target platform."""
-    suffix = f".{platform}" if platform != "native" else ""
-    return tree.path / f"build-dist{suffix}" / "install"
+def distribution_prefix(tree, platform="native", *, d3d12=None, root=None):
+    """Installed LLVM distribution in the selected integrated build tree."""
+    return build_directory(tree, platform, target=True, d3d12=d3d12,
+                           root=root) / "install"
 
 
 def build_directory(tree, platform="native", *, target=False, d3d12=None, root=None):

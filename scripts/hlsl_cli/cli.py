@@ -8,6 +8,34 @@ from .command import Request, preview, run
 from .workspace import SelectionError, workspace_root
 
 
+def _package_options(command):
+    """Show the same worktree-dependent package selectors on all suite archives."""
+    common = command.add_argument_group("LLVM and standalone offload packages")
+    common.add_argument("--in", dest="worktree", metavar="WORKTREE",
+                        help="Package this checkout (default: enclosing)")
+    common.add_argument("--platform", metavar="PLATFORM",
+                        help="Target platform (default: native)")
+    common.add_argument("--dxc", metavar="WORKTREE|DIRECTORY|nix",
+                        help="DXC for installs or host shader compilation")
+    common.add_argument("--out", metavar="ARCHIVE",
+                        help="Write the archive to this path")
+    common.add_argument("--jobs", metavar="N", help="Cap prerequisite build jobs")
+    common.add_argument("--no-auto", action="store_true",
+                        help="Refuse implicit build/install prerequisites")
+    common.add_argument("--dry-run", action="store_true",
+                        help="Preview archive inputs without creating it")
+    llvm_only = command.add_argument_group("LLVM only (--in LLVM_WORKTREE)")
+    llvm_only.add_argument("--offload", metavar="WORKTREE",
+                           help="Offload test-suite source for the LLVM build")
+    offload_only = command.add_argument_group(
+        "Standalone offload only (--in OFFLOAD_WORKTREE)"
+    )
+    offload_only.add_argument("--llvm", metavar="WORKTREE",
+                              help="LLVM checkout supplying compiler and libraries")
+    offload_only.add_argument("--dist-prefix", metavar="PREFIX",
+                              help="Use an already installed LLVM prefix")
+
+
 def parser():
     commands = argparse.ArgumentParser(
         prog="hlsl",
@@ -29,7 +57,8 @@ def parser():
     )
     info = actions.add_parser(
         "info",
-        help="Inspect a checkout without changing it",
+        help="Inspect an LLVM, DXC or standalone offload checkout",
+        description="Inspect an LLVM, DXC or standalone offload worktree without changing it.",
         epilog="Example: python3 scripts/hlsl.py info --in llvm-project",
     )
     info.add_argument(
@@ -122,10 +151,14 @@ def parser():
             "DirectXShaderCompiler --dry-run"
         ),
     )
-    explorer.add_argument("--in", dest="worktree", metavar="WORKTREE")
-    explorer.add_argument("--llvm", metavar="WORKTREE")
-    explorer.add_argument("--dxc", metavar="WORKTREE|DIRECTORY|nix")
-    explorer.add_argument("--platform", metavar="PLATFORM")
+    explorer.add_argument("--in", dest="worktree", metavar="WORKTREE",
+                          help="LLVM, DXC or offload context for saved choices")
+    explorer.add_argument("--llvm", metavar="WORKTREE",
+                          help="LLVM checkout containing native clang binaries")
+    explorer.add_argument("--dxc", metavar="WORKTREE|DIRECTORY|nix",
+                          help="DXC compiler and validator to expose")
+    explorer.add_argument("--platform", metavar="PLATFORM",
+                          help="Native only; Explorer runs local compilers")
     explorer.add_argument(
         "--dry-run", action="store_true", help="Preview config and service without writes"
     )
@@ -151,29 +184,45 @@ def parser():
             ),
         )
         if action == "build":
-            command.add_argument("targets", nargs="*", metavar="TARGET")
-        else:
-            command.add_argument(
-                "--reset", action="store_true", help="Clear saved dependency choices"
-            )
-        command.add_argument("--in", dest="worktree", metavar="WORKTREE")
-        command.add_argument("--platform", metavar="PLATFORM")
-        command.add_argument("--offload", metavar="WORKTREE")
-        command.add_argument("--llvm", metavar="WORKTREE")
-        command.add_argument("--dist-prefix", metavar="PREFIX")
-        command.add_argument("--dxc", metavar="WORKTREE|DIRECTORY|nix")
-        command.add_argument("--build-type", metavar="TYPE")
-        command.add_argument("--jobs", metavar="N")
-        command.add_argument("--no-auto", action="store_true")
-        command.add_argument("--dry-run", action="store_true")
-        command.add_argument("--d3d12", choices=("on", "off"),
-                             help="D3D12 configuration for this call only")
+            command.add_argument("targets", nargs="*", metavar="TARGET",
+                                 help="CMake targets in the selected worktree")
+        shared = command.add_argument_group("All builds (LLVM, DXC, standalone offload)")
+        if action == "configure":
+            shared.add_argument("--reset", action="store_true",
+                                help="Clear saved choices for the selected build")
+        shared.add_argument("--in", dest="worktree", metavar="WORKTREE",
+                            help="Build this checkout (default: enclosing)")
+        shared.add_argument("--platform", metavar="PLATFORM",
+                            help="Target platform (default: native)")
+        shared.add_argument("--build-type", metavar="TYPE",
+                            help="CMake build type for this build tree")
+        shared.add_argument("--jobs", metavar="N", help="Cap parallel build jobs")
+        shared.add_argument("--no-auto", action="store_true",
+                            help="Refuse implicit prerequisites or configuration")
+        shared.add_argument("--dry-run", action="store_true",
+                            help="Preview without writing or building")
+        hlsl = command.add_argument_group("LLVM and standalone offload only")
+        hlsl.add_argument("--dxc", metavar="WORKTREE|DIRECTORY|nix",
+                          help="DXC compiler/validator for HLSL tests")
+        hlsl.add_argument("--d3d12", choices=("on", "off"),
+                          help="Select D3D12 build mode for this call")
         if action == "build":
-            command.add_argument("--vulkan-driver", dest="vk", metavar="DRIVER",
-                                 help="Use a Vulkan ICD for this call only")
+            hlsl.add_argument("--vulkan-driver", dest="vk", metavar="DRIVER",
+                              help="Vulkan ICD for check-hlsl targets")
+        llvm_only = command.add_argument_group("LLVM only (--in LLVM_WORKTREE)")
+        llvm_only.add_argument("--offload", metavar="WORKTREE",
+                               help="External offload source for the LLVM build")
+        offload_only = command.add_argument_group(
+            "Standalone offload only (--in OFFLOAD_WORKTREE)"
+        )
+        offload_only.add_argument("--llvm", metavar="WORKTREE",
+                                  help="LLVM checkout supplying compiler and libraries")
+        offload_only.add_argument("--dist-prefix", metavar="PREFIX",
+                                  help="Use an already installed LLVM prefix")
     testing = actions.add_parser(
-        "test", help="Build and run offload suites or a selected lit test",
-        description=("No suite runs the full HLSL umbrella (potentially expensive). "
+        "test", help="Build and run LLVM or standalone offload test suites",
+        description=("Test an LLVM (integrated) or standalone offload worktree. "
+                     "No suite runs the full HLSL umbrella (potentially expensive). "
                      "PATH selects a test in SUITE; --filter selects by regex. "
                      "Use -- to forward subsequent arguments to llvm-lit."),
         epilog=("Examples: hlsl test clang-vk Feature/HLSLLib/log2.32.test; "
@@ -181,23 +230,42 @@ def parser():
     )
     testing.add_argument("suite", nargs="?", metavar="SUITE")
     testing.add_argument("test_path", nargs="?", metavar="PATH")
-    testing.add_argument("--filter", metavar="REGEX")
     lit = actions.add_parser(
-        "lit", help="Run the selected worktree's llvm-lit on arbitrary paths",
-        description="Run arbitrary LLVM lit paths. Use -- to forward lit flags.",
+        "lit", help="Run a selected worktree's llvm-lit on arbitrary paths",
+        description=("Run arbitrary lit paths from an LLVM, DXC or standalone "
+                     "offload worktree. Native binaries only; use -- to forward lit flags."),
         epilog="Example: hlsl lit clang/test/CodeGenHLSL -- --time-tests",
     )
-    for command in (testing, lit):
-        command.add_argument("--in", dest="worktree", metavar="WORKTREE")
-        command.add_argument("--platform", metavar="PLATFORM")
-        command.add_argument("--lit-args", metavar="FLAGS",
-                             help="Legacy alias for lit flags (prefer -- FLAGS)")
-        command.add_argument("--dry-run", action="store_true")
-    testing.add_argument("--llvm", metavar="WORKTREE")
-    testing.add_argument("--dist-prefix", metavar="PREFIX")
-    testing.add_argument("--dxc", metavar="WORKTREE|DIRECTORY|nix")
-    testing.add_argument("--jobs", metavar="N")
-    testing.add_argument("--no-auto", action="store_true")
+    test_common = testing.add_argument_group("LLVM and standalone offload")
+    lit_common = lit.add_argument_group("LLVM, DXC and standalone offload")
+    for common in (test_common, lit_common):
+        common.add_argument("--in", dest="worktree", metavar="WORKTREE",
+                            help="Use this checkout (default: enclosing)")
+        common.add_argument("--platform", metavar="PLATFORM",
+                            help="Native only; cross-built binaries cannot run here")
+        common.add_argument("--lit-args", metavar="FLAGS",
+                            help="Legacy lit flags (prefer -- FLAGS)")
+        common.add_argument("--dry-run", action="store_true",
+                            help="Preview without building or running tests")
+        common.add_argument("--vulkan-driver", dest="vk", metavar="DRIVER",
+                            help="Use a Vulkan ICD for this call only")
+    test_common.add_argument("--filter", metavar="REGEX",
+                             help="Select tests in SUITE by regular expression")
+    test_common.add_argument("--dxc", metavar="WORKTREE|DIRECTORY|nix",
+                             help="DXC compiler/validator for HLSL tests")
+    test_common.add_argument("--jobs", metavar="N",
+                             help="Cap prerequisite build jobs")
+    test_common.add_argument("--no-auto", action="store_true",
+                             help="Refuse implicit build prerequisites")
+    test_common.add_argument("--d3d12", choices=("on", "off"),
+                             help="Select D3D12 build mode for this call")
+    offload_testing = testing.add_argument_group(
+        "Standalone offload only (--in OFFLOAD_WORKTREE)"
+    )
+    offload_testing.add_argument("--llvm", metavar="WORKTREE",
+                                 help="LLVM checkout supplying compiler and libraries")
+    offload_testing.add_argument("--dist-prefix", metavar="PREFIX",
+                                 help="Use an already installed LLVM prefix")
     lit.add_argument("paths", nargs="+", metavar="PATH")
     gpu = actions.add_parser("gpu", help="Inspect or select GPU behavior")
     gpu_actions = gpu.add_subparsers(dest="gpu_action")
@@ -211,40 +279,57 @@ def parser():
     use.add_argument("gpu_choice", metavar="DRIVER")
     d3d12 = gpu_actions.add_parser("d3d12", help="D3D12 build configuration")
     d3d12.add_argument("gpu_choice", choices=("status", "on", "off"))
-    d3d12.add_argument("--in", dest="worktree", metavar="WORKTREE")
-    for command in (testing, lit):
-        command.add_argument("--vulkan-driver", dest="vk", metavar="DRIVER",
-                             help="Use a Vulkan ICD for this call only")
-    for command in (testing, *()):
-        command.add_argument("--d3d12", choices=("on", "off"),
-                             help="D3D12 configuration for this call only")
+    d3d12.add_argument("--in", dest="worktree", metavar="WORKTREE",
+                       help="Inspect an LLVM or offload build mode")
     distribution = actions.add_parser(
-        "distribution", help="Manage a selected LLVM worktree's distribution"
+        "distribution", help="Install LLVM or standalone offload components"
     )
     distribution_actions = distribution.add_subparsers(dest="distribution_action")
-    refresh = distribution_actions.add_parser(
-        "refresh", help="Explicitly rebuild and install an LLVM distribution",
-        description="Refresh even an installed distribution; use --dry-run first.",
+    install = distribution_actions.add_parser(
+        "install", help="Install from an already configured LLVM or offload build",
+        description=(
+            "Install from an already configured LLVM or offload build tree.\n"
+            "LLVM: install-distribution (compiler, libraries and CMake exports).\n"
+            "Offload: install-offload-tools and install-offload-test-suite.\n"
+            "Does not change selections, invoke configure, or provision dependencies; "
+            "use 'hlsl configure' first."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    refresh.add_argument("--in", dest="worktree", metavar="LLVM_WORKTREE")
-    refresh.add_argument("--offload", metavar="WORKTREE")
-    refresh.add_argument("--build-type", metavar="TYPE")
-    refresh.add_argument("--platform", metavar="PLATFORM")
-    refresh.add_argument("--jobs", metavar="N")
-    refresh.add_argument("--dry-run", action="store_true")
+    install.add_argument("--in", dest="worktree", metavar="WORKTREE",
+                         help="Configured LLVM or offload worktree (default: enclosing)")
+    install.add_argument("--platform", metavar="PLATFORM",
+                         help="Select a configured platform's build tree")
+    install.add_argument("--d3d12", choices=("on", "off"),
+                         help="Select native/Windows D3D12 build mode")
+    install.add_argument("--jobs", metavar="N", help="Cap parallel install jobs")
+    install.add_argument("--dry-run", action="store_true",
+                         help="Preview the selected build and install target")
     clean = actions.add_parser(
         "clean", help="Remove disposable build trees (preview with --dry-run)",
         epilog="Example: hlsl clean --all --all-build-dirs --dist --dry-run",
     )
-    clean.add_argument("repository", nargs="?", metavar="REPOSITORY")
-    clean.add_argument("--in", dest="worktree", metavar="WORKTREE")
-    clean.add_argument("--platform", metavar="PLATFORM")
-    clean.add_argument("--dist", action="store_true")
-    clean.add_argument("--all", action="store_true")
-    clean.add_argument("--all-build-dirs", action="store_true")
-    clean.add_argument("--yes", action="store_true",
-                       help="Confirm removal across all selected worktrees")
-    clean.add_argument("--dry-run", action="store_true")
+    clean.add_argument("repository", nargs="?", metavar="REPOSITORY",
+                       help="With --all: select llvm, dxc or offload checkouts")
+    clean_common = clean.add_argument_group("LLVM, DXC and standalone offload")
+    clean_common.add_argument("--in", dest="worktree", metavar="WORKTREE",
+                              help="Clean this checkout (default: enclosing)")
+    clean_common.add_argument("--platform", metavar="PLATFORM",
+                              help="Select a platform's build tree")
+    clean_common.add_argument("--all", action="store_true",
+                              help="Select all worktrees (requires --yes)")
+    clean_common.add_argument("--all-build-dirs", action="store_true",
+                              help="Include configured build variants")
+    clean_common.add_argument("--yes", action="store_true",
+                              help="Confirm removal across all selected worktrees")
+    clean_common.add_argument("--dry-run", action="store_true",
+                              help="Preview removals without deleting anything")
+    clean_hlsl = clean.add_argument_group("LLVM and standalone offload build trees")
+    clean_hlsl.add_argument("--d3d12", choices=("on", "off"),
+                            help="Select the D3D12 build mode to clean")
+    clean_llvm = clean.add_argument_group("LLVM build trees (--in LLVM_WORKTREE or --all)")
+    clean_llvm.add_argument("--dist", action="store_true",
+                            help="Also remove legacy build-dist trees")
     trim = actions.add_parser(
         "trim",
         help="Preview or remove unused ELF build binaries from the Ninja graph",
@@ -254,9 +339,12 @@ def parser():
         epilog="Examples: hlsl trim --in llvm-project --dry-run; hlsl trim clang",
     )
     trim.add_argument("targets", nargs="*", metavar="TARGET")
-    trim.add_argument("--in", dest="worktree", metavar="WORKTREE")
-    trim.add_argument("--platform", metavar="PLATFORM")
-    trim.add_argument("--dry-run", action="store_true")
+    trim.add_argument("--in", dest="worktree", metavar="WORKTREE",
+                      help="LLVM, DXC or offload worktree to trim")
+    trim.add_argument("--platform", metavar="PLATFORM",
+                      help="Select a platform's build tree")
+    trim.add_argument("--dry-run", action="store_true",
+                      help="Preview deletions without changing the build")
     packages = actions.add_parser("package", help="Create portable archives")
     package_actions = packages.add_subparsers(dest="package_action")
     full = package_actions.add_parser(
@@ -269,21 +357,13 @@ def parser():
                 "hlsl package full --in offload-test-suite "
                 "--platform windows-x64 --no-auto"),
     )
-    full.add_argument("--in", dest="worktree", metavar="WORKTREE")
-    full.add_argument("--platform", metavar="PLATFORM")
-    full.add_argument("--llvm", metavar="WORKTREE")
-    full.add_argument("--offload", metavar="WORKTREE")
-    full.add_argument("--dist-prefix", metavar="PREFIX")
-    full.add_argument("--dxc", metavar="WORKTREE|DIRECTORY|nix")
-    full.add_argument("--out", metavar="ARCHIVE")
-    full.add_argument("--jobs", metavar="N")
-    full.add_argument("--no-auto", action="store_true")
-    full.add_argument("--dry-run", action="store_true")
+    _package_options(full)
     dxc_package = package_actions.add_parser(
         "dxc", help="Archive a curated DXC compiler and validator prefix",
         epilog="Example: hlsl package dxc --in DirectXShaderCompiler --dry-run",
     )
-    dxc_package.add_argument("--in", dest="worktree", metavar="DXC_WORKTREE")
+    dxc_package.add_argument("--in", dest="worktree", metavar="DXC_WORKTREE",
+                             help="DXC worktree to package")
     dxc_package.add_argument("--platform", metavar="PLATFORM")
     dxc_package.add_argument("--out", metavar="ARCHIVE")
     dxc_package.add_argument("--jobs", metavar="N")
@@ -293,7 +373,8 @@ def parser():
         "compiler", help="Archive LLVM compiler tools, resource headers and lit only",
         epilog="Example: hlsl package compiler --in llvm-project --dry-run",
     )
-    compiler.add_argument("--in", dest="worktree", metavar="LLVM_WORKTREE")
+    compiler.add_argument("--in", dest="worktree", metavar="LLVM_WORKTREE",
+                          help="LLVM worktree to package")
     compiler.add_argument("--platform", metavar="PLATFORM")
     compiler.add_argument("--out", metavar="ARCHIVE")
     compiler.add_argument("--jobs", metavar="N")
@@ -308,11 +389,7 @@ def parser():
                 "--out /tmp/precompiled.tar.gz --dry-run"),
     )
     precompiled.add_argument("suites", nargs="*", metavar="SUITE")
-    for flag in ("--in", "--platform", "--llvm", "--offload", "--dxc",
-                 "--dist-prefix", "--out", "--jobs"):
-        precompiled.add_argument(flag, dest="worktree" if flag == "--in" else None)
-    precompiled.add_argument("--no-auto", action="store_true")
-    precompiled.add_argument("--dry-run", action="store_true")
+    _package_options(precompiled)
     repro = package_actions.add_parser(
         "repro", help="Archive named tests with Python-free sh/cmd runners",
         description=("Precompile every selected test on the host and package its "
@@ -322,17 +399,23 @@ def parser():
                 "--suite clang-vk --in offload-test-suite --dry-run"),
     )
     repro.add_argument("paths", nargs="+", metavar="TEST")
-    repro.add_argument("--suite", metavar="SUITE")
-    for flag in ("--in", "--platform", "--llvm", "--offload", "--dxc",
-                 "--dist-prefix", "--out", "--jobs"):
-        repro.add_argument(flag, dest="worktree" if flag == "--in" else None)
-    repro.add_argument("--no-auto", action="store_true")
-    repro.add_argument("--dry-run", action="store_true")
-    return commands, {"test": testing, "lit": lit}
+    repro.add_argument("--suite", metavar="SUITE",
+                       help="Configured suite containing the named tests")
+    _package_options(repro)
+    groups = {
+        "workspace": (workspace, "workspace_action"),
+        "distribution": (distribution, "distribution_action"),
+        "tools": (tools, "tool_action"),
+        "cross": (cross, "cross_action"),
+        "gpu": (gpu, "gpu_action"),
+        "gpu vulkan": (vulkan, "gpu_mode"),
+        "package": (packages, "package_action"),
+    }
+    return commands, {"test": testing, "lit": lit}, groups
 
 
 def main(argv=None):
-    commands, testing_parsers = parser()
+    commands, testing_parsers, groups = parser()
     argv = list(sys.argv[1:] if argv is None else argv)
     lit_flags = ()
     if argv and argv[0] in testing_parsers:
@@ -348,31 +431,23 @@ def main(argv=None):
     if args.action is None:
         commands.print_help()
         return 0
-    if (args.action == "workspace" and args.workspace_action is None
-            or args.action == "distribution" and args.distribution_action is None):
-        commands.print_help()
-        return 0
-    if args.action == "cross" and args.cross_action is None:
-        commands.print_help()
-        return 0
-    if args.action == "tools" and args.tool_action is None:
-        commands.print_help()
-        return 0
-    if args.action == "gpu" and args.gpu_action is None:
-        commands.print_help()
+    group = groups.get(args.action)
+    if group and getattr(args, group[1]) is None:
+        group[0].print_help()
         return 0
     if args.action == "gpu" and args.gpu_action == "vulkan":
-        if args.gpu_export == (args.gpu_mode is not None):
-            commands.error("gpu vulkan requires status, list, use DRIVER, or --export")
-    if args.action == "package" and args.package_action is None:
-        commands.print_help()
-        return 0
+        vulkan = groups["gpu vulkan"][0]
+        if not args.gpu_export and args.gpu_mode is None:
+            vulkan.print_help()
+            return 0
+        if args.gpu_export and args.gpu_mode is not None:
+            vulkan.error("choose status, list, use DRIVER, or --export")
     try:
         action = args.action
         if action == "workspace":
             action = f"workspace {args.workspace_action}"
         elif action == "distribution":
-            action = f"distribution {args.distribution_action}"
+            action = "distribution install"
         elif action == "tools":
             action = f"tools {args.tool_action}"
         elif action == "cross":

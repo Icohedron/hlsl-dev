@@ -106,7 +106,7 @@ let
 
   # The integrated build: LLVM + Clang with the offload test suite pulled in as
   # an external project. Provides check-clang, check-llvm and the check-hlsl-*
-  # suites out of a single build tree.
+  # suites, and installs the standalone LLVM distribution from the same tree.
   llvmCMakeFlags = commonCMakeFlags ++ [
     "-DLLVM_ENABLE_ASSERTIONS=ON"
     "-DLLVM_ENABLE_LLD=ON"
@@ -128,10 +128,8 @@ let
     #                 (clang/CMakeLists.txt), which is where most of the mass is.
     #
     # Both cost link-time indirection, not compile time: LLVM_ENABLE_PIC is
-    # already ON, so flipping them relinks rather than rebuilds. Deliberately
-    # not in llvmDistCMakeFlags -- an install carries no .dwo files, and the
-    # standalone distribution's component list enumerates the static LLVM
-    # libraries that offload builds link against.
+    # already ON, so flipping them relinks rather than rebuilds. The installed
+    # distribution also includes static libraries for standalone consumers.
     "-DLLVM_USE_SPLIT_DWARF=ON"
     "-DLLVM_LINK_LLVM_DYLIB=ON"
 
@@ -148,21 +146,14 @@ let
     "-DOFFLOADTEST_USE_CLANG_TIDY=ON"
     "-DHLSL_ENABLE_OFFLOAD_DISTRIBUTION=ON"
 
-    # HLSL cache. Must come last: the cache script reads the values set by the
-    # -D flags above (see offload-test-suite/docs/offload-distribution.md).
-    "-C $HD_LLVM_SRC/clang/cmake/caches/HLSL.cmake"
-  ];
-
-  # The LLVM half of the "Standalone Build Distribution" flow from
-  # offload-test-suite/docs/offload-distribution.md: Clang, the lit testing
-  # tools and the LLVM libraries the offload tools link against, installed into
-  # a prefix that standalone offload builds consume.
-  llvmDistCMakeFlags = commonCMakeFlags ++ [
-    "-DLLVM_ENABLE_ASSERTIONS=ON"
-    "-DLLVM_ENABLE_LLD=ON"
-    "-DLLVM_OPTIMIZED_TABLEGEN=OFF"
-    "-DCMAKE_INSTALL_PREFIX=$HD_INSTALL_PREFIX"
+    # The standalone cache supplies LLVM libraries and cmake-exports needed
+    # by standalone offload builds. Preserve the integrated build's DirectX
+    # target: the standalone cache otherwise replaces the target list.
+    "-DLLVM_TARGETS_TO_BUILD=Native\${HD_SEMI}SPIRV\${HD_SEMI}DirectX"
     "-C $HD_OFFLOAD_SRC/cmake/caches/StandaloneDistribution.cmake"
+    # HLSL cache reads the -D flags above, and adds portable test components.
+    # The standalone cache already supplies their superset (including libraries).
+    "-C $HD_LLVM_SRC/clang/cmake/caches/HLSL.cmake"
   ];
 
   # A standalone offload-test-suite build: the test suite is the top-level
@@ -243,7 +234,7 @@ let
   ];
 
   # Extra flags for the builds that compile LLVM itself (the integrated build
-  # and the standalone distribution). A cross build cannot run the tablegens it
+  # and its installed distribution). A cross build cannot run the tablegens it
   # needs, so it is handed the ones built for this machine
   # (see scripts/hlsl_cli/build_support.py), and it has to be told
   # what it is producing: LLVM would otherwise ask the build machine.
@@ -409,7 +400,6 @@ in
     # CMake flag templates; see the "CMake Configurations" section above. The
     # $HD_* placeholders reach the environment unexpanded on purpose.
     HLSL_CMAKE_FLAGS_LLVM = flagsToString llvmCMakeFlags;
-    HLSL_CMAKE_FLAGS_LLVM_DIST = flagsToString llvmDistCMakeFlags;
     HLSL_CMAKE_FLAGS_OFFLOAD = flagsToString offloadCMakeFlags;
     HLSL_CMAKE_FLAGS_DXC = flagsToString dxcCMakeFlags;
 
@@ -537,7 +527,7 @@ in
           *'-DCMAKE_BUILD_TYPE=$HD_BUILD_TYPE'*) ;;
           *) echo "HLSL_CMAKE_FLAGS_LLVM lost its placeholders" >&2; exit 1 ;;
         esac
-        for v in HLSL_CMAKE_FLAGS_LLVM_DIST HLSL_CMAKE_FLAGS_OFFLOAD HLSL_CMAKE_FLAGS_DXC \
+        for v in HLSL_CMAKE_FLAGS_OFFLOAD HLSL_CMAKE_FLAGS_DXC \
                  HLSL_CMAKE_FLAGS_CROSS HLSL_CMAKE_FLAGS_CROSS_LLVM \
                  HLSL_CMAKE_FLAGS_CROSS_LINUX HLSL_CMAKE_FLAGS_CROSS_WINDOWS \
                  HLSL_CMAKE_FLAGS_CROSS_DXC HLSL_CMAKE_FLAGS_CROSS_DXC_DIA \
@@ -692,7 +682,8 @@ in
     # the portable build/ here regardless of a host's saved GPU choice;
     # a host with D3D12 uses build-d3d12/ until `hlsl gpu d3d12 off`.
     # `--d3d12 on` can still select the D3D12 tree for a single invocation.
-    # build-dist/ and the checkout's clangd database link remain shared.
+    # Each mode has its own build/install distribution; only the checkout's
+    # clangd database link remains shared.
     containerEnv.HLSL_D3D12 = "off";
 
     # Empty when unset on the host, which offloader-scripts reads as "no token".

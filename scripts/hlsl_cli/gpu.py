@@ -182,28 +182,16 @@ def execute(request):
                 "unset it or use --d3d12 for a single command"
             )
     _check_migration(root)
-    # Serialize setting switches with one another, and reconfigure under the
-    # same build lock used by ordinary builds. A failed reconfigure leaves the
-    # new setting saved but invalidates the old build validation.
+    # Switching the preferred mode never configures or alters either build.
+    # Validate --in before saving so an invalid checkout cannot change state.
     with build_lock(root, root / "gpu"):
-        tree = _tree(request) if request.action == "gpu d3d12" else None
-        build = (ws.build_directory(tree, target=True, d3d12=request.gpu_choice,
-                                    root=root) if tree else None)
-        with build_lock(root, build) if build and _configured(build) else _null_lock():
-            choices = _choices(root)
-            key = "vk" if request.action == "gpu vulkan" else "d3d12"
-            if choices.get(key) != request.gpu_choice:
-                _save(_file(root), {**choices, key: request.gpu_choice})
-            if build and _configured(build):
-                from . import native
-                from dataclasses import replace
-                native.execute(replace(request, action="configure", gpu_choice=None))
+        if request.action == "gpu d3d12":
+            _tree(request)
+        choices = _choices(root)
+        key = "vk" if request.action == "gpu vulkan" else "d3d12"
+        if choices.get(key) != request.gpu_choice:
+            _save(_file(root), {**choices, key: request.gpu_choice})
     return plan(request)
-
-
-@contextmanager
-def _null_lock():
-    yield
 
 
 def shell_exports(request):

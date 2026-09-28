@@ -22,6 +22,24 @@ from .build_support import (
     migration_prerequisite,
     saved_selections,
 )
+from .command import Request
+
+
+OFFLOAD_INSTALL_TARGETS = ("install-offload-tools", "install-offload-test-suite")
+
+
+@dataclass(frozen=True)
+class InstallPlan:
+    """Install targets from a previously validated, configured build tree."""
+
+    root: Path
+    tree: ws.Worktree
+    build: Path
+    prefix: Path
+    platform: str
+    configured: dict
+    command: tuple[str, ...]
+    text: str
 
 
 @dataclass(frozen=True)
@@ -30,15 +48,11 @@ class DistributionPlan:
 
     root: Path
     llvm: ws.Worktree
-    offload: ws.Worktree
     build: Path
     prefix: Path
     platform: str
-    host_tools: cross.HostToolsPlan | None
-    fingerprint: dict
-    build_type: str
-    configure_command: tuple[str, ...]
-    build_command: tuple[str, ...]
+    request: Request
+    selections: dict
     text: str
 
 
@@ -65,8 +79,9 @@ def _source(request, kind):
     tree = ws.resolve(root, spec) if spec else ws.enclosing_worktree(
         request.cwd or Path.cwd()
     )
-    if tree is None or tree.kind != kind:
-        raise BuildError(f"select a {kind} worktree with --in")
+    allowed = (kind,) if kind else ("llvm", "offload")
+    if tree is None or tree.kind not in allowed:
+        raise BuildError(f"select a {kind or 'llvm or offload'} worktree with --in")
     return root, tree
 
 
@@ -76,164 +91,128 @@ def _prefix(root, llvm, request, saved, platform):
     if spec:
         path = Path(spec)
         return (path if path.is_absolute() else root / path).resolve(), True
-    return ws.distribution_prefix(llvm, platform), False
+    return ws.distribution_prefix(llvm, platform, d3d12=request.d3d12,
+                                  root=root), False
 
 
 def _installed(prefix):
     return (prefix / "lib/cmake/llvm/LLVMConfig.cmake").is_file()
 
 
-def _distribution_selection(platform):
-    return "distribution" if platform == "native" else f"distribution.{platform}"
+def _distribution(root, llvm, prefix, request):
+    """Install from the same LLVM build used for integrated tests and packages."""
+    build_request = Request(
+        "build", root, worktree=str(llvm.path), platform=request.platform,
+        d3d12=request.d3d12, offload=request.offload, dxc=request.dxc,
+        build_type=(request.build_type if request.action == "distribution install"
+                    else None),
+        jobs=request.jobs, targets=("install-distribution",),
+    )
+    integrated = native.plan(build_request)
+    if integrated.build / "install" != prefix:
+        raise BuildError(f"{prefix}: selected LLVM build installs to "
+                         f"{integrated.build / 'install'}")
+    text = (f"distribution: install LLVM from {integrated.build}\n"
+            f"  prefix {prefix}\n" + integrated.text)
+    return DistributionPlan(root, llvm, integrated.build, prefix,
+                            integrated.platform, build_request,
+                            integrated.selections, text)
 
 
-def _distribution(root, llvm, offload, prefix, request):
-    """Describe an explicit refresh or an install missing from LLVM's prefix."""
+def _install_plan(request):
+    """Read the selected CMake tree; never resolve or change its inputs."""
+    root, tree = _source(request, None)
     platform = ws.select_platform(request.platform)
-    build = llvm.path / ("build-dist" if platform == "native" else
-                         f"build-dist.{platform}")
-    host_tools = (cross.host_tools_plan(root, llvm, native._jobs(request))
-                  if platform != "native" else None)
+    build = ws.build_directory(tree, platform, target=True, d3d12=request.d3d12,
+                               root=root)
+    prefix = build / "install"
+    if build.is_symlink() or prefix.is_symlink():
+        raise BuildError(f"refusing to install through a symlink: {build}")
+    if not _configured(build):
+        raise BuildError(f"{build}: no configured build; run 'hlsl configure "
+                         f"--in {tree.path}' first")
+    configured = _load(root, tree, platform, request.d3d12).get("configured", {})
+    if configured.get("build_dir") != str(build):
+        raise BuildError(f"{build}: build needs explicit revalidation; run "
+                         f"'hlsl configure --in {tree.path}' first")
     cache = build / "CMakeCache.txt"
-    build_type = request.build_type
-    if not build_type and cache.is_file():
-        build_type = next((line.partition("=")[2] for line in cache.read_text().splitlines()
-                           if line.startswith("CMAKE_BUILD_TYPE:")), None)
-    build_type = build_type or "Release"
-    flags = expand_flags(
-        os.getenv("HLSL_CMAKE_FLAGS_LLVM_DIST"),
-        {
-            "HD_BUILD_TYPE": build_type,
-            "HD_INSTALL_PREFIX": prefix,
-            "HD_LLVM_SRC": llvm.path,
-            "HD_OFFLOAD_SRC": offload.path,
-            "HD_SEMI": ";",
-        },
-        "HLSL_CMAKE_FLAGS_LLVM_DIST",
-    )
-    if platform != "native":
-        flags.extend(cross.flags(root, platform, "llvm", llvm=llvm))
-    fingerprint = {
-        "build_dir": str(build), "prefix": str(prefix),
-        "offload": str(offload.path), "flags_hash": _flag_hash(flags),
-    }
-    record = _load(root, llvm, _distribution_selection(platform))
-    if (_configured(build) or cache.is_file()) and not (
-        record.get("configured") == fingerprint or native._retry_marker(record, build)
-    ):
-        raise BuildError(
-            f"{build}: existing distribution build needs explicit revalidation; "
-            "do not overwrite it with different LLVM/offload selections"
-        )
-    configure = ("cmake", "-S", str(llvm.path / "llvm"), "-B", str(build), *flags)
+    if not cache.is_file():
+        raise BuildError(f"{build}: CMakeCache.txt is missing; reconfigure first")
+    values = dict(line.split("=", 1) for line in cache.read_text().splitlines()
+                  if line.startswith(("CMAKE_INSTALL_PREFIX:",
+                                      "CMAKE_HOME_DIRECTORY:")) and "=" in line)
+    installed_to = next((value for key, value in values.items()
+                         if key.startswith("CMAKE_INSTALL_PREFIX:")), None)
+    source = values.get("CMAKE_HOME_DIRECTORY:INTERNAL")
+    expected_source = tree.path / "llvm" if tree.kind == "llvm" else tree.path
+    if source != str(expected_source):
+        raise BuildError(f"{build}: CMake source does not match {expected_source}; "
+                         "reconfigure before installing")
+    if installed_to != str(prefix):
+        raise BuildError(f"{build}: configured install prefix is "
+                         f"{installed_to or '(missing)'}, not {prefix}; "
+                         "reconfigure before installing")
     jobs = native._jobs(request)
-    command = (
-        "cmake", "--build", str(build),
-        *(("--parallel", str(jobs)) if jobs else ()),
-        "--target", "install-distribution",
-    )
-    text = (
-        f"distribution: install LLVM for {llvm.path} using {offload.path}\n"
-        f"  build dir {build}\n  prefix {prefix}\n"
-        + (host_tools.text if host_tools else "")
-        + f"  cost: LLVM distribution build (large)\n"
-        f"  configure: {' '.join(configure)}\n"
-        f"  build: {' '.join(command)}\n"
-    )
-    return DistributionPlan(
-        root, llvm, offload, build, prefix, platform, host_tools,
-        fingerprint, build_type, configure, command, text
-    )
-
-
-def _distribution_plan(request):
-    """Explicit refresh never silently switches to or overwrites another prefix."""
-    root, llvm = _source(request, "llvm")
-    platform = ws.select_platform(request.platform)
-    toolchain = (cross.prerequisite(root, platform) if platform != "native"
-                 else None)
-    if request.reset or request.dxc or request.llvm:
-        raise BuildError("distribution refresh only accepts LLVM/offload selections")
-    saved = saved_selections(root, llvm, platform)
-    offload = native._dependency(root, llvm, "offload", request.offload, saved)
-    prefix, external = _prefix(root, llvm, request, saved, platform)
-    if external:
-        raise BuildError(
-            f"{prefix}: external distribution is read-only; omit --dist-prefix "
-            "and HLSL_DIST_PREFIX to refresh this LLVM worktree's own install"
-        )
-    distribution = _distribution(root, llvm, offload, prefix, request)
+    targets = (("install-distribution",) if tree.kind == "llvm"
+               else OFFLOAD_INSTALL_TARGETS)
+    command = ("cmake", "--build", str(build),
+               *(("--parallel", jobs) if jobs else ()), "--target", *targets)
     migration = migration_prerequisite(root)
-    text = (
-        f"worktree {llvm.path} (llvm)\nplatform {platform}\n"
-        + (f"blocked: {migration} needs explicit workspace migration\n"
-           if migration else "")
-        + (toolchain.text if toolchain else "") + distribution.text
-    )
-    return distribution, text
+    text = (f"worktree {tree.path} ({tree.kind})\nplatform {platform}\n"
+            f"build dir {build}\ninstall {prefix}\n"
+            + (f"blocked: {migration} needs explicit workspace migration\n"
+               if migration else "")
+            + f"build: {' '.join(command)}\n"
+            "no CLI configure or dependency provisioning\n")
+    return InstallPlan(root, tree, build, prefix, platform, configured, command, text)
 
 
 def plan_distribution(request):
-    """Return a read-only preview of an explicit distribution refresh."""
+    """Preview install targets without configuring or selecting dependencies."""
     from .command import Plan
 
-    _, text = _distribution_plan(request)
-    return Plan(text)
+    return Plan(_install_plan(request).text)
 
 
 def _install(distribution):
-    """Serialize the prefix with readers and record only a successful install."""
-    if distribution.host_tools:
-        cross.refresh_host_tools(distribution.host_tools)
-    env = (cross.cross_environment() if distribution.platform != "native" else None)
+    """Serialize the prefix with readers while building the integrated tree."""
     with build_lock(distribution.root, distribution.prefix):
-        with build_lock(distribution.root, distribution.build):
-            current = _distribution(
-                distribution.root, distribution.llvm, distribution.offload,
-                distribution.prefix, _distribution_request(distribution)
-            )
-            if current.fingerprint != distribution.fingerprint:
-                raise BuildError("distribution selection changed while waiting for lock")
-            selection = _distribution_selection(distribution.platform)
-            path = _selection_file(distribution.root, distribution.llvm, selection)
-            native._begin_configure(
-                distribution.root, distribution.llvm, distribution.build, selection
-            )
-            _run_command(distribution.configure_command, distribution.build, env=env)
-            if not _configured(distribution.build):
-                raise BuildError(f"cmake did not configure {distribution.build}")
-            _save(path, {"configured": distribution.fingerprint, "choices": {}})
-            _run_command(distribution.build_command, distribution.build, env=env)
-            if not _installed(distribution.prefix):
-                raise BuildError(
-                    f"{distribution.prefix}: install-distribution did not produce "
-                    "LLVMConfig.cmake"
-                )
+        current = _distribution(distribution.root, distribution.llvm,
+                                distribution.prefix, distribution.request)
+        if (current.selections != distribution.selections
+                or current.build != distribution.build):
+            raise BuildError("distribution selection changed while waiting for lock")
+        native.execute(distribution.request)
+        if not _installed(distribution.prefix):
+            raise BuildError(f"{distribution.prefix}: install-distribution did not "
+                             "produce LLVMConfig.cmake")
 
 
-def _distribution_request(distribution):
-    """Recheck flags without changing the selected prefix or source worktree."""
-    from .command import Request
-
-    return Request(
-        "distribution refresh", distribution.root, platform=distribution.platform,
-        build_type=distribution.build_type,
-        jobs=(distribution.build_command[
-            distribution.build_command.index("--parallel") + 1
-        ] if "--parallel" in distribution.build_command else None),
-    )
-
-
-def refresh(request):
-    """Refresh the selected LLVM install, even when it already exists."""
-    distribution, text = _distribution_plan(request)
-    _check_migration(distribution.root)
-    if distribution.platform != "native":
-        cross.fetch(distribution.root, distribution.platform)
-    _install(distribution)
+def install_distribution(request):
+    """Build only install targets, holding the prefix before the build lock."""
+    selected = _install_plan(request)
+    _check_migration(selected.root)
+    with build_lock(selected.root, selected.prefix):
+        with build_lock(selected.root, selected.build):
+            current = _install_plan(request)
+            if current != selected:
+                raise BuildError("distribution build selection changed while waiting "
+                                 "for locks; retry")
+            env = (cross.cross_environment() if current.platform != "native" else None)
+            _run_command(current.command, current.build, env=env)
+            if current.tree.kind == "llvm":
+                if not _installed(current.prefix):
+                    raise BuildError(f"{current.prefix}: install-distribution did not "
+                                     "produce LLVMConfig.cmake")
+            elif not ((current.prefix / "bin/offloader").is_file()
+                      or (current.prefix / "bin/offloader.exe").is_file()) or not (
+                          current.prefix / "share/hlsl-test-suite/test/lit.cfg.py"
+                      ).is_file():
+                raise BuildError(f"{current.prefix}: offload install did not produce "
+                                 "tools and suite")
     from .command import Plan
 
-    return Plan(text)
+    return Plan(selected.text)
 
 
 def plan(request):
@@ -267,11 +246,9 @@ def plan(request):
     if not installed and no_auto:
         raise BuildError(
             f"no LLVM distribution at {prefix} (--no-auto); "
-            f"run 'hlsl distribution refresh --in {llvm.path}'"
+            f"run 'hlsl distribution install --in {llvm.path}'"
         )
-    distribution = (
-        _distribution(root, llvm, tree, prefix, request) if not installed else None
-    )
+    distribution = _distribution(root, llvm, prefix, request) if not installed else None
     dxc_bin, dxc_choice, missing_dxc = native._dxc_bin(
         root, tree, request.dxc, saved, no_auto, platform
     )

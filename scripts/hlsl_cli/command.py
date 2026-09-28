@@ -151,7 +151,7 @@ def _inventory(root, cwd, platform):
                 build = "built" if built else "not built"
                 if kind == "llvm":
                     prefix = (
-                        ws.distribution_prefix(tree, platform)
+                        ws.distribution_prefix(tree, platform, root=root)
                         / "lib/cmake/llvm/LLVMConfig.cmake"
                     )
                     if prefix.is_file():
@@ -191,7 +191,7 @@ def _info(root, request, platform):
                 "(see 'hlsl list')"
             )
     directory = ws.build_directory(tree, platform, target=True)
-    prefix = ws.distribution_prefix(tree, platform)
+    prefix = ws.distribution_prefix(tree, platform, root=root)
     lines = [
         _label("workspace", root),
         _label("worktree", f"{tree.path} ({ws.REPOSITORIES[tree.kind]})"),
@@ -225,7 +225,7 @@ def _info(root, request, platform):
         )
         if llvm:
             llvm_dist = os.getenv("HLSL_DIST_PREFIX") or ws.distribution_prefix(
-                llvm, platform
+                llvm, platform, root=root
             )
             lines.append(_label("llvm dist", llvm_dist))
         lines += [
@@ -290,7 +290,7 @@ def preview(request):
         from . import testing
 
         return testing.plan(request)
-    if request.action == "distribution refresh":
+    if request.action == "distribution install":
         from . import offload
 
         return offload.plan_distribution(request)
@@ -349,10 +349,10 @@ def run(request):
         from . import testing
 
         return testing.execute(request)
-    if request.action == "distribution refresh":
+    if request.action == "distribution install":
         from . import offload
 
-        return offload.refresh(request)
+        return offload.install_distribution(request)
     if request.action == "clean":
         from . import clean
 

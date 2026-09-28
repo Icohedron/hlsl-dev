@@ -65,11 +65,15 @@ hlsl configure --in offload-test-suite --llvm llvm-project --dxc nix
 hlsl build clang --in llvm-project --dry-run
 hlsl test clang-vk Feature/HLSLLib/log2.32.test --in offload-test-suite
 hlsl lit clang/test/CodeGenHLSL --in llvm-project
-hlsl distribution refresh --in llvm-project --dry-run
+hlsl distribution install --in llvm-project --dry-run
 hlsl trim --in llvm-project --dry-run
 hlsl clean --in llvm-project --dry-run
 ```
 
+`hlsl distribution install --in X` uses only an already-configured, validated
+LLVM or standalone offload build tree: it builds its install targets without
+changing selections, invoking configure or provisioning dependencies (CMake
+may regenerate its build files). Configure that tree first.
 `hlsl configure --reset` clears **new** saved choices for a selected worktree;
 it does not import old pins. Dependencies resolve from explicit flags,
 `HLSL_LLVM`/`HLSL_DXC`/`HLSL_OFFLOAD`/`HLSL_GOLDEN`, saved new JSON choices,
@@ -101,7 +105,7 @@ discovery. `hlsl gpu vulkan --export` emits quoted loader variables for `eval` i
 a shell that needs raw Vulkan or independent offloader tools. `--vulkan-driver DRIVER` on test
 or build is a one-call override. A lavapipe-only test failure is not proof of
 a compiler bug. `hlsl gpu d3d12 status|on|off --in X` inspects/changes the
-workspace-wide choice and may reconfigure an already configured tree;
+workspace-wide choice without reconfiguring either build tree;
 `--d3d12 on|off` on applicable commands overrides only that call. D3D12
 runtime tests need Windows or WSL, not ordinary Linux.
 

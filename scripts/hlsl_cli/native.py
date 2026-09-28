@@ -1,5 +1,6 @@
 """Plan and execute native LLVM/DXC configure/build in a selected worktree."""
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -591,33 +592,39 @@ def execute(request):
             raise BuildError(
                 f"{initial.prerequisite.build}: command failed: {error}"
             ) from error
-    with build_lock(initial.root, initial.build):
-        current = plan(request)
-        if (current.tree.path != initial.tree.path or current.build != initial.build
-                or current.selections != initial.selections):
-            raise BuildError(
-                "build selection changed while waiting for the lock; retry"
-            )
-        if current.prerequisite:
-            raise BuildError("DXC prerequisite changed while waiting; retry")
-        try:
-            if current.configure_command:
-                path = _selection_file(current.root, current.tree, current.platform,
-                                       request.d3d12)
-                _begin_configure(current.root, current.tree, current.build,
-                                 current.platform, request.d3d12)
-                _run_command(current.configure_command, current.build,
-                             env=(cross.cross_environment()
-                                  if current.platform != "native" else None))
-                if not _configured(current.build):
-                    raise BuildError(f"cmake did not configure {current.build}")
-                _save(path, current.selections)
-            if current.platform == "native":
-                _link_database(current.tree, current.build)
-            if current.build_command:
-                _run_command(current.build_command, current.build,
-                             env=(cross.cross_environment()
-                                  if current.platform != "native" else None))
-        except OSError as error:
-            raise BuildError(f"{current.build}: command failed: {error}") from error
+    installs = initial.tree.kind == "llvm" and any(
+        target == "install" or target.startswith("install-")
+        for target in request.targets
+    )
+    prefix = initial.build / "install"
+    with build_lock(initial.root, prefix) if installs else nullcontext():
+        with build_lock(initial.root, initial.build):
+            current = plan(request)
+            if (current.tree.path != initial.tree.path or current.build != initial.build
+                    or current.selections != initial.selections):
+                raise BuildError(
+                    "build selection changed while waiting for the lock; retry"
+                )
+            if current.prerequisite:
+                raise BuildError("DXC prerequisite changed while waiting; retry")
+            try:
+                if current.configure_command:
+                    path = _selection_file(current.root, current.tree, current.platform,
+                                           request.d3d12)
+                    _begin_configure(current.root, current.tree, current.build,
+                                     current.platform, request.d3d12)
+                    _run_command(current.configure_command, current.build,
+                                 env=(cross.cross_environment()
+                                      if current.platform != "native" else None))
+                    if not _configured(current.build):
+                        raise BuildError(f"cmake did not configure {current.build}")
+                    _save(path, current.selections)
+                if current.platform == "native":
+                    _link_database(current.tree, current.build)
+                if current.build_command:
+                    _run_command(current.build_command, current.build,
+                                 env=(cross.cross_environment()
+                                      if current.platform != "native" else None))
+            except OSError as error:
+                raise BuildError(f"{current.build}: command failed: {error}") from error
     return initial

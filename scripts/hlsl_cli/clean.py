@@ -88,6 +88,8 @@ def plan(request):
         raise BuildError("repository selection requires --all")
     if request.all_build_dirs and request.platform not in (None, "all"):
         raise BuildError("--all-build-dirs covers every platform; drop --platform")
+    if request.all_build_dirs and request.d3d12 is not None:
+        raise BuildError("--all-build-dirs covers both D3D12 modes; drop --d3d12")
     if request.platform == "all":
         platforms = ("native", *ws.PLATFORMS)
     elif request.all_build_dirs:
@@ -135,6 +137,11 @@ def plan(request):
         if _marker(directory):
             _safe(directory, tree, distribution=dist)
             dirs[directory] = tree
+            if tree.kind == "llvm" and not dist:
+                prefix = directory / "install"
+                if prefix.is_dir() or prefix.is_symlink():
+                    _safe(prefix, tree)
+                    probes[prefix] = tree  # Standalone readers lock this prefix.
         else:
             lock = Path(os.getenv("HLSL_DEV_STATE") or root / ".hlsl-dev") / "locks" / f"{_key(root, directory)}.lock"
             if lock.exists():
@@ -156,7 +163,8 @@ def plan(request):
                 collect(ws.build_directory(tree, target=True), tree, explicit=True)
         else:
             for platform in platforms:
-                directory = ws.build_directory(tree, platform, target=not request.all)
+                directory = ws.build_directory(tree, platform, target=not request.all,
+                                               d3d12=request.d3d12, root=root)
                 collect(directory, tree, explicit=not request.all)
         if request.dist and tree.kind == "llvm":
             for platform in platforms:
@@ -196,7 +204,7 @@ def execute(request):
     _check_migration(request.root.resolve())
     first = plan(request)
     locks = sorted(set((*first.directories, *first.probes)),
-                   key=lambda path: str(Path(os.getenv("HLSL_DEV_STATE") or first.root / ".hlsl-dev") / "locks" / f"{_key(first.root, path)}.lock"))
+                   key=lambda path: (path.name != "install", _key(first.root, path)))
     with ExitStack() as stack:
         for directory in locks:
             stack.enter_context(build_lock(first.root, directory, timeout=0))

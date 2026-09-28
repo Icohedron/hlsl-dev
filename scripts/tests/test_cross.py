@@ -14,7 +14,7 @@ from test_hlsl_cli import checkout, cli, files, native_inputs, workspace
 def cross_env(workspace, monkeypatch):
     monkeypatch.setenv("HLSL_HOST_PLATFORM", "linux-x64")
     monkeypatch.setenv("HLSL_NIXPKGS_PATH", str(workspace))
-    monkeypatch.setenv("HLSL_CMAKE_FLAGS_LLVM", "-G Ninja -DDXC=$HD_DXC_BIN_DIR")
+    monkeypatch.setenv("HLSL_CMAKE_FLAGS_LLVM", "-G Ninja -DDXC=$HD_DXC_BIN_DIR -DCMAKE_INSTALL_PREFIX=$HD_INSTALL_PREFIX")
     monkeypatch.setenv("HLSL_CMAKE_FLAGS_DXC", "-G Ninja -DCMAKE_BUILD_TYPE=$HD_BUILD_TYPE")
     monkeypatch.setenv("HLSL_CMAKE_FLAGS_CROSS", "-DCMAKE_TOOLCHAIN_FILE=$HD_TOOLCHAIN_FILE")
     monkeypatch.setenv("HLSL_CMAKE_FLAGS_CROSS_LINUX", "-DLLVM_ENABLE_LLD=OFF")
@@ -53,6 +53,10 @@ def cross_env(workspace, monkeypatch):
         "    for arg in sys.argv:\n"
         "        if arg.startswith('-DCMAKE_INSTALL_PREFIX='):\n"
         "            (build / '.prefix').write_text(arg.split('=', 1)[1])\n"
+        "    if (build / '.prefix').is_file():\n"
+        "        (build / 'CMakeCache.txt').write_text(\n"
+        "            'CMAKE_HOME_DIRECTORY:INTERNAL=' + sys.argv[sys.argv.index('-S') + 1] + '\\n'\n"
+        "            + 'CMAKE_INSTALL_PREFIX:PATH=' + (build / '.prefix').read_text() + '\\n')\n"
         "if '--build' in sys.argv:\n"
         "    build = pathlib.Path(sys.argv[sys.argv.index('--build') + 1])\n"
         "    (build / 'bin').mkdir(exist_ok=True)\n"
@@ -202,7 +206,6 @@ def test_linux_cross_check_targets_refused_before_provisioning(cross_env, monkey
         (dxc / "dxv").touch()
         monkeypatch.setenv("HLSL_DXC", str(dxc))
         monkeypatch.setenv("HLSL_CMAKE_FLAGS_OFFLOAD", "-G Ninja -DLLVM_DIR=$HD_LLVM_CMAKE_DIR")
-        monkeypatch.setenv("HLSL_CMAKE_FLAGS_LLVM_DIST", "-G Ninja -DCMAKE_INSTALL_PREFIX=$HD_INSTALL_PREFIX")
     args = ("build", "check-hlsl", "--in", str(tree), "--platform", "linux-arm64")
     before = files(root)
     for extra in (("--dry-run",), ()):
@@ -218,13 +221,12 @@ def test_offload_cross_installs_matching_distribution(cross_env, monkeypatch):
     root = cross_env
     llvm = checkout(root, "llvm-project", "llvm")
     offload, _, dxc = native_inputs(root)
-    monkeypatch.setenv("HLSL_CMAKE_FLAGS_LLVM_DIST", "-G Ninja -DCMAKE_INSTALL_PREFIX=$HD_INSTALL_PREFIX")
     monkeypatch.setenv("HLSL_CMAKE_FLAGS_OFFLOAD", "-G Ninja -DLLVM_DIR=$HD_LLVM_CMAKE_DIR")
     args = ("--in", str(offload), "--platform", "linux-arm64", "--dxc", str(dxc))
     before = files(root)
     report = cli(root, "build", "install-offload-test-suite", *args, "--dry-run")
     assert report.returncode == 0, report.stderr
-    assert str(llvm / "build-dist.linux-arm64/install") in report.stdout
+    assert str(llvm / "build.linux-arm64/install") in report.stdout
     assert "host tools" in report.stdout
     assert files(root) == before
     denied = cli(root, "build", "install-offload-test-suite", *args, "--no-auto")
@@ -232,7 +234,7 @@ def test_offload_cross_installs_matching_distribution(cross_env, monkeypatch):
     assert files(root) == before
     built = cli(root, "build", "install-offload-test-suite", *args)
     assert built.returncode == 0, built.stderr
-    assert (llvm / "build-dist.linux-arm64/install/lib/cmake/llvm/LLVMConfig.cmake").is_file()
+    assert (llvm / "build.linux-arm64/install/lib/cmake/llvm/LLVMConfig.cmake").is_file()
     assert (offload / "build.linux-arm64/build.ninja").is_file()
     assert not (offload / "compile_commands.json").exists()
     commands = calls(root / "cmake.log")
@@ -240,30 +242,39 @@ def test_offload_cross_installs_matching_distribution(cross_env, monkeypatch):
     assert all(env is None for _, env in commands[2:])
     assert "-DCMAKE_TOOLCHAIN_FILE=" in repr(commands[2])
     assert "-DCMAKE_TOOLCHAIN_FILE=" in repr(commands[4])
-    assert str(llvm / "build-dist.linux-arm64/install/lib/cmake/llvm") in repr(commands[4])
+    assert str(llvm / "build.linux-arm64/install/lib/cmake/llvm") in repr(commands[4])
     assert cli(root, "build", "install-offload-test-suite", *args, "--no-auto").returncode == 0
     assert len(calls(root / "cmake.log")) == 7
-    assert (root / ".hlsl-dev/selections/llvm-project@distribution.linux-arm64.json").is_file()
+    assert (root / ".hlsl-dev/selections/llvm-project@linux-arm64.json").is_file()
 
 
-def test_explicit_cross_distribution_refresh_and_native_isolation(cross_env, monkeypatch):
+def test_explicit_cross_distribution_install_and_native_isolation(cross_env, monkeypatch):
     root = cross_env
     llvm = checkout(root, "llvm-project", "llvm")
-    checkout(root, "offload-test-suite", "offload")
-    monkeypatch.setenv("HLSL_CMAKE_FLAGS_LLVM_DIST", "-G Ninja -DCMAKE_INSTALL_PREFIX=$HD_INSTALL_PREFIX")
+    _, _, dxc = native_inputs(root)
+    monkeypatch.setenv("HLSL_DXC", str(dxc))
     args = ("--in", str(llvm), "--platform", "linux-arm64")
-    report = cli(root, "distribution", "refresh", *args, "--dry-run")
+    before = files(root)
+    missing = cli(root, "distribution", "install", *args, "--dry-run")
+    assert missing.returncode != 0 and "hlsl configure" in missing.stderr
+    assert files(root) == before and not (root / "cmake.log").exists()
+    configured = cli(root, "configure", *args, "--dxc", str(dxc))
+    assert configured.returncode == 0, configured.stderr
+    assert len(calls(root / "cmake.log")) == 3  # Host tools and cross configure.
+    report = cli(root, "distribution", "install", *args, "--dry-run")
     assert report.returncode == 0, report.stderr
-    assert "linux-arm64" in report.stdout and "build-native-tools" in report.stdout
-    result = cli(root, "distribution", "refresh", *args)
+    assert "--target install-distribution" in report.stdout
+    assert "configure:" not in report.stdout and "prerequisite:" not in report.stdout
+    result = cli(root, "distribution", "install", *args)
     assert result.returncode == 0, result.stderr
-    assert (llvm / "build-dist.linux-arm64/install/lib/cmake/llvm/LLVMConfig.cmake").is_file()
-    assert not (llvm / "build-dist").exists()
+    assert (llvm / "build.linux-arm64/install/lib/cmake/llvm/LLVMConfig.cmake").is_file()
+    assert not (llvm / "build").exists()
     assert len(calls(root / "cmake.log")) == 4
-    assert cli(root, "distribution", "refresh", *args).returncode == 0
-    assert len(calls(root / "cmake.log")) == 7  # incremental host tools + refresh
-    assert cli(root, "distribution", "refresh", "--in", str(llvm),
-               "--platform", "windows-x64", "--dry-run").returncode == 0
+    assert cli(root, "distribution", "install", *args).returncode == 0
+    assert len(calls(root / "cmake.log")) == 5  # Reinstall, no host-tools build.
+    windows = cli(root, "distribution", "install", "--in", str(llvm),
+                  "--platform", "windows-x64", "--dry-run")
+    assert windows.returncode != 0 and "hlsl configure" in windows.stderr
 
 
 def test_cross_preserved_build_requires_explicit_revalidation(cross_env):
@@ -299,7 +310,7 @@ def test_cross_existing_external_distribution_never_installs(cross_env, monkeypa
     built = cli(root, "build", "install-offload-test-suite", *args)
     assert built.returncode == 0, built.stderr
     assert len(calls(root / "cmake.log")) == 2
-    assert not (root / "llvm-project/build-dist.linux-arm64").exists()
+    assert not (root / "llvm-project/build.linux-arm64").exists()
     assert cli(root, "build", "install-offload-test-suite", *args, "--no-auto").returncode == 0
 
 

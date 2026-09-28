@@ -117,6 +117,71 @@ def test_help_and_empty_list_without_checkout(workspace):
     assert not (workspace / ".hlsl-dev").exists()
 
 
+@pytest.mark.parametrize("group", [
+    ("distribution",), ("workspace",), ("tools",),
+    ("cross",), ("gpu",), ("gpu", "vulkan"), ("package",),
+])
+def test_incomplete_command_prints_its_own_help(workspace, group):
+    incomplete = cli(workspace, *group)
+    expected = cli(workspace, *group, "--help")
+    assert incomplete.returncode == 0, incomplete.stderr
+    assert incomplete.stdout == expected.stdout
+    assert incomplete.stdout.startswith(f"usage: hlsl {' '.join(group)} ")
+    assert not (workspace / ".hlsl-dev").exists()
+
+
+@pytest.mark.parametrize("args", [
+    ("configure",), ("build",), ("package", "full"),
+    ("package", "precompiled"), ("package", "repro"),
+])
+def test_build_and_package_help_separates_worktree_options(workspace, args):
+    result = cli(workspace, *args, "--help")
+    assert result.returncode == 0, result.stderr
+    text = result.stdout
+    assert "LLVM only (--in LLVM_WORKTREE):" in text
+    assert "Standalone offload only (--in OFFLOAD_WORKTREE):" in text
+    llvm_options = text.split("LLVM only (--in LLVM_WORKTREE):", 1)[1].split(
+        "Standalone offload only (--in OFFLOAD_WORKTREE):", 1
+    )[0]
+    offload_options = text.split("Standalone offload only (--in OFFLOAD_WORKTREE):", 1)[1]
+    assert "--offload WORKTREE" in llvm_options
+    assert "--llvm WORKTREE" not in llvm_options
+    assert "--llvm WORKTREE" in offload_options
+    assert "--dist-prefix PREFIX" in offload_options
+    assert "--offload WORKTREE" not in offload_options
+    if args[0] in ("configure", "build"):
+        assert "All builds (LLVM, DXC, standalone offload):" in text
+        assert "LLVM and standalone offload only:" in text
+        dxc_options = text.split("LLVM and standalone offload only:", 1)[1].split(
+            "LLVM only (--in LLVM_WORKTREE):", 1
+        )[0]
+        assert "--dxc WORKTREE|DIRECTORY|nix" in dxc_options
+    else:
+        assert "LLVM and standalone offload packages:" in text
+
+
+def test_test_and_clean_help_separates_worktree_options(workspace):
+    test_help = cli(workspace, "test", "--help")
+    assert test_help.returncode == 0, test_help.stderr
+    assert "LLVM and standalone offload:" in test_help.stdout
+    assert "Standalone offload only (--in OFFLOAD_WORKTREE):" in test_help.stdout
+    assert "--llvm WORKTREE" in test_help.stdout.split(
+        "Standalone offload only (--in OFFLOAD_WORKTREE):", 1
+    )[1]
+    clean_help = cli(workspace, "clean", "--help")
+    assert clean_help.returncode == 0, clean_help.stderr
+    assert "LLVM, DXC and standalone offload:" in clean_help.stdout
+    hlsl_options = clean_help.stdout.split(
+        "LLVM and standalone offload build trees:", 1
+    )[1].split("LLVM build trees", 1)[0]
+    assert "--d3d12 {on,off}" in hlsl_options
+    assert "--dist" in clean_help.stdout.split(
+        "LLVM build trees (--in LLVM_WORKTREE or --all):", 1
+    )[1]
+    lit_help = cli(workspace, "lit", "--help")
+    assert lit_help.returncode == 0 and "LLVM, DXC and standalone offload:" in lit_help.stdout
+
+
 def test_direct_source_run_does_not_write_bytecode(workspace):
     source = workspace / "scripts"
     shutil.copytree(
@@ -291,12 +356,25 @@ def fake_cmake(root, *, fail=False):
         "    for arg in sys.argv:\n"
         "        if arg.startswith('-DCMAKE_INSTALL_PREFIX='):\n"
         "            (build / '.prefix').write_text(arg.split('=', 1)[1])\n"
+        "    if (build / '.prefix').is_file():\n"
+        "        (build / 'CMakeCache.txt').write_text(\n"
+        "            'CMAKE_HOME_DIRECTORY:INTERNAL=' + sys.argv[sys.argv.index('-S') + 1] + '\\n'\n"
+        "            + 'CMAKE_INSTALL_PREFIX:PATH=' + (build / '.prefix').read_text() + '\\n')\n"
         "if '--build' in sys.argv:\n"
         "    build = pathlib.Path(sys.argv[sys.argv.index('--build') + 1])\n"
         "    if 'install-distribution' in sys.argv and (build / '.prefix').is_file():\n"
         "        prefix = pathlib.Path((build / '.prefix').read_text())\n"
         "        (prefix / 'lib/cmake/llvm').mkdir(parents=True, exist_ok=True)\n"
         "        (prefix / 'lib/cmake/llvm/LLVMConfig.cmake').touch()\n"
+        "    if 'install-offload-tools' in sys.argv and (build / '.prefix').is_file():\n"
+        "        prefix = pathlib.Path((build / '.prefix').read_text())\n"
+        "        (prefix / 'bin').mkdir(parents=True, exist_ok=True)\n"
+        "        (prefix / 'bin/offloader').touch()\n"
+        "    if 'install-offload-test-suite' in sys.argv and (build / '.prefix').is_file():\n"
+        "        prefix = pathlib.Path((build / '.prefix').read_text())\n"
+        "        test = prefix / 'share/hlsl-test-suite/test'\n"
+        "        test.mkdir(parents=True, exist_ok=True)\n"
+        "        (test / 'lit.cfg.py').touch()\n"
         "    if build.parent.name == 'DirectXShaderCompiler':\n"
         "        (build / 'bin').mkdir(exist_ok=True)\n"
         "        (build / 'bin/dxc').touch()\n"
@@ -1096,6 +1174,71 @@ def test_clean_preview_and_atomic_workspace_sweep(workspace, monkeypatch):
     assert "checkouts" in removed.stdout
 
 
+@pytest.mark.parametrize("kind, name", (("llvm", "llvm-project"),
+                                       ("offload", "offload-test-suite")))
+@pytest.mark.parametrize("mode, selected", (("on", "build-d3d12"),
+                                           ("off", "build")))
+def test_clean_d3d12_selects_only_requested_mode(workspace, kind, name, mode,
+                                                 selected):
+    tree = checkout(workspace, name, kind)
+    for directory in ("build", "build-d3d12"):
+        build = tree / directory
+        build.mkdir()
+        (build / "build.ninja").touch()
+    other = "build" if selected == "build-d3d12" else "build-d3d12"
+    before = files(workspace)
+    command = ("clean", "--in", str(tree), "--d3d12", mode)
+    dry = cli(workspace, *command, "--dry-run")
+    assert dry.returncode == 0, dry.stderr
+    assert f"Would remove {tree / selected}\n" in dry.stdout
+    assert f"Would remove {tree / other}\n" not in dry.stdout
+    assert files(workspace) == before
+    cleaned = cli(workspace, *command)
+    assert cleaned.returncode == 0, cleaned.stderr
+    assert not (tree / selected).exists() and (tree / other / "build.ninja").is_file()
+
+
+def test_clean_d3d12_all_scopes_worktrees_and_rejects_all_build_dirs(workspace):
+    llvm = checkout(workspace, "llvm-project", "llvm")
+    offload = checkout(workspace, "offload-test-suite", "offload")
+    for tree in (llvm, offload):
+        for name in ("build", "build-d3d12"):
+            (tree / name).mkdir()
+            (tree / name / "build.ninja").touch()
+    before = files(workspace)
+    refused = cli(workspace, "clean", "--in", str(llvm), "--all-build-dirs",
+                  "--d3d12", "on", "--dry-run")
+    assert refused.returncode != 0 and "--all-build-dirs" in refused.stderr
+    preview = cli(workspace, "clean", "--all", "--d3d12", "on", "--dry-run")
+    assert preview.returncode == 0, preview.stderr
+    for tree in (llvm, offload):
+        assert f"Would remove {tree / 'build-d3d12'}\n" in preview.stdout
+        assert f"Would remove {tree / 'build'}\n" not in preview.stdout
+    assert files(workspace) == before
+    result = cli(workspace, "clean", "--all", "--d3d12", "on", "--yes")
+    assert result.returncode == 0, result.stderr
+    for tree in (llvm, offload):
+        assert not (tree / "build-d3d12").exists()
+        assert (tree / "build/build.ninja").is_file()
+
+
+def test_clean_d3d12_windows_cross_keeps_other_mode(workspace):
+    llvm = checkout(workspace, "llvm-project", "llvm")
+    for name in ("build.windows-x64", "build-d3d12.windows-x64"):
+        (llvm / name).mkdir()
+        (llvm / name / "build.ninja").touch()
+    command = ("clean", "--in", str(llvm), "--platform", "windows-x64",
+               "--d3d12", "on")
+    dry = cli(workspace, *command, "--dry-run")
+    assert dry.returncode == 0, dry.stderr
+    assert f"Would remove {llvm / 'build-d3d12.windows-x64'}\n" in dry.stdout
+    assert f"Would remove {llvm / 'build.windows-x64'}\n" not in dry.stdout
+    result = cli(workspace, *command)
+    assert result.returncode == 0, result.stderr
+    assert (llvm / "build.windows-x64/build.ninja").is_file()
+    assert not (llvm / "build-d3d12.windows-x64").exists()
+
+
 def test_clean_scopes_links_and_tracked_source(workspace):
     llvm = checkout(workspace, "llvm-project", "llvm")
     dxc = checkout(workspace, "DirectXShaderCompiler", "dxc")
@@ -1439,9 +1582,10 @@ def test_trim_does_not_follow_symlinked_directory(ninja_trim, workspace):
 
 def standalone_flags(monkeypatch):
     monkeypatch.setenv(
-        "HLSL_CMAKE_FLAGS_LLVM_DIST",
+        "HLSL_CMAKE_FLAGS_LLVM",
         "-G Ninja -DCMAKE_BUILD_TYPE=$HD_BUILD_TYPE "
         "-DCMAKE_INSTALL_PREFIX=$HD_INSTALL_PREFIX "
+        "-DDXC_DIR=$HD_DXC_BIN_DIR "
         "-C $HD_OFFLOAD_SRC/cmake/caches/StandaloneDistribution.cmake",
     )
     monkeypatch.setenv(
@@ -1472,22 +1616,22 @@ def test_standalone_auto_installs_selected_distribution_and_builds(workspace, mo
     assert result.returncode == 0, result.stderr
     assert plan.text == result.stdout
     assert "missing" in plan.text and "automatically provision" in plan.text
-    assert str(alt_offload / "cmake/caches/StandaloneDistribution.cmake") in plan.text
-    assert str(alt_llvm / "build-dist/install/lib/cmake/llvm") in plan.text
+    assert str(offload / "cmake/caches/StandaloneDistribution.cmake") in plan.text
+    assert str(alt_llvm / "build/install/lib/cmake/llvm") in plan.text
     assert str(golden) in plan.text and str(dxc) in plan.text
     assert not log.exists() and files(workspace) == before
 
     built = cli(workspace, "build", "check-hlsl", "--in", str(alt_offload),
                 "--llvm", str(alt_llvm), "--dxc", str(dxc))
     assert built.returncode == 0, built.stderr
-    assert (alt_llvm / "build-dist/install/lib/cmake/llvm/LLVMConfig.cmake").is_file()
+    assert (alt_llvm / "build/install/lib/cmake/llvm/LLVMConfig.cmake").is_file()
     assert (alt_offload / "compile_commands.json").is_symlink()
     calls = log.read_text().splitlines()
     assert len(calls) == 4
     assert "install-distribution" in calls[1] and "--target', 'check-hlsl'" in calls[3]
-    assert str(alt_llvm) in calls[0] and str(alt_offload) in calls[0]
-    assert str(alt_llvm / "build-dist/install/lib/cmake/llvm") in calls[2]
-    assert not (llvm / "build-dist").exists() and not (offload / "build").exists()
+    assert str(alt_llvm) in calls[0] and str(offload) in calls[0]
+    assert str(alt_llvm / "build/install/lib/cmake/llvm") in calls[2]
+    assert not (llvm / "build").exists() and not (offload / "build").exists()
     repeat = cli(workspace, "build", "check-hlsl", "--in", str(alt_offload))
     assert repeat.returncode == 0, repeat.stderr
     assert "installed" in repeat.stdout
@@ -1516,18 +1660,18 @@ def test_standalone_external_prefix_and_no_auto_are_safe(workspace, monkeypatch)
     assert planned.returncode == 0, planned.stderr
     assert f"llvm dist {external} (external)" in planned.stdout
     assert "install-distribution" not in planned.stdout
-    assert not (llvm / "build-dist").exists()
+    assert not (llvm / "build").exists()
     tools = fake_cmake(workspace)
     monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
     monkeypatch.setenv("CMAKE_LOG", str(workspace / "cmake.log"))
     assert cli(workspace, "configure", "--in", str(offload), "--dxc",
                str(dxc), "--dist-prefix", str(external)).returncode == 0
-    assert config.is_file() and not (llvm / "build-dist").exists()
+    assert config.is_file() and not (llvm / "build").exists()
     assert str(external) in cli(workspace, "build", "--in", str(offload),
                                "--dry-run").stdout
 
 
-def test_distribution_explicit_refresh_and_provision_failure(workspace, monkeypatch):
+def test_distribution_install_requires_configured_llvm_build(workspace, monkeypatch):
     llvm = checkout(workspace, "llvm-project", "llvm")
     offload, _, dxc = native_inputs(workspace)
     standalone_flags(monkeypatch)
@@ -1535,24 +1679,198 @@ def test_distribution_explicit_refresh_and_provision_failure(workspace, monkeypa
     log = workspace / "cmake.log"
     monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
     monkeypatch.setenv("CMAKE_LOG", str(log))
-    command = ("distribution", "refresh", "--in", str(llvm))
+    command = ("distribution", "install", "--in", str(llvm))
     before = files(workspace)
+    for extra in (("--dry-run",), ()):
+        refused = cli(workspace, *command, *extra)
+        assert refused.returncode != 0 and "hlsl configure" in refused.stderr
+    assert not log.exists() and files(workspace) == before
+
+    configured = cli(workspace, "configure", "--in", str(llvm), "--dxc", str(dxc))
+    assert configured.returncode == 0, configured.stderr
+    assert len(log.read_text().splitlines()) == 1
     dry = cli(workspace, *command, "--dry-run")
     assert dry.returncode == 0, dry.stderr
-    assert "install-distribution" in dry.stdout
-    assert not log.exists() and files(workspace) == before
+    assert "--target install-distribution" in dry.stdout
+    assert "configure:" not in dry.stdout and "prerequisite:" not in dry.stdout
+    assert len(log.read_text().splitlines()) == 1
     first = cli(workspace, *command)
     assert first.returncode == 0, first.stderr
+    assert (llvm / "build/install/lib/cmake/llvm/LLVMConfig.cmake").is_file()
     assert len(log.read_text().splitlines()) == 2
     second = cli(workspace, *command)
     assert second.returncode == 0, second.stderr
-    assert len(log.read_text().splitlines()) == 4  # Refresh even if installed.
+    assert len(log.read_text().splitlines()) == 3  # Reinstall, never reconfigure.
     assert cli(workspace, "build", "--in", str(offload), "--dxc", str(dxc),
-               "--no-auto", "--dry-run").returncode != 0  # Configure still required.
+               "--no-auto", "--dry-run").returncode != 0  # Offload still needs configure.
     monkeypatch.setenv("HLSL_DIST_PREFIX", str(workspace / "external"))
-    external = cli(workspace, *command, "--dry-run")
-    assert external.returncode != 0 and "read-only" in external.stderr
+    assert cli(workspace, *command, "--dry-run").returncode == 0
+    assert len(log.read_text().splitlines()) == 3
+
+
+def test_distribution_install_never_changes_configured_selections(workspace,
+                                                                    monkeypatch):
+    llvm = checkout(workspace, "llvm-project", "llvm")
+    native_inputs(workspace)
+    standalone_flags(monkeypatch)
+    tools = fake_cmake(workspace)
+    log = workspace / "cmake.log"
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    monkeypatch.setenv("CMAKE_LOG", str(log))
+    assert cli(workspace, "configure", "--in", str(llvm)).returncode == 0
+    before = (workspace / ".hlsl-dev/selections/llvm-project.json").read_bytes()
+    monkeypatch.setenv("HLSL_CMAKE_FLAGS_LLVM", "-G Ninja -DCHANGED=ON")
+    monkeypatch.setenv("HLSL_OFFLOAD", "missing-worktree")
+    monkeypatch.setenv("HLSL_DXC", "missing-dxc")
+    result = cli(workspace, "distribution", "install", "--in", str(llvm),
+                 "--jobs", "2")
+    assert result.returncode == 0, result.stderr
+    assert "--parallel 2 --target install-distribution" in result.stdout
+    assert len(log.read_text().splitlines()) == 2  # Configure once, install once.
+    assert (workspace / ".hlsl-dev/selections/llvm-project.json").read_bytes() == before
+    assert not (workspace / "missing-worktree").exists()
+
+
+def test_distribution_install_rejects_wrong_cache_and_unvalidated_build(workspace,
+                                                                           monkeypatch):
+    import json
+
+    llvm = checkout(workspace, "llvm-project", "llvm")
+    native_inputs(workspace)
+    standalone_flags(monkeypatch)
+    tools = fake_cmake(workspace)
+    log = workspace / "cmake.log"
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    monkeypatch.setenv("CMAKE_LOG", str(log))
+    assert cli(workspace, "configure", "--in", str(llvm)).returncode == 0
+    cache = llvm / "build/CMakeCache.txt"
+    original = cache.read_text()
+    for old, new, expected in (
+        (str(llvm / "build/install"), str(workspace / "other-install"), "prefix"),
+        (str(llvm / "llvm"), str(workspace / "other-source"), "source"),
+    ):
+        cache.write_text(original.replace(old, new))
+        for extra in (("--dry-run",), ()):
+            refused = cli(workspace, "distribution", "install", "--in", str(llvm),
+                          *extra)
+            assert refused.returncode != 0 and expected in refused.stderr
+        assert len(log.read_text().splitlines()) == 1
+    cache.write_text(original)
+    selection = workspace / ".hlsl-dev/selections/llvm-project.json"
+    saved = json.loads(selection.read_text())
+    saved["configured"] = {}
+    selection.write_text(json.dumps(saved))
+    refused = cli(workspace, "distribution", "install", "--in", str(llvm),
+                  "--dry-run")
+    assert refused.returncode != 0 and "revalidation" in refused.stderr
+    assert len(log.read_text().splitlines()) == 1
+
+
+def test_offload_distribution_install_installs_own_prefix(workspace, monkeypatch):
+    llvm = checkout(workspace, "llvm-project", "llvm")
+    offload, _, dxc = native_inputs(workspace)
+    standalone_flags(monkeypatch)
+    tools = fake_cmake(workspace)
+    log = workspace / "cmake.log"
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    monkeypatch.setenv("CMAKE_LOG", str(log))
+    command = ("distribution", "install", "--in", str(offload))
+    before = files(workspace)
+    denied = cli(workspace, *command, "--dry-run")
+    assert denied.returncode != 0 and "hlsl configure" in denied.stderr
+    assert files(workspace) == before and not log.exists()
+
+    llvm_config = cli(workspace, "configure", "--in", str(llvm), "--dxc", str(dxc))
+    assert llvm_config.returncode == 0, llvm_config.stderr
+    assert cli(workspace, "distribution", "install", "--in", str(llvm)).returncode == 0
+    offload_config = cli(workspace, "configure", "--in", str(offload),
+                         "--llvm", str(llvm), "--dxc", str(dxc))
+    assert offload_config.returncode == 0, offload_config.stderr
+    assert len(log.read_text().splitlines()) == 3
+    dry = cli(workspace, *command, "--dry-run")
+    assert dry.returncode == 0, dry.stderr
+    assert f"install {offload / 'build/install'}" in dry.stdout
+    assert "install-distribution" not in dry.stdout
+    assert "--target install-offload-tools install-offload-test-suite" in dry.stdout
+    assert "configure:" not in dry.stdout and "prerequisite:" not in dry.stdout
+    assert len(log.read_text().splitlines()) == 3
+
+    installed = cli(workspace, *command)
+    assert installed.returncode == 0, installed.stderr
+    assert (llvm / "build/install/lib/cmake/llvm/LLVMConfig.cmake").is_file()
+    assert (offload / "build/install/bin/offloader").is_file()
+    assert (offload / "build/install/share/hlsl-test-suite/test/lit.cfg.py").is_file()
     assert len(log.read_text().splitlines()) == 4
+    repeated = cli(workspace, *command)
+    assert repeated.returncode == 0, repeated.stderr
+    assert len(log.read_text().splitlines()) == 5  # Incremental reinstall of offload only.
+
+
+def test_distribution_install_help_rejects_dependency_overrides(workspace, monkeypatch):
+    llvm = checkout(workspace, "llvm-project", "llvm")
+    offload, _, dxc = native_inputs(workspace)
+    standalone_flags(monkeypatch)
+    help_text = cli(workspace, "distribution", "install", "--help").stdout
+    index = cli(workspace, "distribution", "--help")
+    assert index.returncode == 0 and "{install}" in index.stdout
+    old = cli(workspace, "distribution", "refresh", "--in", str(llvm),
+              "--dry-run")
+    assert old.returncode != 0 and "invalid choice" in old.stderr
+    assert "already configured" in help_text
+    assert "Does not change selections, invoke configure, or provision dependencies" in help_text
+    for flag in ("--llvm", "--offload", "--dxc", "--dist-prefix", "--build-type",
+                 "--no-auto"):
+        assert flag not in help_text
+        refused = cli(workspace, "distribution", "install", "--in", str(llvm),
+                      flag, "ignored" if flag != "--no-auto" else "--dry-run")
+        assert refused.returncode != 0 and "unrecognized arguments" in refused.stderr
+    assert cli(workspace, "distribution", "install", "--in", str(offload),
+               "--dry-run").returncode != 0  # Both kinds require an existing build.
+
+
+def test_distribution_reuses_each_d3d12_build_and_clean_locks_prefix(workspace,
+                                                                       monkeypatch):
+    from hlsl_cli.build_support import build_lock
+
+    llvm = checkout(workspace, "llvm-project", "llvm")
+    offload, _, dxc = native_inputs(workspace)
+    standalone_flags(monkeypatch)
+    monkeypatch.setenv("HLSL_DXC", str(dxc))
+    tools = fake_cmake(workspace)
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    monkeypatch.setenv("CMAKE_LOG", str(workspace / "cmake.log"))
+
+    for mode, name in (("off", "build"), ("on", "build-d3d12")):
+        prefix = llvm / name / "install"
+        configured = cli(workspace, "configure", "--in", str(llvm),
+                         "--dxc", str(dxc), "--d3d12", mode)
+        assert configured.returncode == 0, configured.stderr
+        dry = cli(workspace, "distribution", "install", "--in", str(llvm),
+                  "--d3d12", mode, "--dry-run")
+        assert dry.returncode == 0, dry.stderr
+        assert f"install {prefix}" in dry.stdout
+        assert not prefix.exists()
+        refreshed = cli(workspace, "distribution", "install", "--in", str(llvm),
+                        "--d3d12", mode)
+        assert refreshed.returncode == 0, refreshed.stderr
+        assert (prefix / "lib/cmake/llvm/LLVMConfig.cmake").is_file()
+        plan = cli(workspace, "build", "check-hlsl", "--in", str(offload),
+                   "--d3d12", mode, "--dxc", str(dxc), "--dry-run")
+        assert plan.returncode == 0, plan.stderr
+        assert f"llvm dist {prefix} (installed)" in plan.stdout
+        assert "install-distribution" not in plan.stdout
+
+    assert (workspace / ".hlsl-dev/selections/llvm-project.json").is_file()
+    assert (workspace / ".hlsl-dev/selections/llvm-project@d3d12.json").is_file()
+    monkeypatch.setenv("HLSL_LOCK_TIMEOUT", "0")
+    with build_lock(workspace, llvm / "build/install"):
+        blocked = cli(workspace, "clean", "--in", str(llvm))
+        assert blocked.returncode != 0 and "build/install" in blocked.stderr
+        assert (llvm / "build").exists()
+    cleaned = cli(workspace, "clean", "--in", str(llvm))
+    assert cleaned.returncode == 0, cleaned.stderr
+    assert not (llvm / "build").exists()
+    assert (llvm / "build-d3d12/install").exists()
 
 
 def test_standalone_pairs_matching_branches_without_crossing_sources(workspace, monkeypatch):
@@ -1580,7 +1898,7 @@ def test_standalone_pairs_matching_branches_without_crossing_sources(workspace, 
     assert f"llvm {llvm}" in result.stdout
     assert f"golden {golden}" in result.stdout
     assert str(offload / "cmake/caches/StandaloneDistribution.cmake") in result.stdout
-    assert str(base_llvm / "build-dist") not in result.stdout
+    assert str(base_llvm / "build") not in result.stdout
     assert files(workspace) == before
 
 
@@ -1747,7 +2065,7 @@ def test_private_standalone_test_uses_distribution_prerequisite(workspace,
     assert files(workspace) == before
     run = cli(workspace, "test", "clang-vk", "--in", str(offload), "--dxc", str(dxc))
     assert run.returncode == 0, run.stderr
-    assert (llvm / "build-dist/install/lib/cmake/llvm/LLVMConfig.cmake").is_file()
+    assert (llvm / "build/install/lib/cmake/llvm/LLVMConfig.cmake").is_file()
     assert "check-hlsl-clang-vk" in (workspace / "cmake.log").read_text()
 
 
@@ -1764,8 +2082,8 @@ def test_gpu_status_list_and_export_are_read_only(workspace, test_workspace,
         assert result.returncode == 0, result.stderr
     assert "lvp_icd." in cli(workspace, "gpu", "vulkan", "list").stdout
     assert "unconfigured" in cli(workspace, "gpu", "d3d12", "status", "--in", str(llvm)).stdout
-    for args in (("gpu", "vk"), ("gpu", "vulkan"),
-                 ("gpu", "vulkan", "use"), ("gpu", "d3d12"),
+    for args in (("gpu", "vk"), ("gpu", "vulkan", "use"),
+                 ("gpu", "d3d12"),
                  ("gpu", "vulkan", "status", "--export")):
         assert cli(workspace, *args).returncode != 0
     monkeypatch.setenv("HLSL_VK_DRIVER", str(quoted))
@@ -1823,7 +2141,7 @@ def test_vulkan_use_accepts_driver_named_status(workspace, test_workspace):
     assert "driver status" in cli(workspace, "gpu", "vulkan", "status").stdout
 
 
-def test_gpu_d3d12_saved_switch_reconfigures_and_override_is_ephemeral(
+def test_gpu_d3d12_saved_switch_never_reconfigures_and_override_is_ephemeral(
     workspace, test_workspace, monkeypatch
 ):
     llvm, _, dxc = test_workspace
@@ -1845,8 +2163,13 @@ def test_gpu_d3d12_saved_switch_reconfigures_and_override_is_ephemeral(
     records = workspace / ".hlsl-dev/selections"
     assert (records / "llvm-project.json").is_file()
     assert (records / "llvm-project@d3d12.json").is_file()
-    assert cli(workspace, "gpu", "d3d12", "off", "--in", str(llvm)).returncode == 0
+    saved = {path.name: path.read_bytes() for path in records.iterdir()}
     count = len(log.read_text().splitlines())
+    assert cli(workspace, "gpu", "d3d12", "off", "--in", str(llvm)).returncode == 0
+    assert len(log.read_text().splitlines()) == count  # Switching never invokes CMake.
+    assert {path.name: path.read_bytes() for path in records.iterdir()} == saved
+    assert cli(workspace, "gpu", "d3d12", "off", "--in", str(llvm)).returncode == 0
+    assert len(log.read_text().splitlines()) == count
     assert cli(workspace, "build", "clang", "--in", str(llvm),
                "--no-auto").returncode == 0
     assert len(log.read_text().splitlines()) == count + 1  # build, not configure
@@ -1856,7 +2179,10 @@ def test_gpu_d3d12_saved_switch_reconfigures_and_override_is_ephemeral(
         workspace, "build", "clang", "--in", str(llvm),
         "--d3d12", "on", "--dry-run").stdout
     assert "setting off" in cli(workspace, "gpu", "d3d12", "status").stdout
+    before_on = len(log.read_text().splitlines())
     assert cli(workspace, "gpu", "d3d12", "on", "--in", str(llvm)).returncode == 0
+    assert len(log.read_text().splitlines()) == before_on
+    assert {path.name: path.read_bytes() for path in records.iterdir()} == saved
     assert "setting on" in cli(workspace, "gpu", "d3d12", "status").stdout
 
 
@@ -1883,19 +2209,23 @@ def test_container_forces_portable_build_despite_shared_host_choice(
         workspace, "info", "--in", str(llvm)).stdout
 
 
-def test_gpu_failed_d3d12_reconfigure_invalidates_cache(workspace, test_workspace,
-                                                           monkeypatch):
+def test_gpu_d3d12_switch_does_not_invoke_failed_cmake(workspace, test_workspace,
+                                                        monkeypatch):
     llvm, _, dxc = test_workspace
     assert cli(workspace, "configure", "--in", str(llvm), "--dxc", str(dxc)).returncode == 0
+    selection = workspace / ".hlsl-dev/selections/llvm-project.json"
+    validated = selection.read_bytes()
+    log = workspace / "cmake.log"
+    before = log.read_bytes()
     fake_cmake(workspace, fail=True)
-    # A configured target is reconciled; a failed refresh invalidates only it.
-    switched = cli(workspace, "gpu", "d3d12", "off", "--in", str(llvm))
-    assert switched.returncode != 0
-    assert "setting off" in cli(workspace, "gpu", "d3d12", "status").stdout
-    assert cli(workspace, "build", "clang", "--in", str(llvm)).returncode != 0
-    assert "previous configure failed" in cli(
-        workspace, "build", "clang", "--in", str(llvm)
-    ).stderr
+    for mode in ("on", "off"):
+        switched = cli(workspace, "gpu", "d3d12", mode, "--in", str(llvm))
+        assert switched.returncode == 0, switched.stderr
+        assert log.read_bytes() == before
+        assert selection.read_bytes() == validated
+    ready = cli(workspace, "build", "clang", "--in", str(llvm),
+                "--no-auto", "--dry-run")
+    assert ready.returncode == 0, ready.stderr
 
 
 def test_clean_sweep_needs_confirmation_even_if_only_one_checkout(workspace):

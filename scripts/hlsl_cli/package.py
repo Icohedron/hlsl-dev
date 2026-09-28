@@ -1,6 +1,5 @@
 """Plan and assemble full, compiler-only, and curated DXC archives."""
 
-from contextlib import nullcontext
 from dataclasses import dataclass
 import importlib.util
 import json
@@ -145,7 +144,8 @@ def _plan(request):
                 external if external.is_absolute() else root / external
             ).resolve()
         else:
-            distribution = ws.distribution_prefix(llvm, platform) if llvm else None
+            distribution = (ws.distribution_prefix(llvm, platform, root=root)
+                            if llvm else None)
         targets = ("install-offload-tools", "install-offload-test-suite")
     golden_spec = os.getenv("HLSL_GOLDEN") or saved.get("golden")
     golden = (
@@ -529,18 +529,23 @@ def _execute_compiler(request):
             platform=initial.platform, targets=initial.install_targets,
             jobs=request.jobs, no_auto=request.no_auto,
         ))
-    with build_lock(initial.root, initial.build):
-        current = _compiler_plan(request)
-        if current.needs_install or current != initial and (
-            current.tree != initial.tree or current.build != initial.build
-            or current.archive != initial.archive
-        ):
-            raise BuildError("package inputs changed while waiting for build lock")
-        with tempfile.TemporaryDirectory(prefix="hlsl-package-") as scratch:
-            stage = Path(scratch) / "stage"
-            stage.mkdir()
-            _compiler_stage(current, stage)
-            _archive(stage, current.archive)
+    with build_lock(initial.root, initial.build / "install"):
+        with build_lock(initial.root, initial.build):
+            return _stage_compiler_under_lock(request, initial)
+
+
+def _stage_compiler_under_lock(request, initial):
+    current = _compiler_plan(request)
+    if current.needs_install or current != initial and (
+        current.tree != initial.tree or current.build != initial.build
+        or current.archive != initial.archive
+    ):
+        raise BuildError("package inputs changed while waiting for build lock")
+    with tempfile.TemporaryDirectory(prefix="hlsl-package-") as scratch:
+        stage = Path(scratch) / "stage"
+        stage.mkdir()
+        _compiler_stage(current, stage)
+        _archive(stage, current.archive)
     return Plan(current.text + f"packaged compiler and lit in {current.archive}\n")
 
 
@@ -565,9 +570,8 @@ def execute(request):
             jobs=request.jobs, no_auto=request.no_auto, dxc=request.dxc,
             dist_prefix=request.dist_prefix,
         ))
-    distribution_lock = (
-        build_lock(initial.root, initial.distribution)
-        if initial.distribution else nullcontext()
+    distribution_lock = build_lock(
+        initial.root, initial.distribution or initial.build / "install"
     )
     # Distribution writers acquire the prefix before the build tree. Readers
     # must use the same order or a concurrent install can deadlock packaging.
@@ -781,7 +785,7 @@ def _precompiled_plan(request):
     if not suites or any(suite not in available for suite in suites):
         raise BuildError(f"unknown or absent precompiled suite: {suites}; "
                          f"configured: {available or '(none)'}")
-    native_prefix = ws.distribution_prefix(full.llvm, "native")
+    native_prefix = ws.distribution_prefix(full.llvm, "native", root=full.root)
     native_bin = native_prefix / "bin"
     if full.tree.kind == "llvm" and full.platform == "native" and not native_bin.is_dir():
         native_bin = full.build / "install/bin"
@@ -899,15 +903,15 @@ def _execute_precompiled(request):
     # Lock source distributions first, then target build. The native compiler
     # is read while compiling even when packaging a different target platform.
     locks = sorted({str(path) for path in (
-        initial.native_bin.parent, full.distribution or full.build
+        initial.native_bin.parent,
+        full.distribution or full.build / "install",
     )})
     from contextlib import ExitStack
 
     with ExitStack() as held:
         for path in locks:
             held.enter_context(build_lock(full.root, Path(path)))
-        if str(full.build) not in locks:
-            held.enter_context(build_lock(full.root, full.build))
+        held.enter_context(build_lock(full.root, full.build))
         current = _precompiled_plan(request)
         if current.full.needs_install or (current.full.tree != full.tree
                                           or current.archive != initial.archive
