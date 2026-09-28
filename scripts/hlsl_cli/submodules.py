@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import shlex
 import subprocess
+import sys
 
 from .build_support import _check_migration, migration_prerequisite
 from .workspace import SelectionError
@@ -30,23 +31,23 @@ class Submodule:
         return not self.initialized or self.shallow
 
 
-def _git(directory, *args, statuses=(0,)):
+def _git(directory, *args, statuses=(0,), stream=False):
     try:
         result = subprocess.run(
             ["git", "-C", str(directory), *args],
-            capture_output=True,
+            capture_output=not stream,
             text=True,
             check=False,
         )
     except OSError as error:
         raise SelectionError(f"{directory}: cannot run git: {error}") from error
     if result.returncode not in statuses:
-        reason = result.stderr.strip() or f"exit {result.returncode}"
+        reason = (result.stderr or "").strip() or f"exit {result.returncode}"
         raise SelectionError(
             f"{directory}: git {shlex.join(args)} failed: {reason}; "
             "check the submodule URL and Git metadata"
         )
-    return result.stdout
+    return result.stdout or ""
 
 
 def _root(root):
@@ -92,6 +93,15 @@ def _modules(parent, root):
             )
         if not key.startswith("submodule."):
             raise SelectionError(f"{config}: invalid submodule entry {key!r}")
+        # .gitmodules can retain an entry after its gitlink is removed (DXC's
+        # external/googletest does). Git rejects updates for such paths.
+        entries = _git(parent, "ls-files", "--stage", "-z", "--", str(path))
+        if not any(
+            record.partition(" ")[0] == "160000"
+            and record.partition("\t")[2] == str(path)
+            for record in entries.split("\0") if record
+        ):
+            continue
         initialized = (target / ".git").exists()
         if initialized:
             checkout_root = Path(
@@ -118,7 +128,7 @@ def _command(module, *, remote):
     # depth to 1, or shallow-fetch a previously full checkout.
     args = [
         "git", "submodule", "update", "--init", "--checkout",
-        "--no-recommend-shallow",
+        "--no-recommend-shallow", "--progress",
     ]
     if remote:
         args.append("--remote")
@@ -169,7 +179,9 @@ def execute(root, *, remote):
             target = parent / module.path
             command = _command(module, remote=remote)
             lines.append(f"{target}: {shlex.join(command)}")
-            _git(parent, *command[1:])
+            print(f"updating {target} (Git fetch may take a while)",
+                  file=sys.stderr, flush=True)
+            _git(parent, *command[1:], stream=True)
             visit(target)
 
     visit(root)

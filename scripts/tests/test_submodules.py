@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import select
 import shutil
 import subprocess
 import sys
@@ -114,6 +115,62 @@ def test_setup_initializes_recursive_shallow_and_preview_is_read_only(repository
     assert git(nested, "rev-parse", "--is-shallow-repository") == "true"
     assert history(outer) == history(nested) == "2"
     assert not (workspace / ".hlsl-dev").exists()
+
+
+def test_setup_skips_stale_nested_gitmodules_entry(repository):
+    workspace, outer_remote, _ = repository
+    # DXC has a .gitmodules entry for googletest without a matching gitlink.
+    git(outer_remote, "rm", "--cached", "--", "child module")
+    git(outer_remote, "commit", "-qm", "remove gitlink but retain config")
+    git(
+        workspace, "update-index", "--cacheinfo", "160000",
+        git(outer_remote, "rev-parse", "HEAD"), "sub module",
+    )
+    git(workspace, "commit", "-qm", "pin parent with stale nested config")
+    assert "child module" in (outer_remote / ".gitmodules").read_text()
+    assert not git(outer_remote, "ls-files", "--stage", "--", "child module")
+
+    output = successful(workspace, "setup")
+    assert "child module" not in output
+    assert (workspace / "sub module/.git").is_file()
+    assert not (workspace / "sub module/child module/.git").exists()
+    plan = successful(workspace, "setup", "--dry-run")
+    assert "child module" not in plan
+    update = successful(workspace, "workspace", "update")
+    assert "child module" not in update
+
+
+def test_setup_reports_activity_before_git_finishes(repository, tmp_path):
+    workspace, _, _ = repository
+    gate = tmp_path / "release-git"
+    shim = tmp_path / "git"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "-C" ] && [ "$3" = "submodule" ] '
+        '&& [ "$4" = "update" ]; then\n'
+        '  echo "Git fetch started" >&2\n'
+        '  while [ ! -e "$HLSL_TEST_GATE" ]; do sleep 0.05; done\n'
+        "fi\n"
+        f'exec "{shutil.which("git")}" "$@"\n'
+    )
+    shim.chmod(0o755)
+    process = subprocess.Popen(
+        [sys.executable, str(workspace / "scripts/hlsl.py"), "setup"],
+        cwd=workspace,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
+             "HLSL_TEST_GATE": str(gate)},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        ready, _, _ = select.select([process.stderr], [], [], 2)
+        assert ready, "setup printed no activity before Git finished"
+        assert "sub module" in process.stderr.readline()
+        assert "Git fetch started" in process.stderr.readline()
+    finally:
+        gate.touch()
+        stdout, stderr = process.communicate(timeout=10)
+    assert process.returncode == 0, stderr
+    assert "child module" in stdout
 
 
 def test_update_preserves_full_parent_and_nested_history(repository):
