@@ -82,8 +82,7 @@ pair worktrees without flags; otherwise choose dependencies explicitly. A
 standalone offload worktree needs an LLVM distribution, DXC/dxv and golden
 images. `--dxc nix` selects host devenv tools, not Windows cross tools. A
 missing distribution can trigger an expensive LLVM install. Do not assume a
-filtered test is cheap: it may first build test dependencies. `--jobs N` caps
-parallel work under container PID limits.
+filtered test is cheap: it may first build test dependencies.
 
 **Preserved configured trees need explicit revalidation after migration.** Use
 `hlsl configure --in <llvm> --offload <offload> --dxc <dxc> --platform native`
