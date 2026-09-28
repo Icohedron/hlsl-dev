@@ -214,9 +214,10 @@ def _inventory(root, *, check_active=True):
                 relative = path.relative_to(tree.path)
                 build_name = relative.parts[0] if relative.parts else ""
                 if entry.startswith("?? ") and (
-                    build_name in ("build", "build-container", "build-native-tools", "build-dist",
+                    build_name in ("build", "build-d3d12", "build-container",
+                                   "build-native-tools", "build-dist",
                                    os.getenv("HLSL_BUILD_DIR_NAME", "build"))
-                    or build_name.startswith(("build.", "build-dist."))
+                    or build_name.startswith(("build.", "build-d3d12.", "build-dist."))
                 ):
                     continue  # Preserved build outputs are not dirty source edits.
                 if any(path == artifact or artifact in path.parents

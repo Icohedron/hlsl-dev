@@ -19,7 +19,8 @@ on-demand cross toolchains. `offloader-scripts/` has independent CI tools.
 
 Check `echo "$DEVENV_ROOT"`. Enter with `devenv shell` or activate `.envrc`
 with direnv; tasks and CMake flag templates depend on devenv. The dev
-container uses `build-container` instead of the host `build` tree. Run
+container forces D3D12 off in `build/`; D3D12-on builds use
+`build-d3d12/` on either side. A host with D3D12 off shares `build/`. Run
 `hlsl --help` or a subcommand's `--help` to verify current flags; the old
 `hlsl-*` task executables were retired together. Bare `hlsl` prints a command
 index.
@@ -89,8 +90,8 @@ Inspect with `hlsl info`/`--dry-run` first. A fresh/unconfigured tree can
 auto-configure after migration. If a preserved distribution, DXC or host
 native-tools tree requires separate revalidation, follow the CLI diagnostic
 rather than rebuilding over old artifacts. New JSON selections are stored
-under `.hlsl-dev/selections/`, isolated by worktree/platform; cross choices
-fall back to saved native choices.
+under `.hlsl-dev/selections/`, isolated by worktree/platform/D3D12 mode;
+cross choices fall back to saved native choices.
 
 ## GPU and cross execution
 

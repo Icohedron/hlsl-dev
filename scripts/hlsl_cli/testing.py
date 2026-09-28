@@ -42,7 +42,8 @@ def _selection(request, kinds):
     )
     if tree is None or tree.kind not in kinds:
         raise BuildError(f"select an {' or '.join(kinds)} worktree with --in")
-    return root, tree, ws.build_directory(tree, "native", target=True)
+    return root, tree, ws.build_directory(tree, "native", target=True,
+                                          d3d12=request.d3d12, root=root)
 
 
 def _lit_args(request):
@@ -144,7 +145,7 @@ def _run_lit(root, tree, build, command, request):
     _require_lit(build)
     prefix = None
     if tree.kind == "offload":
-        selected = _load(root, tree, "native").get("configured", {})
+        selected = _load(root, tree, "native", request.d3d12).get("configured", {})
         if selected.get("build_dir") == str(build) and selected.get("dist_prefix"):
             prefix = Path(selected["dist_prefix"])
     with build_lock(root, prefix) if prefix else nullcontext():

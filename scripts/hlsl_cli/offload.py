@@ -249,9 +249,11 @@ def plan(request):
     if request.reset and any((request.llvm, request.dist_prefix, request.dxc,
                               request.build_type)):
         raise BuildError("--reset cannot be combined with dependency/build selections")
-    build = ws.build_directory(tree, platform, target=True)
-    record = _load(root, tree, platform)
-    saved = {} if request.reset else saved_selections(root, tree, platform)
+    build = ws.build_directory(tree, platform, target=True, d3d12=request.d3d12,
+                               root=root)
+    record = _load(root, tree, platform, request.d3d12)
+    saved = ({} if request.reset else
+             saved_selections(root, tree, platform, request.d3d12))
     llvm = native._dependency(root, tree, "llvm", request.llvm, saved)
     golden = native._dependency(root, tree, "golden", None, saved)
     prefix, external = _prefix(root, llvm, request, saved, platform)
@@ -355,7 +357,8 @@ def plan(request):
         lines.append(f"  build: {' '.join(dxc_plan.build_command)}")
     if configure:
         lines.append(f"configure: {' '.join(configure)}")
-        lines.append(f"write selections: {_selection_file(root, tree, platform)}")
+        selection_path = _selection_file(root, tree, platform, request.d3d12)
+        lines.append(f"write selections: {selection_path}")
         if platform == "native":
             lines.append(f"clangd link: {tree.path / 'compile_commands.json'} (if generated)")
     if command:
@@ -392,9 +395,11 @@ def execute(request):
             if not _installed(prefix):
                 raise BuildError(f"{prefix}: LLVM distribution disappeared")
             if current.configure_command:
-                path = _selection_file(current.root, current.tree, current.platform)
+                path = _selection_file(current.root, current.tree, current.platform,
+                                       request.d3d12)
                 native._begin_configure(
-                    current.root, current.tree, current.build, current.platform
+                    current.root, current.tree, current.build, current.platform,
+                    request.d3d12
                 )
                 _run_command(current.configure_command, current.build,
                              env=(cross.cross_environment()

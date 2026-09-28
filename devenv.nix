@@ -95,9 +95,8 @@ let
     "-G Ninja"
     "-DCMAKE_BUILD_TYPE=$HD_BUILD_TYPE"
 
-    # Sccache integration for faster rebuilds. The cache is shared by every
-    # worktree (see SCCACHE_DIR below), so a second agent building the same
-    # sources in its own worktree mostly hits the cache.
+    # Sccache integration for faster rebuilds. Its per-user default cache is
+    # shared by worktrees in the same host or container.
     "-DCMAKE_C_COMPILER_LAUNCHER=${pkgs.sccache}/bin/sccache"
     "-DCMAKE_CXX_COMPILER_LAUNCHER=${pkgs.sccache}/bin/sccache"
 
@@ -123,7 +122,7 @@ let
     #   split DWARF   leaves the debug info in .dwo files next to the objects
     #                 instead of the linked binary. sccache (0.16) treats the
     #                 .dwo as an extra output and replays it on a cache hit,
-    #                 so the shared .sccache/ still works.
+    #                 so sccache still works.
     #   dylib linking builds one libLLVM.so and links the tools against it
     #                 rather than into them. It also flips CLANG_LINK_CLANG_DYLIB
     #                 (clang/CMakeLists.txt), which is where most of the mass is.
@@ -454,10 +453,6 @@ in
   # for the same kind of thing. devenv still points it out if one appears.
 
   enterShell = ''
-    # One compilation cache for all worktrees: parallel agents building the
-    # same upstream sources share the hits.
-    export SCCACHE_DIR="''${SCCACHE_DIR:-$DEVENV_ROOT/.sccache}"
-
     # --- Vulkan runtime -------------------------------------------
     # Pin the Vulkan loader to one driver, so that a plain vulkaninfo, offloader
     # or llvm-lit run in this shell is as safe as one made through a task (the
@@ -620,7 +615,6 @@ in
   # order.
   enterTest = ''
     set -e
-    test -n "$SCCACHE_DIR"
     test -e "''${VK_DRIVER_FILES:-$HLSL_VK_ICD_DIR}"
     echo "shell environment ok"
     devenv tasks run hlsl:check:shellcheck
@@ -675,8 +669,7 @@ in
       storage = "128gb";
     };
 
-    # One compilation cache for every worktree, kept across rebuilds -- and a
-    # devenv/direnv state directory of this container's own.
+    # A devenv/direnv state directory of this container's own.
     #
     # `.devenv/` and `.direnv/` are per-environment caches that happen to sit
     # in the workspace, so the bind mount would have the container and the host
@@ -687,7 +680,6 @@ in
     # side's direnv reload the whole environment at its next prompt or `cd`,
     # back and forth. Volumes keep each environment's cache to itself.
     mounts = [
-      "source=hlsl-dev-sccache,target=\${containerWorkspaceFolder}/.sccache,type=volume"
       "source=hlsl-dev-devenv,target=\${containerWorkspaceFolder}/.devenv,type=volume"
       "source=hlsl-dev-direnv,target=\${containerWorkspaceFolder}/.direnv,type=volume"
     ];
@@ -696,26 +688,12 @@ in
     # anyway, and an ambient value would override what `hlsl gpu vulkan` records.
     containerEnv.SCCACHE_IDLE_TIMEOUT = "0";
 
-    # Builds here go to <worktree>/build-container, not <worktree>/build.
-    #
-    # The workspace is mounted at its host path, so a build tree made on the
-    # host is otherwise usable in here -- except for build dependency
-    # differences between host and container such as on WSL where the offload
-    # suite finds D3D12 and links /usr/lib/wsl/lib/libd3d12core.so,
-    # which does not exist in this container, and every llvm worktree in this
-    # workspace carries the offload suite in-tree. A second build directory is
-    # the portable half of that trade: it configures itself, finds no D3D12, and
-    # leaves the host's tree alone.
-    #
-    # It is the *name* rather than one directory, so it holds for every
-    # worktree: what `hlsl list` calls built in here is what is built in here,
-    # and the same command on the host still reports the host's trees. What
-    # they do share is the memory of what builds against what,
-    # <llvm worktree>/build-dist, the plain-LLVM distribution an offload
-    # worktree builds against, and <worktree>/compile_commands.json -- the
-    # symlink a configure leaves at the root of the worktree, because clangd
-    # looks in `build/` and its own directory and nowhere else.
-    containerEnv.HLSL_BUILD_DIR_NAME = "build-container";
+    # D3D12 is unavailable inside the container even on a WSL host. Force
+    # the portable build/ here regardless of a host's saved GPU choice;
+    # a host with D3D12 uses build-d3d12/ until `hlsl gpu d3d12 off`.
+    # `--d3d12 on` can still select the D3D12 tree for a single invocation.
+    # build-dist/ and the checkout's clangd database link remain shared.
+    containerEnv.HLSL_D3D12 = "off";
 
     # Empty when unset on the host, which offloader-scripts reads as "no token".
     remoteEnv = {

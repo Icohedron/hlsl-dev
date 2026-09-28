@@ -3,7 +3,7 @@
     "SYS_PTRACE"
   ],
   "containerEnv": {
-    "HLSL_BUILD_DIR_NAME": "build-container",
+    "HLSL_D3D12": "off",
     "SCCACHE_IDLE_TIMEOUT": "0"
   },
   "customizations": {
@@ -28,7 +28,6 @@
   "image": "ghcr.io/cachix/devenv/devcontainer:latest",
   "init": true,
   "mounts": [
-    "source=hlsl-dev-sccache,target=${containerWorkspaceFolder}/.sccache,type=volume",
     "source=hlsl-dev-devenv,target=${containerWorkspaceFolder}/.devenv,type=volume",
     "source=hlsl-dev-direnv,target=${containerWorkspaceFolder}/.direnv,type=volume"
   ],

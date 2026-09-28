@@ -403,10 +403,12 @@ def plan(request):
         return _plan_selected_dxc(request, root, tree, platform)
     if request.reset and any((request.offload, request.dxc, request.build_type)):
         raise BuildError("--reset cannot be combined with dependency/build selections")
-    build = ws.build_directory(tree, platform, target=True)
-    record = _load(root, tree, platform)
+    build = ws.build_directory(tree, platform, target=True, d3d12=request.d3d12,
+                               root=root)
+    record = _load(root, tree, platform, request.d3d12)
     configured = _configured(build)
-    saved = {} if request.reset else saved_selections(root, tree, platform)
+    saved = ({} if request.reset else
+             saved_selections(root, tree, platform, request.d3d12))
     offload = _dependency(root, tree, "offload", request.offload, saved)
     golden = _dependency(root, tree, "golden", None, saved)
     dxc_bin, dxc_choice, prerequisite = _dxc_bin(
@@ -502,7 +504,8 @@ def plan(request):
         lines.append(f"{prefix} {' '.join(configure_command)}")
         if request.reset:
             lines.append("reset: clear saved dependency choices")
-        lines.append(f"write selections: {_selection_file(root, tree, platform)}")
+        selection_path = _selection_file(root, tree, platform, request.d3d12)
+        lines.append(f"write selections: {selection_path}")
         if platform == "native":
             lines.append(
                 f"clangd link: {tree.path / 'compile_commands.json'} (if generated)"
@@ -517,10 +520,10 @@ def plan(request):
     )
 
 
-def _begin_configure(root, tree, build, platform):
+def _begin_configure(root, tree, build, platform, d3d12=None):
     """Invalidate old validation or mark a brand-new build safe to retry."""
-    path = _selection_file(root, tree, platform)
-    old = _load(root, tree, platform)
+    path = _selection_file(root, tree, platform, d3d12)
+    old = _load(root, tree, platform, d3d12)
     if old.get("configured"):
         # A failed reconfigure invalidates the cache, but only a successful
         # configure is allowed to replace the developer's saved choices.
@@ -599,9 +602,10 @@ def execute(request):
             raise BuildError("DXC prerequisite changed while waiting; retry")
         try:
             if current.configure_command:
-                path = _selection_file(current.root, current.tree, current.platform)
+                path = _selection_file(current.root, current.tree, current.platform,
+                                       request.d3d12)
                 _begin_configure(current.root, current.tree, current.build,
-                                 current.platform)
+                                 current.platform, request.d3d12)
                 _run_command(current.configure_command, current.build,
                              env=(cross.cross_environment()
                                   if current.platform != "native" else None))

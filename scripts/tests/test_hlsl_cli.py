@@ -66,7 +66,9 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.delenv("HLSL_WT", raising=False)
     monkeypatch.delenv("HLSL_PLATFORM", raising=False)
     monkeypatch.delenv("HLSL_BUILD_DIR", raising=False)
-    monkeypatch.setenv("HLSL_BUILD_DIR_NAME", "build")
+    monkeypatch.delenv("HLSL_BUILD_DIR_NAME", raising=False)
+    monkeypatch.delenv("HLSL_D3D12", raising=False)
+    monkeypatch.setenv("HLSL_D3D12_DEFAULT", "off")
     return tmp_path
 
 
@@ -1055,7 +1057,8 @@ def test_clean_preview_and_atomic_workspace_sweep(workspace, monkeypatch):
     for tree in (llvm, feature, dxc, offload):
         (tree / "build").mkdir()
         (tree / "build/CMakeCache.txt").touch()
-    for name in ("build-container", "build.windows-x64", "build-native-tools"):
+    for name in ("build-container", "build-d3d12", "build.windows-x64",
+                 "build-native-tools"):
         (llvm / name).mkdir()
         (llvm / name / "build.ninja").touch()
     (llvm / "buildbot-notes").mkdir()
@@ -1087,6 +1090,7 @@ def test_clean_preview_and_atomic_workspace_sweep(workspace, monkeypatch):
         assert not (tree / "build").exists()
     assert not (llvm / "build-dist").exists()
     assert not (llvm / "build-container").exists()
+    assert not (llvm / "build-d3d12").exists()
     assert (llvm / "buildbot-notes/keep").is_file()
     assert not (llvm / "compile_commands.json").is_symlink()
     assert "checkouts" in removed.stdout
@@ -1825,29 +1829,58 @@ def test_gpu_d3d12_saved_switch_reconfigures_and_override_is_ephemeral(
     llvm, _, dxc = test_workspace
     assert cli(workspace, "configure", "--in", str(llvm), "--dxc", str(dxc)).returncode == 0
     log = workspace / "cmake.log"
-    assert "CMAKE_DISABLE_FIND_PACKAGE_D3D12=OFF" in log.read_text()
-    result = cli(workspace, "gpu", "d3d12", "off", "--in", str(llvm))
+    portable = llvm / "build"
+    d3d12 = llvm / "build-d3d12"
+    assert portable.is_dir() and not d3d12.exists()
+    assert "CMAKE_DISABLE_FIND_PACKAGE_D3D12=ON" in log.read_text()
+    result = cli(workspace, "gpu", "d3d12", "on", "--in", str(llvm))
     assert result.returncode == 0, result.stderr
-    assert "CMAKE_DISABLE_FIND_PACKAGE_D3D12=ON" in log.read_text().splitlines()[-1]
-    count = len(log.read_text().splitlines())
-    assert cli(workspace, "build", "clang", "--in", str(llvm)).returncode == 0
-    assert len(log.read_text().splitlines()) == count + 1  # build, not configure
-    status = cli(workspace, "gpu", "d3d12", "status", "--in", str(llvm))
-    assert "setting off" in status.stdout
-    plan = cli(workspace, "build", "clang", "--in", str(llvm),
-               "--d3d12", "on", "--dry-run")
+    assert f"build tree {d3d12} (unconfigured)" in result.stdout
+    assert not d3d12.exists()  # Switching modes never reconfigures the other tree.
+    plan = cli(workspace, "build", "clang", "--in", str(llvm), "--dry-run")
+    assert f"build dir {d3d12}" in plan.stdout
     assert "CMAKE_DISABLE_FIND_PACKAGE_D3D12=OFF" in plan.stdout
-    assert "setting off" in cli(workspace, "gpu", "d3d12", "status").stdout
-    assert cli(workspace, "build", "clang", "--in", str(llvm),
-               "--d3d12", "on").returncode == 0
-    assert "setting off" in cli(workspace, "gpu", "d3d12", "status").stdout
-    assert cli(workspace, "build", "clang", "--in", str(llvm),
-               "--no-auto").returncode != 0
     assert cli(workspace, "build", "clang", "--in", str(llvm)).returncode == 0
-    assert "CMAKE_DISABLE_FIND_PACKAGE_D3D12=ON" in log.read_text().splitlines()[-2]
-    switched = cli(workspace, "gpu", "d3d12", "on", "--in", str(llvm))
-    assert switched.returncode == 0, switched.stderr
+    assert portable.is_dir() and d3d12.is_dir()
+    records = workspace / ".hlsl-dev/selections"
+    assert (records / "llvm-project.json").is_file()
+    assert (records / "llvm-project@d3d12.json").is_file()
+    assert cli(workspace, "gpu", "d3d12", "off", "--in", str(llvm)).returncode == 0
+    count = len(log.read_text().splitlines())
+    assert cli(workspace, "build", "clang", "--in", str(llvm),
+               "--no-auto").returncode == 0
+    assert len(log.read_text().splitlines()) == count + 1  # build, not configure
+    assert cli(workspace, "build", "clang", "--in", str(llvm),
+               "--d3d12", "on", "--no-auto").returncode == 0
+    assert f"build dir {d3d12}" in cli(
+        workspace, "build", "clang", "--in", str(llvm),
+        "--d3d12", "on", "--dry-run").stdout
+    assert "setting off" in cli(workspace, "gpu", "d3d12", "status").stdout
+    assert cli(workspace, "gpu", "d3d12", "on", "--in", str(llvm)).returncode == 0
     assert "setting on" in cli(workspace, "gpu", "d3d12", "status").stdout
+
+
+def test_container_forces_portable_build_despite_shared_host_choice(
+    workspace, test_workspace, monkeypatch
+):
+    llvm, offload, _ = test_workspace
+    dxc = checkout(workspace, "DirectXShaderCompiler", "dxc")
+    assert cli(workspace, "gpu", "d3d12", "on").returncode == 0
+    assert f"build dir {llvm / 'build-d3d12'}" in cli(
+        workspace, "info", "--in", str(llvm)).stdout
+    monkeypatch.setenv("HLSL_D3D12", "off")
+    for tree in (llvm, offload):
+        assert f"build dir {tree / 'build'}" in cli(
+            workspace, "info", "--in", str(tree)).stdout
+    assert f"build dir {dxc / 'build'}" in cli(
+        workspace, "info", "--in", str(dxc)).stdout
+    assert "setting off" in cli(workspace, "gpu", "d3d12", "status").stdout
+    assert cli(workspace, "gpu", "d3d12", "on").returncode != 0
+    assert f"build dir {llvm / 'build-d3d12'}" in cli(
+        workspace, "build", "clang", "--in", str(llvm), "--d3d12", "on",
+        "--dry-run").stdout
+    assert f"build dir {llvm / 'build'}" in cli(
+        workspace, "info", "--in", str(llvm)).stdout
 
 
 def test_gpu_failed_d3d12_reconfigure_invalidates_cache(workspace, test_workspace,
@@ -1855,6 +1888,7 @@ def test_gpu_failed_d3d12_reconfigure_invalidates_cache(workspace, test_workspac
     llvm, _, dxc = test_workspace
     assert cli(workspace, "configure", "--in", str(llvm), "--dxc", str(dxc)).returncode == 0
     fake_cmake(workspace, fail=True)
+    # A configured target is reconciled; a failed refresh invalidates only it.
     switched = cli(workspace, "gpu", "d3d12", "off", "--in", str(llvm))
     assert switched.returncode != 0
     assert "setting off" in cli(workspace, "gpu", "d3d12", "status").stdout

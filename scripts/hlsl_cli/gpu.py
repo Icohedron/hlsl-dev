@@ -43,7 +43,8 @@ def driver(root, override=None):
 
 
 def d3d12(root, override=None):
-    value = override or os.getenv("HLSL_D3D12") or _choices(root).get("d3d12", "on")
+    value = (override or os.getenv("HLSL_D3D12") or _choices(root).get("d3d12")
+             or os.getenv("HLSL_D3D12_DEFAULT", "on"))
     if value not in _CHOICES:
         raise BuildError(f"invalid D3D12 choice '{value}'; use on or off")
     return value
@@ -153,7 +154,8 @@ def plan(request):
         lines = [f"setting {d3d12(root, request.gpu_choice)}",
                  f"available {'yes' if _available() else 'no'}", f"settings {_file(root)}"]
         if tree:
-            build = ws.build_directory(tree, target=True)
+            build = ws.build_directory(tree, target=True, d3d12=request.gpu_choice,
+                                       root=root)
             test_root = (build / "tools/OffloadTest/test" if tree.kind == "llvm"
                          else build / "test")
             state = ("unconfigured" if not _configured(build) else
@@ -170,15 +172,23 @@ def execute(request):
     root = request.root.resolve()
     if request.action == "gpu vulkan":
         _required_manifest(root, request.gpu_choice)
-    elif request.action == "gpu d3d12" and request.gpu_choice not in _CHOICES:
-        raise BuildError("D3D12 accepts on or off")
+    elif request.action == "gpu d3d12":
+        if request.gpu_choice not in _CHOICES:
+            raise BuildError("D3D12 accepts on or off")
+        forced = os.getenv("HLSL_D3D12")
+        if forced and forced != request.gpu_choice:
+            raise BuildError(
+                f"HLSL_D3D12={forced} overrides saved D3D12 choices; "
+                "unset it or use --d3d12 for a single command"
+            )
     _check_migration(root)
     # Serialize setting switches with one another, and reconfigure under the
     # same build lock used by ordinary builds. A failed reconfigure leaves the
     # new setting saved but invalidates the old build validation.
     with build_lock(root, root / "gpu"):
         tree = _tree(request) if request.action == "gpu d3d12" else None
-        build = ws.build_directory(tree, target=True) if tree else None
+        build = (ws.build_directory(tree, target=True, d3d12=request.gpu_choice,
+                                    root=root) if tree else None)
         with build_lock(root, build) if build and _configured(build) else _null_lock():
             choices = _choices(root)
             key = "vk" if request.action == "gpu vulkan" else "d3d12"

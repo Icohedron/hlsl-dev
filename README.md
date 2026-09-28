@@ -31,10 +31,14 @@ limit parallelism, especially under container process limits.
 To activate automatically when entering the directory, install a direnv shell
 hook and run `direnv allow`: the included `.envrc` uses devenv. Or use
 `devenv shell` explicitly. Check `echo "$DEVENV_ROOT"` before troubleshooting
-missing flags or tools. The dev container uses the same environment; its
-`build-container` trees are separate from host `build` trees. Change container
-configuration in `devcontainer.settings` in `devenv.nix`, not the generated
-`.devcontainer/devcontainer.json`.
+missing flags or tools. The dev container forces D3D12 off and uses `build/`,
+even if a shared GPU choice enables it on the host. A host with D3D12 on uses
+`build-d3d12/`; turn it off with `hlsl gpu d3d12 off` to share `build/` with
+the container. Sccache uses its per-user default cache location on the host
+and inside the container, so the two do not contend for `.sccache` in the
+workspace. The container cache does not persist across container rebuilds.
+Change container configuration in `devcontainer.settings` in `devenv.nix`,
+not the generated `.devcontainer/devcontainer.json`.
 
 ## Existing workspace: explicit one-time migration
 
@@ -78,8 +82,8 @@ the CLI's error rather than overwriting a different worktree's artifacts. A
 new/unconfigured build tree instead follows normal auto-configure policy after
 migration. `hlsl configure --reset --in <worktree>` clears saved new-CLI
 choices; it does not import old pins. New choices are kept as JSON under
-`.hlsl-dev/selections/` per worktree and platform (cross choices fall back to
-native choices). An explicit Windows toolchain fetch may be needed again after
+`.hlsl-dev/selections/` per worktree, platform and D3D12 mode (cross choices
+fall back to native choices). An explicit Windows toolchain fetch may be needed again after
 old toolchain roots are removed.
 
 GPU settings also start fresh: Vulkan defaults to lavapipe and D3D12 defaults
@@ -141,9 +145,11 @@ hlsl distribution refresh --in llvm-project --dry-run
 hlsl distribution refresh --in llvm-project
 ```
 
-Build output stays inside the selected worktree (`build`, `build-container`,
-`build.<platform>` and `build-dist[.<platform>]`). The CLI locks a build directory
-while using it; separate worktrees have separate build trees, but standalone
+Build output stays inside the selected worktree (`build` with D3D12 off,
+`build-d3d12` with D3D12 on, their `.<platform>` cross variants, and
+`build-dist[.<platform>]`). Linux cross builds always use `build.<platform>`
+because they cannot enable D3D12. The CLI locks a build directory while using
+it; separate worktrees have separate build trees, but standalone
 offload worktrees sharing an LLVM distribution serialize on its prefix lock.
 Never reconfigure/clean someone else's worktree. A native configure links `compile_commands.json` for
 clangd; the link is locally excluded from Git. Use `hlsl info --in ...` to see
@@ -192,10 +198,15 @@ lavapipe-only failure does not establish a compiler defect on a real driver.
 
 D3D12 tests need Windows or WSL D3D12, unavailable on ordinary Linux. Inspect
 with `hlsl gpu d3d12 status --in offload-test-suite`; use
-`hlsl gpu d3d12 off --in offload-test-suite` to save the choice and reconcile
-a configured checkout, or `on` to re-enable detection. Applicable configure/build/test commands also accept
-`--d3d12 on|off` for that call; it does not save the override. The CLI
-reconciles the build configuration with the selected mode.
+`hlsl gpu d3d12 off --in offload-test-suite` to save the choice and select
+`build/`, or `on` to select `build-d3d12/`. If the selected tree is already
+configured, the CLI reconciles it; it never rewrites the other tree. Applicable
+configure/build/test commands also accept `--d3d12 on|off` for that call; the
+override selects the matching tree without saving the choice. The container's
+`HLSL_D3D12=off` overrides saved choices; unset it before using
+`hlsl gpu d3d12 on` inside the container. Existing `build-container/` trees are
+preserved but no longer selected automatically; use an explicit
+`HLSL_BUILD_DIR` if you need to reuse one.
 
 ## Cross compilation
 

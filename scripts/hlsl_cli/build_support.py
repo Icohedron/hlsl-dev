@@ -31,13 +31,19 @@ def _key(root, path):
     return value.removeprefix(prefix).replace("/", "%")
 
 
-def _selection_file(root, tree, platform):
+def _selection_file(root, tree, platform, d3d12=None):
     suffix = "" if platform == "native" else f"@{platform}"
+    if (tree.kind in ("llvm", "offload")
+            and (platform == "native" or platform.startswith("windows-"))):
+        from .gpu import d3d12 as d3d12_choice
+
+        if d3d12_choice(root, d3d12) == "on":
+            suffix += "@d3d12"
     return root / ".hlsl-dev/selections" / f"{_key(root, tree.path)}{suffix}.json"
 
 
-def _load(root, tree, platform):
-    path = _selection_file(root, tree, platform)
+def _load(root, tree, platform, d3d12=None):
+    path = _selection_file(root, tree, platform, d3d12)
     if not path.is_file():
         return {}
     try:
@@ -61,13 +67,21 @@ def _load(root, tree, platform):
         ) from error
 
 
-def saved_selections(root, tree, platform):
+def saved_selections(root, tree, platform, d3d12=None):
     """Read this platform's choices, falling back to native per missing key."""
-    selection = _load(root, tree, platform).get("choices", {})
+    selection = _load(root, tree, platform, d3d12).get("choices", {})
+    if (tree.kind in ("llvm", "offload")
+            and (platform == "native" or platform.startswith("windows-"))):
+        from .gpu import d3d12 as d3d12_choice
+
+        other = "off" if d3d12_choice(root, d3d12) == "on" else "on"
+        fallback = _load(root, tree, platform, other).get("choices", {})
+    else:
+        fallback = {}
     if platform != "native":
-        native = _load(root, tree, "native").get("choices", {})
-        return {**native, **selection}
-    return selection
+        native = _load(root, tree, "native", d3d12).get("choices", {})
+        return {**fallback, **native, **selection}
+    return {**fallback, **selection}
 
 
 def _save(path, selections):

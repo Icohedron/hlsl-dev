@@ -130,6 +130,10 @@ def test_llvm_cross_plan_host_tools_and_build(cross_env, monkeypatch):
     assert plan.returncode == 0, plan.stderr
     assert "nix-build" in plan.stdout and "build-native-tools" in plan.stdout
     assert str(llvm / "build.linux-arm64") in plan.stdout
+    no_d3d12 = cli(root, "build", "clang", *args, "--d3d12", "on", "--dry-run")
+    assert no_d3d12.returncode == 0, no_d3d12.stderr
+    assert str(llvm / "build.linux-arm64") in no_d3d12.stdout
+    assert "build-d3d12.linux-arm64" not in no_d3d12.stdout
     assert str(llvm / "build-native-tools/bin") in plan.stdout
     assert files(root) == before
     refused = cli(root, "build", "clang", *args, "--no-auto")
@@ -392,9 +396,10 @@ def test_windows_llvm_plan_never_uses_host_dxc_and_separates_builds(cross_env, m
         (win / name).touch()
     monkeypatch.setenv("VK_DRIVER_FILES", "/missing/host/icd.json")
     before = files(root)
-    plan = cli(root, "build", "clang", *args, "--dxc", str(win), "--dry-run")
+    plan = cli(root, "build", "clang", *args, "--dxc", str(win),
+               "--d3d12", "on", "--dry-run")
     assert plan.returncode == 0, plan.stderr
-    assert str(llvm / "build.windows-x64") in plan.stdout
+    assert str(llvm / "build-d3d12.windows-x64") in plan.stdout
     assert str(win) in plan.stdout and str(root / "dxc-bin") not in plan.stdout
     assert "-DCMAKE_DISABLE_FIND_PACKAGE_D3D12=OFF" in plan.stdout
     assert "-DCMAKE_DISABLE_FIND_PACKAGE_D3D12_WSL=OFF" in plan.stdout
@@ -403,9 +408,9 @@ def test_windows_llvm_plan_never_uses_host_dxc_and_separates_builds(cross_env, m
     assert files(root) == before
     monkeypatch.setenv("HLSL_MSVC_LICENSE", "accepted")
     built = cli(root, "build", "clang", *args, "--dxc", str(win),
-                "--vulkan-driver", "missing")
+                "--d3d12", "on", "--vulkan-driver", "missing")
     assert built.returncode == 0, built.stderr
-    assert (llvm / "build.windows-x64/build.ninja").is_file()
+    assert (llvm / "build-d3d12.windows-x64/build.ninja").is_file()
     assert not (llvm / "build/build.ninja").exists()
     assert not (llvm / "compile_commands.json").exists()
     assert "-DDXC=" + str(win) in repr(calls(root / "cmake.log")[2])
@@ -426,9 +431,10 @@ def test_windows_offload_plans_target_apis_without_host_execution(cross_env, mon
     args = ("--in", str(offload), "--platform", "windows-arm64", "--dxc", str(win),
             "--dist-prefix", str(prefix))
     before = files(root)
-    plan = cli(root, "build", "install-offload-test-suite", *args, "--dry-run")
+    plan = cli(root, "build", "install-offload-test-suite", *args,
+               "--d3d12", "on", "--dry-run")
     assert plan.returncode == 0, plan.stderr
-    assert str(offload / "build.windows-arm64") in plan.stdout
+    assert str(offload / "build-d3d12.windows-arm64") in plan.stdout
     assert str(prefix / "lib/cmake/llvm") in plan.stdout
     assert "-DCMAKE_DISABLE_FIND_PACKAGE_D3D12=OFF" in plan.stdout
     assert "target APIs: D3D12" in plan.stdout and "vulkan-1.lib" in plan.stdout
@@ -436,6 +442,7 @@ def test_windows_offload_plans_target_apis_without_host_execution(cross_env, mon
     off = cli(root, "configure", *args, "--d3d12", "off", "--dry-run")
     assert off.returncode == 0, off.stderr
     assert "-DCMAKE_DISABLE_FIND_PACKAGE_D3D12=ON" in off.stdout
+    assert str(offload / "build.windows-arm64") in off.stdout
     assert files(root) == before
     for target in (root / "llvm-project", offload):
         refused = cli(root, "build", "check-hlsl-clang-vk", "--in", str(target),

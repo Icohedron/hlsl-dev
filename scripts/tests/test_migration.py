@@ -35,6 +35,8 @@ def fixture(root, tmp_path):
         (tree / "build").mkdir()
         (tree / "build/build.ninja").touch()
         (tree / "codegraph.json").write_text("{}")
+    (llvm / "build-d3d12").mkdir()
+    (llvm / "build-d3d12/build.ninja").touch()
     (external / ".codegraph").mkdir()
     (external / ".codegraph/index.db").write_text("index")
     state = root / ".hlsl-dev"
@@ -62,7 +64,11 @@ def test_confirmed_migration_removes_only_legacy_and_retry_is_noop(workspace, tm
     for tree in (llvm, external, dxc):
         assert (tree / "build/build.ninja").exists()
         assert not (tree / "codegraph.json").exists()
-        assert git(tree, "status", "--porcelain") == "?? build/"
+        expected = {"?? build/"}
+        if tree == llvm:
+            assert (tree / "build-d3d12/build.ninja").exists()
+            expected.add("?? build-d3d12/")
+        assert set(git(tree, "status", "--porcelain").splitlines()) == expected
     assert not (external / ".codegraph").exists()
     assert (external / ".gitignore").read_text() == "original\n"
     assert git(external, "ls-files", "-v", ".gitignore").startswith("H ")

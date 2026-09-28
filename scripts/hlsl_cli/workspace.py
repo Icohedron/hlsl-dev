@@ -155,12 +155,20 @@ def distribution_prefix(tree, platform="native"):
     return tree.path / f"build-dist{suffix}" / "install"
 
 
-def build_directory(tree, platform="native", *, target=False):
+def build_directory(tree, platform="native", *, target=False, d3d12=None, root=None):
     override = os.getenv("HLSL_BUILD_DIR") if target else None
     if override:
         path = Path(override)
         return path if path.is_absolute() else tree.path / path
-    name = os.getenv("HLSL_BUILD_DIR_NAME") or "build"
+    name = os.getenv("HLSL_BUILD_DIR_NAME")
+    if not name:
+        name = "build"
+        if (tree.kind in ("llvm", "offload")
+                and (platform == "native" or platform.startswith("windows-"))):
+            from .gpu import d3d12 as d3d12_choice
+
+            if d3d12_choice(root or workspace_root(), d3d12) == "on":
+                name = "build-d3d12"
     return tree.path / (name + (f".{platform}" if platform != "native" else ""))
 
 
