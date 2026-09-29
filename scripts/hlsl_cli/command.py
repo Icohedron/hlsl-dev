@@ -258,6 +258,10 @@ def preview(request):
         from . import formatting
 
         return formatting.execute(request, preview=True)
+    if request.action == "builds stop":
+        from . import stop_builds
+
+        return stop_builds.plan(root)
     if request.action == "workspace migrate":
         from .migration import preview as migration_preview
 
@@ -316,6 +320,10 @@ def preview(request):
 
 def run(request):
     """Use the same planner for inspection and execution, replanning under lock."""
+    if request.action == "builds stop":
+        from . import stop_builds
+
+        return stop_builds.stop(request.root)
     if request.action.startswith("gpu "):
         from . import gpu
 

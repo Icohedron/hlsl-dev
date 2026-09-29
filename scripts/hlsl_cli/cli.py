@@ -169,6 +169,17 @@ def parser():
         selected = cross_actions.add_parser(name, help=f"{name.title()} a cross toolchain")
         selected.add_argument("platform", metavar="PLATFORM")
         selected.add_argument("--dry-run", action="store_true")
+    builds = actions.add_parser("builds", help="Inspect or stop build-related commands")
+    builds_actions = builds.add_subparsers(dest="builds_action")
+    stop = builds_actions.add_parser(
+        "stop", help="Stop running and queued build-related commands in this workspace",
+        description="Preview first; --yes stops matching commands and their child processes.",
+    )
+    stop_mode = stop.add_mutually_exclusive_group(required=True)
+    stop_mode.add_argument("--dry-run", action="store_true",
+                           help="List builds without signaling them")
+    stop_mode.add_argument("--yes", action="store_true",
+                           help="Stop all builds in this workspace")
     for action, help_text in (
         ("configure", "Configure LLVM/DXC/standalone offload"),
         ("build", "Configure and build native LLVM/DXC/standalone offload"),
@@ -410,6 +421,7 @@ def parser():
         "gpu": (gpu, "gpu_action"),
         "gpu vulkan": (vulkan, "gpu_mode"),
         "package": (packages, "package_action"),
+        "builds": (builds, "builds_action"),
     }
     return commands, {"test": testing, "lit": lit}, groups
 
@@ -456,6 +468,8 @@ def main(argv=None):
             action = f"gpu {args.gpu_action}"
         elif action == "package":
             action = f"package {args.package_action}"
+        elif action == "builds":
+            action = f"builds {args.builds_action}"
         # Git-wide operations must never follow a stale DEVENV_ROOT/HLSL_DEV_ROOT
         # into a different checkout from the one providing this CLI source.
         root = (

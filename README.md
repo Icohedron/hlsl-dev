@@ -28,6 +28,16 @@ on commands that support it. Prefer one target/test over the default umbrella
 build; a missing LLVM distribution or DXC can be expensive. Use `--jobs N` to
 limit parallelism, especially under container process limits.
 
+If a build is stuck or later builds are silently waiting on its lock, preview
+`hlsl builds stop --dry-run`, then run `hlsl builds stop --yes` to stop all
+visible, same-user build-related commands in this workspace (across worktrees):
+`build`, `configure`, `test`, `distribution install`, `package`, and
+`cross fetch/refresh`. It includes queued invocations and their child compiler
+processes. This Linux command does not acquire build locks or delete build
+artifacts. It cannot identify workers already detached from a terminated
+command or builds launched directly with CMake/Ninja; it does not touch
+processes from other workspaces.
+
 To activate automatically when entering the directory, install a direnv shell
 hook and run `direnv allow`: the included `.envrc` uses devenv. Or use
 `devenv shell` explicitly. Check `echo "$DEVENV_ROOT"` before troubleshooting
