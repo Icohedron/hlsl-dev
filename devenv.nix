@@ -460,12 +460,6 @@ in
     VK_ADD_LAYER_PATH = vulkanLayerPath;
   };
 
-  # No dotenv integration. Nothing here needs one any more: the choices tasks
-  # make (the Vulkan driver, D3D12) live in .hlsl-dev/gpu.json, where they
-  # apply to the next command rather than the next shell, and the one secret is
-  # secretspec's (see secretspec.toml). A `.env` would be a third place to look
-  # for the same kind of thing. devenv still points it out if one appears.
-
   enterShell = ''
     # --- Vulkan runtime -------------------------------------------
     # Pin the Vulkan loader to one driver, so that a plain vulkaninfo, offloader
@@ -715,11 +709,10 @@ in
     # clangd database link remains shared.
     containerEnv.HLSL_D3D12 = "off";
 
+    # Capture the host token when the container is created so all processes,
+    # including non-devcontainer execs, can use it. Recreate to change the token.
     # Empty when unset on the host, which offloader-scripts reads as "no token".
-    remoteEnv = {
-      GH_TOKEN = "\${localEnv:GH_TOKEN}";
-      GITHUB_TOKEN = "\${localEnv:GITHUB_TOKEN}";
-    };
+    containerEnv.GH_TOKEN = "\${localEnv:GH_TOKEN}";
 
     # The image already activates the environment for interactive shells: it
     # ends ~/.bashrc with direnv's hook (`.envrc` says `use devenv`), Ubuntu's
