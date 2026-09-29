@@ -411,6 +411,36 @@ def test_windows_dxc_requires_dia_and_uses_target_flags(cross_env, monkeypatch, 
     assert (root / f".hlsl-dev/selections/DirectXShaderCompiler@{platform}.json").is_file()
 
 
+def test_windows_llvm_build_does_not_require_dxc(cross_env, monkeypatch):
+    root = cross_env
+    llvm = checkout(root, "llvm-project", "llvm")
+    checkout(root, "offload-test-suite", "offload")
+    checkout(root, "offload-golden-images", "golden")
+    checkout(root, "DirectXShaderCompiler", "dxc")
+    monkeypatch.setenv("HLSL_CMAKE_FLAGS_LLVM", "-G Ninja -DDXC=$HD_DXC_BIN_DIR")
+    native = root / ".hlsl-dev/selections/llvm-project.json"
+    native.parent.mkdir(parents=True)
+    native.write_text(json.dumps({"version": 1, "choices": {"dxc": "nix"},
+                                  "configured": {}}))
+    args = ("build", "hlsl-test-depends", "--in", str(llvm),
+            "--platform", "windows-x64")
+    before = files(root)
+    plan = cli(root, *args, "--dry-run")
+    assert plan.returncode == 0, plan.stderr
+    assert "prerequisite: build dxc/dxv" not in plan.stdout
+    assert "dxc not selected" in plan.stdout
+    assert "DXC=" + str(llvm / "build.windows-x64/.dxc-not-selected") in plan.stdout
+    assert files(root) == before
+    monkeypatch.setenv("HLSL_MSVC_LICENSE", "accepted")
+    built = cli(root, *args)
+    assert built.returncode == 0, built.stderr
+    assert (llvm / "build.windows-x64/build.ninja").is_file()
+    assert not (root / "DirectXShaderCompiler/build.windows-x64").exists()
+    assert "DXC=" + str(llvm / "build.windows-x64/.dxc-not-selected") in repr(
+        calls(root / "cmake.log")[-2]
+    )
+
+
 def test_windows_llvm_plan_never_uses_host_dxc_and_separates_builds(cross_env, monkeypatch):
     root = cross_env
     llvm = checkout(root, "llvm-project", "llvm")
@@ -442,6 +472,9 @@ def test_windows_llvm_plan_never_uses_host_dxc_and_separates_builds(cross_env, m
     assert not (llvm / "build/build.ninja").exists()
     assert not (llvm / "compile_commands.json").exists()
     assert "-DDXC=" + str(win) in repr(calls(root / "cmake.log")[2])
+    saved = cli(root, "build", "clang", *args, "--d3d12", "on", "--dry-run")
+    assert saved.returncode == 0, saved.stderr
+    assert f"dxc {win}" in saved.stdout
 
 
 def test_windows_offload_plans_target_apis_without_host_execution(cross_env, monkeypatch):

@@ -410,12 +410,28 @@ def plan(request):
     configured = _configured(build)
     saved = ({} if request.reset else
              saved_selections(root, tree, platform, request.d3d12))
+    if cross.is_windows(platform):
+        # Native DXC selections cannot run on Windows. LLVM build targets do
+        # not need DXC; only a target-specific selection opts into building it.
+        windows_dxc = record.get("choices", {}).get("dxc")
+        if windows_dxc:
+            saved["dxc"] = windows_dxc
+        else:
+            saved.pop("dxc", None)
     offload = _dependency(root, tree, "offload", request.offload, saved)
     golden = _dependency(root, tree, "golden", None, saved)
-    dxc_bin, dxc_choice, prerequisite = _dxc_bin(
-        root, tree, request.dxc, saved,
-        request.no_auto or os.getenv("HLSL_AUTO") == "0", platform
-    )
+    if cross.is_windows(platform) and not (
+        request.dxc or os.getenv("HLSL_DXC") or saved.get("dxc")
+    ):
+        # Keep CMake's test-site paths target-local without provisioning DXC.
+        # An explicit path prevents find_program from picking up a host binary.
+        dxc_bin, dxc_choice, prerequisite = (build / ".dxc-not-selected",
+                                             "not selected", None)
+    else:
+        dxc_bin, dxc_choice, prerequisite = _dxc_bin(
+            root, tree, request.dxc, saved,
+            request.no_auto or os.getenv("HLSL_AUTO") == "0", platform
+        )
     build_type = _build_type(request, saved, build)
     selections = {
         "build_dir": str(build),
@@ -480,11 +496,14 @@ def plan(request):
     cost = "LLVM build (large)" if build_command else "configure only"
     if prerequisite:
         cost = f"DXC prerequisite (large) + {cost}"
+    dxc_display = (str(dxc_bin) if dxc_choice != "not selected"
+                   else "not selected (tests need --dxc)")
     lines = [
         f"worktree {tree.path} (llvm)", f"platform {platform}",
         f"build dir {build}", f"build type {build_type}",
         f"offload {offload.path}", f"golden {golden.path}",
-        f"dxc {dxc_bin}", f"cost: {cost}",
+        f"dxc {dxc_display}",
+        f"cost: {cost}",
     ]
     migration = migration_prerequisite(root)
     if migration:
