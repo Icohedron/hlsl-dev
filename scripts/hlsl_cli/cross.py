@@ -49,7 +49,14 @@ def _licence_error(platform):
 
 
 def toolchain_file(root, platform):
-    return root / ".hlsl-dev/toolchains" / platform / "toolchain.cmake"
+    directory = os.getenv("HLSL_CROSS_TOOLCHAINS")
+    if directory:
+        path = Path(directory)
+        if not path.is_absolute():
+            raise BuildError("HLSL_CROSS_TOOLCHAINS must be an absolute path")
+    else:
+        path = root / ".hlsl-dev/toolchains"
+    return path / platform / "toolchain.cmake"
 
 
 def toolchain_plan(root, platform, *, refresh=False):
@@ -74,7 +81,6 @@ def toolchain_plan(root, platform, *, refresh=False):
                if needed and is_windows(platform) and not msvc_license_accepted() else "")
     gpu = ("target APIs: D3D12 (Windows SDK), Vulkan "
            "(vulkan-1.lib from llvm-dlltool; target supplies vulkan-1.dll)\n"
-           "Windows execution: unverified; run binaries only on target\n"
            if is_windows(platform) else "")
     return ToolchainPlan(root, platform, file, command,
                          f"platform {platform} ({TRIPLES[platform]})\n"

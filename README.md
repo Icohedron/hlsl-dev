@@ -265,8 +265,9 @@ Windows DXC cross builds, copy Microsoft's DIA SDK from a Visual Studio
 installation yourself and set `HLSL_DIA_SDK=/path/to/dia-sdk`. It is not in
 nixpkgs. Or select prebuilt target DXC/dxv with `--dxc` where applicable.
 `hlsl cross refresh PLATFORM` deliberately refreshes an existing toolchain.
-Windows **execution is unverified**: a cross build or archive is not evidence
-that a test ran successfully on a target machine.
+**Target execution is unverified** for any cross build (including Linux ARM64
+on x64 and Windows targets): a build or archive does not mean the binaries ran
+on the target machine.
 
 ## Portable packages and reproducers
 
@@ -300,8 +301,10 @@ to bundled lit and PyYAML, **requiring target Python 3**; the preview and
 archive `REPRO.md`/`requirements.txt` say which mode and why. The host must
 compile every selected test; none is silently omitted. Rejected compiler
 outputs retain their original status, important for expected failures/XFAIL.
-For all Windows packages, **target execution is unverified** until actually
-run on Windows.
+For all non-native packages, **target execution is unverified** until the
+archive is actually run on the target. The archive instructions and
+`provenance.json` (`target_execution_unverified`) record this without repeating
+it in build or package command output.
 
 ## Developer checks and auxiliary tools
 

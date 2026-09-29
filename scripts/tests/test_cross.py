@@ -149,6 +149,7 @@ def test_llvm_cross_plan_host_tools_and_build(cross_env, monkeypatch):
     args = ("--in", str(llvm), "--platform", "linux-arm64")
     plan = cli(root, "build", "clang", *args, "--dry-run")
     assert plan.returncode == 0, plan.stderr
+    assert "Target execution unverified" not in plan.stdout
     assert "nix-build" in plan.stdout and "build-native-tools" in plan.stdout
     assert str(llvm / "build.linux-arm64") in plan.stdout
     no_d3d12 = cli(root, "build", "clang", *args, "--d3d12", "on", "--dry-run")
@@ -348,6 +349,26 @@ def test_windows_licence_blocks_fetch_without_realizing_sdk(cross_env, platform)
     assert not (root / "nix.log").exists()
 
 
+def test_cross_toolchain_override_keeps_host_toolchain(cross_env, monkeypatch):
+    from hlsl_cli import cross
+
+    root = cross_env
+    host = root / ".hlsl-dev/toolchains/windows-x64"
+    host.mkdir(parents=True)
+    (host.parent / ".private-cli").touch()
+    (host / "toolchain.cmake").write_text("host toolchain")
+    container = root / "container-toolchains"
+    monkeypatch.setenv("HLSL_CROSS_TOOLCHAINS", str(container))
+    monkeypatch.setenv("HLSL_MSVC_LICENSE", "accepted")
+    report = cli(root, "cross", "fetch", "windows-x64")
+    assert report.returncode == 0, report.stderr
+    assert (container / "windows-x64/toolchain.cmake").is_file()
+    assert (host / "toolchain.cmake").read_text() == "host toolchain"
+    assert cross.toolchain_file(root, "windows-x64") == (
+        container / "windows-x64/toolchain.cmake"
+    )
+
+
 def test_windows_fake_toolchain_requires_explicit_per_command_consent(cross_env, monkeypatch):
     root = cross_env
     platform = "windows-x64"
@@ -356,7 +377,7 @@ def test_windows_fake_toolchain_requires_explicit_per_command_consent(cross_env,
     assert plan.returncode == 0, plan.stderr
     assert "--arg acceptMsvcLicense true" in plan.stdout
     assert "D3D12 (Windows SDK), Vulkan (vulkan-1.lib" in plan.stdout
-    assert "Windows execution: unverified" in plan.stdout
+    assert "Target execution unverified" not in plan.stdout
     assert not (root / "nix.log").exists()
     fetched = cli(root, "cross", "fetch", platform)
     assert fetched.returncode == 0, fetched.stderr
@@ -418,6 +439,7 @@ def test_windows_llvm_build_does_not_require_dxc(cross_env, monkeypatch):
     checkout(root, "offload-golden-images", "golden")
     checkout(root, "DirectXShaderCompiler", "dxc")
     monkeypatch.setenv("HLSL_CMAKE_FLAGS_LLVM", "-G Ninja -DDXC=$HD_DXC_BIN_DIR")
+    monkeypatch.setenv("HLSL_D3D12", "off")
     native = root / ".hlsl-dev/selections/llvm-project.json"
     native.parent.mkdir(parents=True)
     native.write_text(json.dumps({"version": 1, "choices": {"dxc": "nix"},
@@ -430,6 +452,8 @@ def test_windows_llvm_build_does_not_require_dxc(cross_env, monkeypatch):
     assert "prerequisite: build dxc/dxv" not in plan.stdout
     assert "dxc not selected" in plan.stdout
     assert "DXC=" + str(llvm / "build.windows-x64/.dxc-not-selected") in plan.stdout
+    assert "-DCMAKE_DISABLE_FIND_PACKAGE_D3D12=OFF" in plan.stdout
+    assert "-DCMAKE_DISABLE_FIND_PACKAGE_D3D12_WSL=OFF" in plan.stdout
     assert files(root) == before
     monkeypatch.setenv("HLSL_MSVC_LICENSE", "accepted")
     built = cli(root, *args)
@@ -502,7 +526,8 @@ def test_windows_offload_plans_target_apis_without_host_execution(cross_env, mon
     assert "-DLLVM_ENABLE_LLD=OFF" not in plan.stdout
     off = cli(root, "configure", *args, "--d3d12", "off", "--dry-run")
     assert off.returncode == 0, off.stderr
-    assert "-DCMAKE_DISABLE_FIND_PACKAGE_D3D12=ON" in off.stdout
+    assert "-DCMAKE_DISABLE_FIND_PACKAGE_D3D12=OFF" in off.stdout
+    assert "-DCMAKE_DISABLE_FIND_PACKAGE_D3D12_WSL=OFF" in off.stdout
     assert str(offload / "build.windows-arm64") in off.stdout
     assert files(root) == before
     for target in (root / "llvm-project", offload):

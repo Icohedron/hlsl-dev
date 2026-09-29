@@ -458,7 +458,9 @@ def plan(request):
         if cross.is_windows(platform):
             from .gpu import d3d12_flags
 
-            flags.extend(d3d12_flags(root, request.d3d12))
+            # Windows cross toolchains include the SDK even when the host's
+            # native D3D12 runtime is disabled (e.g. inside a container).
+            flags.extend(d3d12_flags(root, "on"))
     else:
         from .gpu import d3d12_flags
 

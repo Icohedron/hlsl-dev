@@ -3,6 +3,7 @@
     "SYS_PTRACE"
   ],
   "containerEnv": {
+    "HLSL_CROSS_TOOLCHAINS": "${containerWorkspaceFolder}/.devenv/toolchains",
     "HLSL_D3D12": "off",
     "SCCACHE_IDLE_TIMEOUT": "0"
   },

@@ -200,6 +200,24 @@ def test_only_configured_runnable_suites_are_archived(workspace, tmp_path):
     ] == ["clang-vk", "vk"]
 
 
+def test_linux_arm64_full_package_marks_target_execution_unverified(workspace, tmp_path):
+    llvm, _, _, _, _ = make_install(workspace, platform="linux-arm64")
+    archive = tmp_path / "full.tar.gz"
+    args = ("package", "full", "--in", str(llvm), "--platform", "linux-arm64",
+            "--out", str(archive))
+    preview = cli(workspace, *args, "--dry-run")
+    assert preview.returncode == 0, preview.stderr
+    assert "Target execution unverified" not in preview.stdout
+    result = cli(workspace, *args)
+    assert result.returncode == 0, result.stderr
+    unpack(archive, tmp_path / "linux-arm64")
+    stage = tmp_path / "linux-arm64"
+    assert "Target execution unverified (linux-arm64)" in (
+        stage / "README.txt").read_text()
+    provenance = json.loads((stage / "provenance.json").read_text())
+    assert provenance["target_execution_unverified"] is True
+
+
 def test_windows_archive_materializes_links(workspace, tmp_path):
     llvm, _, _, build, _ = make_install(workspace, "llvm", "windows-x64")
     (build / "install/bin/clang-dxc.exe").symlink_to("clang.exe")
@@ -208,11 +226,11 @@ def test_windows_archive_materializes_links(workspace, tmp_path):
     result = cli(workspace, "package", "full", "--in", str(llvm),
                  "--platform", "windows-x64", "--out", str(archive))
     assert result.returncode == 0, result.stderr
-    assert "Windows execution unverified" in result.stdout
+    assert "Target execution unverified" not in result.stdout
     unpack(archive, tmp_path / "unpacked")
     assert (tmp_path / "unpacked/bin/clang-dxc.exe").read_bytes() == b"MZ"
     assert json.loads((tmp_path / "unpacked/provenance.json").read_text())[
-        "Windows execution unverified"
+        "target_execution_unverified"
     ]
 
 
@@ -348,13 +366,13 @@ def test_standalone_windows_merges_both_installs_without_host_paths(workspace, t
                   "--no-auto", "--dry-run")
     assert preview.returncode == 0, preview.stderr
     assert f"LLVM distribution {dist}" in preview.stdout
-    assert "Windows execution unverified" in preview.stdout
+    assert "Target execution unverified" not in preview.stdout
     assert files(workspace) == before
     assert not archive.exists()
     result = cli(workspace, "package", "full", "--in", str(offload),
                  "--platform", "windows-x64", "--out", str(archive), "--no-auto")
     assert result.returncode == 0, result.stderr
-    assert "Windows execution unverified" in result.stdout
+    assert "Target execution unverified" not in result.stdout
     with zipfile.ZipFile(archive) as zipped:
         assert all((entry.external_attr >> 16) & 0o170000 != 0o120000
                    for entry in zipped.infolist())
@@ -376,9 +394,9 @@ def test_standalone_windows_merges_both_installs_without_host_paths(workspace, t
     assert (moved / "bin/lit.cmd").is_file()
     assert all(str(workspace).encode() not in path.read_bytes()
                for path in moved.rglob("*") if path.is_file())
-    assert "Windows execution unverified" in (moved / "README.txt").read_text()
+    assert "Target execution unverified (windows-x64)" in (moved / "README.txt").read_text()
     assert json.loads((moved / "provenance.json").read_text())[
-        "Windows execution unverified"
+        "target_execution_unverified"
     ] is True
     assert not any(p.is_symlink() for p in moved.rglob("*"))
 
@@ -591,6 +609,22 @@ def test_dxc_native_archive_is_curated_and_has_no_dangling_links(workspace, tmp_
     ]["DirectXShaderCompiler"]["revision"]
 
 
+def test_linux_arm64_dxc_package_marks_target_execution_unverified(workspace, tmp_path):
+    dxc, _ = make_dxc_build(workspace, "linux-arm64")
+    archive = tmp_path / "dxc.tar.gz"
+    args = ("package", "dxc", "--in", str(dxc), "--platform", "linux-arm64",
+            "--out", str(archive), "--no-auto")
+    preview = cli(workspace, *args, "--dry-run")
+    assert preview.returncode == 0, preview.stderr
+    assert "Target execution unverified" not in preview.stdout
+    result = cli(workspace, *args)
+    assert result.returncode == 0, result.stderr
+    unpack(archive, tmp_path / "linux-dxc")
+    assert json.loads((tmp_path / "linux-dxc/provenance.json").read_text())[
+        "target_execution_unverified"
+    ] is True
+
+
 def test_dxc_windows_archive_optional_libraries_and_unverified(workspace, tmp_path):
     dxc, build = make_dxc_build(workspace, "windows-x64")
     (build / "bin/dxil.dll").unlink()
@@ -602,7 +636,7 @@ def test_dxc_windows_archive_optional_libraries_and_unverified(workspace, tmp_pa
     result = cli(workspace, "package", "dxc", "--platform", "windows-x64",
                  "--in", str(dxc), "--out", str(archive), "--no-auto")
     assert result.returncode == 0, result.stderr
-    assert "Windows execution unverified" in result.stdout
+    assert "Target execution unverified" not in result.stdout
     assert "dxil.dll" in result.stdout
     names = unpack(archive, tmp_path / "unpacked")
     assert set(names) == {
@@ -611,7 +645,7 @@ def test_dxc_windows_archive_optional_libraries_and_unverified(workspace, tmp_pa
     }
     assert (tmp_path / "unpacked/bin/dxc.exe").read_bytes() == b"MZdxc.exe"
     assert json.loads((tmp_path / "unpacked/provenance.json").read_text())[
-        "Windows execution unverified"
+        "target_execution_unverified"
     ] is True
 
 
@@ -664,7 +698,7 @@ def test_dxc_windows_complete_archive_inspection_and_preview(workspace, tmp_path
     dry = cli(workspace, "package", "dxc", "--in", str(dxc),
               "--platform", "windows-arm64", "--out", str(archive), "--dry-run")
     assert dry.returncode == 0, dry.stderr
-    assert "Windows execution unverified" in dry.stdout
+    assert "Target execution unverified" not in dry.stdout
     assert "cost: stage and archive" in dry.stdout
     assert files(workspace) == before
     assert not archive.exists()
@@ -712,7 +746,7 @@ def test_compiler_archive_prunes_prior_full_install(workspace, tmp_path, platfor
     result = cli(workspace, "package", "compiler", "--in", str(llvm),
                  "--platform", platform, "--out", str(archive), "--no-auto")
     assert result.returncode == 0, result.stderr
-    assert "Windows execution unverified" in result.stdout if platform != "native" else True
+    assert "Target execution unverified" not in result.stdout
     names = unpack(archive, tmp_path / "compiler")
     assert "bin/FileCheck" in names
     assert "lib/clang/1/include/hlsl.h" in names
@@ -727,11 +761,27 @@ def test_compiler_archive_prunes_prior_full_install(workspace, tmp_path, platfor
     if platform != "native":
         assert (tmp_path / "compiler/bin/clang-dxc.exe").read_bytes() == b"MZ"
     provenance = json.loads((tmp_path / "compiler/provenance.json").read_text())
-    assert provenance["Windows execution unverified"] == (platform != "native")
+    assert provenance["target_execution_unverified"] == (platform != "native")
     assert provenance["contents"] == "LLVM compiler and lit (no offload test suite)"
     # Never delete suite files from the shared install prefix.
     assert (prefix / "share/hlsl-test-suite/test/lit.cfg.py").is_file()
     assert (prefix / "bin/D3D12/SDK.dll").is_file()
+
+
+def test_linux_arm64_compiler_package_marks_target_execution_unverified(workspace, tmp_path):
+    llvm, _, _, _, _ = make_install(workspace, platform="linux-arm64")
+    archive = tmp_path / "compiler.tar.gz"
+    args = ("package", "compiler", "--in", str(llvm),
+            "--platform", "linux-arm64", "--out", str(archive), "--no-auto")
+    preview = cli(workspace, *args, "--dry-run")
+    assert preview.returncode == 0, preview.stderr
+    assert "Target execution unverified" not in preview.stdout
+    result = cli(workspace, *args)
+    assert result.returncode == 0, result.stderr
+    unpack(archive, tmp_path / "linux-compiler")
+    assert json.loads((tmp_path / "linux-compiler/provenance.json").read_text())[
+        "target_execution_unverified"
+    ] is True
 
 
 def test_compiler_preview_is_read_only_and_does_not_need_offload(workspace, tmp_path):
@@ -763,6 +813,21 @@ def test_compiler_preview_is_read_only_and_does_not_need_offload(workspace, tmp_
     assert "--no-auto" in missing.stderr
 
 
+def test_cross_repro_missing_install_points_to_cli_installs(workspace):
+    llvm, _, _, build, _ = make_install(workspace, platform="windows-x64")
+    (build / "install").rename(build / "saved-install")
+    before = files(workspace)
+    report = cli(workspace, "package", "repro", "Graphics/MultipleViewports.test",
+                 "--suite", "warp-d3d12", "--in", str(llvm),
+                 "--platform", "windows-x64", "--dry-run")
+    assert report.returncode != 0
+    assert (f"hlsl distribution install --in {llvm} --platform windows-x64"
+            in report.stderr)
+    assert ("hlsl build install-offload-tools install-offload-test-suite"
+            in report.stderr)
+    assert files(workspace) == before
+
+
 def test_compiler_rejects_non_llvm_and_invalid_cross_without_writes(workspace, tmp_path):
     llvm, offload, _, _, _ = make_install(workspace)
     before = files(workspace)
@@ -771,7 +836,7 @@ def test_compiler_rejects_non_llvm_and_invalid_cross_without_writes(workspace, t
     cross = cli(workspace, "package", "compiler", "--in", str(llvm),
                 "--platform", "windows-x64", "--dry-run")
     assert cross.returncode == 0, cross.stderr
-    assert "Windows execution unverified" in cross.stdout
+    assert "Target execution unverified" not in cross.stdout
     assert "prerequisite: build install-distribution" in cross.stdout
     assert files(workspace) == before
     not_installed = cli(workspace, "package", "compiler", "--in", str(llvm),
@@ -855,7 +920,7 @@ def test_precompiled_archive_replays_host_verdicts_without_dxc(workspace, tmp_pa
                                  capture_output=True, text=True)
         assert verdict.returncode == status
         assert message in verdict.stderr
-    assert "Windows execution unverified" not in (stage / "PRECOMPILED.md").read_text()
+    assert "Target execution unverified" not in (stage / "PRECOMPILED.md").read_text()
     site = (stage / "test/clang-vk/lit.site.cfg.py").read_text()
     assert "precompiled-cc.py" in site
     assert "config.substitutions" in site
@@ -927,19 +992,66 @@ def test_precompiled_archive_runs_with_real_lit_and_no_target_compiler(workspace
     assert "Failed           : 1" in run_lit.stdout
 
 
+def test_linux_arm64_precompiled_and_repro_mark_execution_unverified(workspace, tmp_path):
+    llvm, _, _ = precompiled_fixture(workspace, "linux-arm64")
+    for action, extra in (("precompiled", ("clang-vk",)),
+                          ("repro", ("Feature/good.test", "--suite", "clang-vk"))):
+        archive = tmp_path / f"{action}.tar.gz"
+        args = ("package", action, *extra, "--in", str(llvm),
+                "--platform", "linux-arm64", "--no-auto", "--out", str(archive))
+        preview = cli(workspace, *args, "--dry-run")
+        assert preview.returncode == 0, preview.stderr
+        assert "Target execution unverified" not in preview.stdout
+        result = cli(workspace, *args)
+        assert result.returncode == 0, result.stderr
+        stage = tmp_path / action
+        unpack(archive, stage)
+        instructions = "PRECOMPILED.md" if action == "precompiled" else "REPRO.md"
+        assert "Target execution unverified (linux-arm64)" in (
+            stage / instructions).read_text()
+        assert json.loads((stage / "provenance.json").read_text())[
+            "target_execution_unverified"
+        ] is True
+
+
+def test_linux_arm64_lit_fallback_marks_execution_unverified(workspace, tmp_path):
+    llvm, build, _ = precompiled_fixture(workspace, "linux-arm64")
+    (build / "install/bin/split-file").write_text("target split-file")
+    tests = build / "install/share/hlsl-test-suite/test/Feature"
+    (tests / "pipe.test").write_text(
+        "# RUN: split-file %s %t\n"
+        "# RUN: %dxc_target -Fo %t.o %t/source.hlsl\n"
+        "# RUN: %offloader %t/pipeline.yaml %t.o | FileCheck %s\n"
+    )
+    archive = tmp_path / "fallback.tar.gz"
+    args = ("package", "repro", "Feature/pipe.test", "--suite", "clang-vk",
+            "--in", str(llvm), "--platform", "linux-arm64", "--no-auto",
+            "--out", str(archive))
+    result = cli(workspace, *args)
+    assert result.returncode == 0, result.stderr
+    assert "Target execution unverified" not in result.stdout
+    stage = tmp_path / "fallback"
+    unpack(archive, stage)
+    assert "Target execution unverified (linux-arm64)" in (
+        stage / "REPRO.md").read_text()
+    assert json.loads((stage / "provenance.json").read_text())[
+        "target_execution_unverified"
+    ] is True
+
+
 def test_precompiled_windows_is_unverified_and_does_not_ship_compiler(workspace, tmp_path):
     llvm, _, _ = precompiled_fixture(workspace, "windows-x64")
     archive = tmp_path / "precompiled.zip"
     result = cli(workspace, "package", "precompiled", "clang-vk", "--in", str(llvm),
                  "--platform", "windows-x64", "--no-auto", "--out", str(archive))
     assert result.returncode == 0, result.stderr
-    assert "Windows execution unverified" in result.stdout
+    assert "Target execution unverified" not in result.stdout
     unpack(archive, tmp_path / "windows")
     stage = tmp_path / "windows"
     assert not (stage / "bin/clang-dxc").exists()
     assert not (stage / "lib/clang").exists()
     assert (stage / "test/clang-vk/precompiled.json").exists()
-    assert "Windows execution unverified" in (stage / "PRECOMPILED.md").read_text()
+    assert "Target execution unverified (windows-x64)" in (stage / "PRECOMPILED.md").read_text()
     assert not any(p.is_symlink() for p in stage.rglob("*"))
 
 
@@ -1211,12 +1323,12 @@ def test_repro_windows_fallback_is_unverified(workspace, tmp_path):
                  "--platform", "windows-x64", "--no-auto", "--out", str(archive))
     assert result.returncode == 0, result.stderr
     assert "using lit/Python" in result.stdout
-    assert "Windows execution unverified" in result.stdout
+    assert "Target execution unverified" not in result.stdout
     target = tmp_path / "windows-fallback"
     unpack(archive, target)
     assert (target / "bin/lit.cmd").is_file()
     assert "call \"%ROOT%bin\\lit.cmd\"" in (target / "run.cmd").read_text()
-    assert "Windows execution is unverified" in (target / "REPRO.md").read_text()
+    assert "Target execution unverified (windows-x64)" in (target / "REPRO.md").read_text()
     assert "Python 3 is required" in (target / "requirements.txt").read_text()
     assert not (target / "bin/clang-dxc.exe").exists()
     assert not any(path.is_symlink() for path in target.rglob("*"))
@@ -1238,7 +1350,7 @@ def test_repro_windows_archives_cmd_runner_without_python(workspace, tmp_path):
     assert "call :test_0" in cmd
     assert (target / "run.sh").is_file()
     assert not (target / "bin/lit.cmd").exists()
-    assert "Windows execution unverified" in result.stdout
+    assert "Target execution unverified" not in result.stdout
 
 
 def test_repro_xpass_and_duplicate_compile_are_not_hidden(workspace, tmp_path):

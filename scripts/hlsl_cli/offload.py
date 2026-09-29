@@ -145,14 +145,16 @@ def _install_plan(request):
     cache = build / "CMakeCache.txt"
     if not cache.is_file():
         raise BuildError(f"{build}: CMakeCache.txt is missing; reconfigure first")
-    values = dict(line.split("=", 1) for line in cache.read_text().splitlines()
-                  if line.startswith(("CMAKE_INSTALL_PREFIX:",
-                                      "CMAKE_HOME_DIRECTORY:",
-                                      "LLVM_DISTRIBUTION_COMPONENTS:",
-                                      "LLVM_LINK_LLVM_DYLIB:")) and "=" in line)
-    installed_to = next((value for key, value in values.items()
-                         if key.startswith("CMAKE_INSTALL_PREFIX:")), None)
-    source = values.get("CMAKE_HOME_DIRECTORY:INTERNAL")
+    keys = {"CMAKE_INSTALL_PREFIX", "CMAKE_HOME_DIRECTORY",
+            "LLVM_DISTRIBUTION_COMPONENTS", "LLVM_LINK_LLVM_DYLIB"}
+    values = {}
+    for line in cache.read_text().splitlines():
+        key, separator, value = line.partition("=")
+        name = key.partition(":")[0]
+        if separator and name in keys:
+            values[name] = value
+    installed_to = values.get("CMAKE_INSTALL_PREFIX")
+    source = values.get("CMAKE_HOME_DIRECTORY")
     expected_source = tree.path / "llvm" if tree.kind == "llvm" else tree.path
     if source != str(expected_source):
         raise BuildError(f"{build}: CMake source does not match {expected_source}; "
@@ -163,10 +165,10 @@ def _install_plan(request):
                          "reconfigure before installing")
     if tree.kind == "llvm":
         configured_components = set(values.get(
-            "LLVM_DISTRIBUTION_COMPONENTS:STRING", ""
+            "LLVM_DISTRIBUTION_COMPONENTS", ""
         ).split(";"))
         required = set(LLVM_INSTALL_COMPONENTS)
-        if values.get("LLVM_LINK_LLVM_DYLIB:BOOL") == "ON":
+        if values.get("LLVM_LINK_LLVM_DYLIB") == "ON":
             required.update(("LLVM", "clang-cpp"))
         missing = sorted(required - configured_components)
         if missing:
@@ -297,7 +299,9 @@ def plan(request):
         if cross.is_windows(platform):
             from .gpu import d3d12_flags
 
-            flags.extend(d3d12_flags(root, request.d3d12))
+            # Windows cross toolchains provide D3D12 regardless of whether
+            # this host can run it.
+            flags.extend(d3d12_flags(root, "on"))
     else:
         from .gpu import d3d12_flags
 

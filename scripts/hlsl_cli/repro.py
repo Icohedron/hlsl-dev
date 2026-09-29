@@ -336,8 +336,10 @@ def _script(stage, suite, tests, reports, compiler, flags, split,
         "for checkout revisions and commands.json for exact RUN lines and "
         "compiler verdicts. Unsupported tests fail during packaging; no "
         "selected test is silently omitted. XFAIL: * is honored; other lit "
-        "feature conditions are refused. Windows execution is unverified.\n\n"
-        + "\n".join(f"- `{t.path}`" for t in tests) + "\n"
+        "feature conditions are refused.\n"
+        + (f"{package._target_warning(archive_platform)}.\n"
+           if archive_platform != "native" else "")
+        + "\n" + "\n".join(f"- `{t.path}`" for t in tests) + "\n"
     )
     commands = {}
     for test in tests:
@@ -415,7 +417,7 @@ def _lit_script(stage, suite, tests, unsupported, platform):
         "for recorded verdicts and revisions.\n\n"
         "Python-free replay was not available for:\n" +
         "".join(f"- `{name}`: {reason}\n" for name, reason in unsupported.items()) +
-        ("\nWindows execution is unverified.\n" if windows else "")
+        (f"\n{package._target_warning(platform)}.\n" if platform != "native" else "")
     )
 
 
@@ -503,8 +505,8 @@ def execute(request):
                 "Named offload test reproducer. See REPRO.md for target instructions.\n"
                 + ("Python 3 required; no compiler or DXC required.\n" if unsupported
                    else "No Python, compiler or DXC required.\n")
-                + ("Windows execution unverified.\n" if package._is_windows(full.platform)
-                   else ""))
+                + (f"{package._target_warning(full.platform)}.\n"
+                   if full.platform != "native" else ""))
             provenance = json.loads((stage / "provenance.json").read_text())
             provenance.update({"contents": "named precompiled test reproducer",
                                "selected_tests": list(tests),
@@ -524,6 +526,4 @@ def execute(request):
                 package._reject_escaping_links(stage)
             package._archive(stage, destination)
     return Plan(_warning(unsupported) +
-                f"packaged {len(tests)} named tests in {destination}\n" +
-                ("Windows execution unverified.\n" if package._is_windows(full.platform)
-                 else ""))
+                f"packaged {len(tests)} named tests in {destination}\n")

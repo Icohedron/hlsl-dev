@@ -83,6 +83,24 @@ def _is_windows(platform):
     return platform.startswith("windows-") or (platform == "native" and os.name == "nt")
 
 
+def _target_warning(platform):
+    return f"Target execution unverified ({platform})" if platform != "native" else ""
+
+
+def _cross_install_hint(root, tree, llvm, platform, distribution):
+    selected = f"--in {tree.path} --platform {platform}"
+    if tree.kind == "llvm":
+        return (f"run 'hlsl distribution install {selected}', then "
+                "'hlsl build install-offload-tools install-offload-test-suite "
+                f"{selected}'")
+    if distribution == ws.distribution_prefix(llvm, platform, root=root):
+        llvm_selection = f"--in {llvm.path} --platform {platform}"
+        return (f"run 'hlsl distribution install {llvm_selection}', then "
+                f"'hlsl distribution install {selected}'")
+    return (f"check the external LLVM distribution at {distribution}, then "
+            f"run 'hlsl distribution install {selected}'")
+
+
 def _installed(plan):
     prefix = plan.build / "install"
     if not (
@@ -162,18 +180,18 @@ def _plan(request):
         platform, targets, False, "",
     )
     installed = _installed(tentative)
-    if not installed and (request.no_auto or os.getenv("HLSL_AUTO") == "0"):
-        raise BuildError(
-            f"{build}: missing full install or LLVM distribution (--no-auto); "
-            f"install {', '.join(targets)}"
-            + (f" and check {distribution}/bin and lib/clang" if distribution else "")
-        )
     if not installed and platform != "native":
-        raise BuildError(
-            f"{build}: cross install or LLVM distribution missing; "
-            f"build {', '.join(targets)} first"
-            + (f" and check {distribution}/bin and lib/clang" if distribution else "")
-        )
+        hint = _cross_install_hint(root, tree, llvm, platform, distribution)
+        if request.no_auto or os.getenv("HLSL_AUTO") == "0":
+            raise BuildError(f"{build}: missing full install or LLVM "
+                             f"distribution (--no-auto); {hint}")
+        raise BuildError(f"{build}: cross install or LLVM distribution missing; "
+                         f"{hint}")
+    if not installed and (request.no_auto or os.getenv("HLSL_AUTO") == "0"):
+        raise BuildError(f"{build}: missing full install or LLVM distribution "
+                         f"(--no-auto); install {', '.join(targets)}"
+                         + (f" and check {distribution}/bin and lib/clang"
+                            if distribution else ""))
     site_root = build / ("tools/OffloadTest/test" if tree.kind == "llvm" else "test")
     sites = sorted(
         site.parent.name for site in site_root.glob("*/lit.site.cfg.py")
@@ -196,7 +214,7 @@ def _plan(request):
     if migration:
         lines.append(f"blocked: {migration} needs explicit workspace migration")
     if platform.startswith("windows-"):
-        lines.append("Windows execution unverified; symlinks will be materialized")
+        lines.append("Windows symlinks will be materialized")
     return PackagePlan(
         root, tree, llvm, offload, golden, build, distribution, archive,
         platform, targets, not installed, "\n".join(lines) + "\n",
@@ -241,7 +259,7 @@ def _compiler_plan(request):
     if migration:
         lines.append(f"blocked: {migration} needs explicit workspace migration")
     if platform.startswith("windows-"):
-        lines.append("Windows execution unverified; symlinks will be materialized")
+        lines.append("Windows symlinks will be materialized")
     return CompilerPlan(
         root, tree, build, archive, platform, targets, not installed,
         "\n".join(lines) + "\n",
@@ -431,7 +449,7 @@ def _stage(plan, stage, selected=None):
         _reject_escaping_links(stage)
     provenance = {
         "platform": plan.platform,
-        "Windows execution unverified": plan.platform.startswith("windows-"),
+        "target_execution_unverified": plan.platform != "native",
         "suites": names,
         "sources": {
             kind: _revision(tree) for kind, tree in (
@@ -444,11 +462,9 @@ def _stage(plan, stage, selected=None):
         "dxc": "separate archive; set HLSL_DXC_DIR to its bin directory",
     }
     (stage / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
-    status = (
-        "Windows execution unverified; run the packaged suites on a Windows target."
-        if plan.platform.startswith("windows-")
-        else "Execution unverified; packaging does not run the suites."
-    )
+    status = (f"{_target_warning(plan.platform)}; run the suites on the target."
+              if plan.platform != "native"
+              else "Execution unverified; packaging does not run the suites.")
     (stage / "README.txt").write_text(
         "HLSL offload test package\n"
         f"Platform: {plan.platform}\n{status}\n"
@@ -507,7 +523,7 @@ def _compiler_stage(plan, stage):
         _reject_escaping_links(stage)
     (stage / "provenance.json").write_text(json.dumps({
         "platform": plan.platform,
-        "Windows execution unverified": plan.platform.startswith("windows-"),
+        "target_execution_unverified": plan.platform != "native",
         "contents": "LLVM compiler and lit (no offload test suite)",
         "sources": {"llvm-project": _revision(plan.tree)},
         "target_python": "Python 3 for lit",
@@ -659,8 +675,6 @@ def _plan_dxc(request):
     migration = migration_prerequisite(root)
     if migration:
         lines.append(f"blocked: {migration} needs explicit workspace migration")
-    if _is_windows(platform):
-        lines.append("Windows execution unverified; binaries have not been target-tested")
     return DxcPackagePlan(
         root, tree, build, archive, platform, targets, bool(missing),
         "\n".join(lines) + "\n",
@@ -696,7 +710,7 @@ def _stage_dxc(plan, stage):
             copied.append(f"{directory}/{name}")
     provenance = {
         "platform": plan.platform,
-        "Windows execution unverified": _is_windows(plan.platform),
+        "target_execution_unverified": plan.platform != "native",
         "sources": {"DirectXShaderCompiler": _revision(plan.tree)},
     }
     (stage / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
@@ -804,7 +818,7 @@ def _precompiled_plan(request):
     if full.needs_install:
         lines.append(f"prerequisite: build {' '.join(full.install_targets)}")
     if full.platform.startswith("windows-"):
-        lines.append("Windows execution unverified; symlinks will be materialized")
+        lines.append("Windows symlinks will be materialized")
     return PrecompiledPlan(full, suites, native_bin, dxc_bin, archive,
                            "\n".join(lines) + "\n")
 
@@ -867,7 +881,7 @@ def _stage_precompiled(plan, stage):
         "Each `test/<suite>/precompiled.json` lists compiled tests, skipped tests\n"
         "and their reasons. Missing records fail on the target, not silently pass.\n\n"
         + "\n".join(summaries) + "\n"
-        + ("Windows execution unverified.\n" if full.platform.startswith("windows-") else "")
+        + (f"{_target_warning(full.platform)}.\n" if full.platform != "native" else "")
     )
     provenance = json.loads((stage / "provenance.json").read_text())
     provenance["contents"] = "precompiled tests and runtime; no compiler or DXC"
@@ -876,7 +890,7 @@ def _stage_precompiled(plan, stage):
     (stage / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     (stage / "README.txt").write_text(
         "Compiler-free offload package. See PRECOMPILED.md for instructions.\n"
-        + ("Windows execution unverified.\n" if full.platform.startswith("windows-") else "")
+        + (f"{_target_warning(full.platform)}.\n" if full.platform != "native" else "")
     )
     if full.platform.startswith("windows-"):
         _materialize_links(stage)

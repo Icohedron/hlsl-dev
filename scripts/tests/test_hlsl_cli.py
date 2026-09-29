@@ -1706,6 +1706,12 @@ def test_distribution_install_requires_configured_llvm_build(workspace, monkeypa
     configured = cli(workspace, "configure", "--in", str(llvm), "--dxc", str(dxc))
     assert configured.returncode == 0, configured.stderr
     assert len(log.read_text().splitlines()) == 1
+    cache = llvm / "build/CMakeCache.txt"
+    cache.write_text(cache.read_text().replace(
+        "LLVM_DISTRIBUTION_COMPONENTS:STRING=",
+        "LLVM_DISTRIBUTION_COMPONENTS:UNINITIALIZED=",
+    ).replace("LLVM_LINK_LLVM_DYLIB:BOOL=",
+              "LLVM_LINK_LLVM_DYLIB:INTERNAL="))
     dry = cli(workspace, *command, "--dry-run")
     assert dry.returncode == 0, dry.stderr
     assert "--target install-distribution" in dry.stdout

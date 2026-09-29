@@ -702,6 +702,11 @@ in
     # anyway, and an ambient value would override what `hlsl gpu vulkan` records.
     containerEnv.SCCACHE_IDLE_TIMEOUT = "0";
 
+    # The host and container have different Nix stores. Keep cross toolchains
+    # in this container's private .devenv volume so fetching one never
+    # replaces the shared host toolchain symlink with an inaccessible path.
+    containerEnv.HLSL_CROSS_TOOLCHAINS = "\${containerWorkspaceFolder}/.devenv/toolchains";
+
     # D3D12 is unavailable inside the container even on a WSL host. Force
     # the portable build/ here regardless of a host's saved GPU choice;
     # a host with D3D12 uses build-d3d12/ until `hlsl gpu d3d12 off`.
