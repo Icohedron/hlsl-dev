@@ -40,6 +40,17 @@ class Test:
 def _select(request, source, checkout):
     if not request.paths:
         raise BuildError("repro needs at least one named test")
+    # Match only runnable tests, never auxiliary inputs, outputs or links out
+    # of the suite. Resolve once so every selector sees the same test inventory.
+    root = source.resolve()
+    candidates = []
+    for file in source.rglob("*"):
+        if (not file.is_file() or file.suffix not in (".test", ".yaml")
+                or set(file.relative_to(source).parts) & {"Inputs", "Output"}
+                or not file.resolve().is_relative_to(root)):
+            continue
+        candidates.append(file.relative_to(source).as_posix())
+    candidates.sort()
     selected = []
     for name in request.paths:
         path = Path(name)
@@ -52,16 +63,19 @@ def _select(request, source, checkout):
                 raise BuildError(f"test outside {checkout} or {source}: {path}")
         elif name.startswith("test/"):
             name = name[5:]
-        if (not SAFE_NAME.fullmatch(name) or Path(name).as_posix() != name
-                or any(part in (".", "..", "Output") for part in Path(name).parts)
-                or not name.endswith((".test", ".yaml"))):
+        if (not SAFE_NAME.fullmatch(name)
+                or Path(name).as_posix() != name.removesuffix("/")
+                or any(part in (".", "..", "Output") for part in Path(name).parts)):
             raise BuildError(f"unsafe or unsupported test name: {name}")
-        file = source / name
-        if not file.is_file() or not file.resolve().is_relative_to(source.resolve()):
-            raise BuildError(f"no such test under {source}: {name}")
-        if name in selected:
-            raise BuildError(f"duplicate test: {name}")
-        selected.append(name)
+        # An exact path wins over broader substring matches; otherwise a
+        # fragment can select files by directory or by partial basename.
+        matches = (name,) if name in candidates else tuple(
+            candidate for candidate in candidates if name in candidate)
+        if not matches:
+            raise BuildError(f"no tests match under {source}: {name}")
+        for match in matches:
+            if match not in selected:
+                selected.append(match)
     return tuple(selected)
 
 

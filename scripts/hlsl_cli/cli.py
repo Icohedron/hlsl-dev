@@ -402,14 +402,19 @@ def parser():
     precompiled.add_argument("suites", nargs="*", metavar="SUITE")
     _package_options(precompiled)
     repro = package_actions.add_parser(
-        "repro", help="Archive named tests with Python-free sh/cmd runners",
-        description=("Precompile every selected test on the host and package its "
-                     "objects, data, runtime and provenance. Unsupported lit "
-                     "constructs refuse the whole archive, never skip tests."),
-        epilog=("Example: hlsl package repro Feature/HLSLLib/log2.32.test "
-                "--suite clang-vk --in offload-test-suite --dry-run"),
+        "repro", help="Archive selected tests with sh/cmd or lit runners",
+        description=("Select tests by exact path or partial name (including "
+                     "directories), precompile them on the host, and package "
+                     "their objects, data, runtime and provenance. All matches "
+                     "are listed in the preview; overlapping names are "
+                     "deduplicated. Unsupported lit constructs use the bundled "
+                     "lit/Python runner for every selected test."),
+        epilog=("Example: hlsl package repro Graphics/MultipleViewports "
+                "Graphics/SimpleTriangle --suite warp-d3d12 "
+                "--in offload-test-suite --dry-run"),
     )
-    repro.add_argument("paths", nargs="+", metavar="TEST")
+    repro.add_argument("paths", nargs="+", metavar="TEST",
+                       help="Exact test path or partial path/name (repeatable)")
     repro.add_argument("--suite", metavar="SUITE",
                        help="Configured suite containing the named tests")
     _package_options(repro)

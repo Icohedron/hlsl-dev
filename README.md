@@ -289,7 +289,9 @@ hlsl package full --in offload-test-suite --platform windows-x64
 hlsl package dxc --in DirectXShaderCompiler --platform windows-x64 --dry-run
 hlsl package compiler --in llvm-project --dry-run
 hlsl package precompiled clang-vk --in offload-test-suite --dry-run
-hlsl package repro Feature/HLSLLib/log2.32.test --suite clang-vk --in offload-test-suite --dry-run
+hlsl package repro Graphics/MultipleViewports Graphics/SimpleTriangle \
+  --suite warp-d3d12 --platform windows-x64 --dxc nix \
+  --in offload-test-suite --dry-run
 ```
 
 `full` archives configured offload suites, runtime tools, LLVM compiler and
@@ -306,9 +308,13 @@ runtime and compiler exit verdicts. The **target needs Python 3 and a GPU
 driver**, but neither compiler nor DXC. It must have the chosen suites
 configured; omitted suite names mean all configured suites. Check the included
 `PRECOMPILED.md` and per-suite `precompiled.json` for skipped tests and
-verdicts. `repro TEST... --suite SUITE` packs selected tests and provenance:
-when the RUN lines can be replayed faithfully, its `run.sh`/`run.cmd` need
-only the target shell and GPU driver. The caller must choose a machine
+verdicts. `repro TEST... --suite SUITE` accepts multiple exact paths or partial
+path/name fragments (for example, `Graphics/MultipleViewports` or `Viewport`).
+Each fragment selects every matching `.test`/`.yaml` file; overlapping matches
+are deduplicated, and the dry-run lists the full selection before packaging.
+Missing matches fail rather than silently omitting tests. The archive includes
+selected tests and provenance: when the RUN lines can be replayed faithfully,
+its `run.sh`/`run.cmd` need only the target shell and GPU driver. The caller must choose a machine
 satisfying each selected test's `REQUIRES` and not matching `UNSUPPORTED`;
 Python-free repros list these assumptions in the preview, `REPRO.md` and
 `provenance.json` rather than evaluating them at runtime. Repros omit `XFAIL`

@@ -1067,6 +1067,102 @@ def test_precompiled_missing_native_compiler_does_not_replace_archive(workspace,
     assert archive.read_bytes() == b"old"
 
 
+def test_repro_resolves_partial_names_and_multiple_tests(workspace, tmp_path):
+    llvm, build, _ = precompiled_fixture(workspace)
+    tests = build / "install/share/hlsl-test-suite/test/Feature"
+    (tests / "good-extra.test").write_text((tests / "good.test").read_text())
+    archive = tmp_path / "partial.tar.gz"
+    args = ("package", "repro", "Feature/good", "bad.yaml", "good-extra.test",
+            "--suite", "clang-vk", "--in", str(llvm), "--no-auto",
+            "--out", str(archive))
+    preview = cli(workspace, *args, "--dry-run")
+    assert preview.returncode == 0, preview.stderr
+    assert ("selected tests Feature/good-extra.test, Feature/good.test, "
+            "Feature/bad.yaml" in preview.stdout)
+    assert not archive.exists()
+    result = cli(workspace, *args)
+    assert result.returncode == 0, result.stderr
+    target = tmp_path / "partial"
+    unpack(archive, target)
+    selected = json.loads((target / "provenance.json").read_text())["selected_tests"]
+    assert selected == ["Feature/good-extra.test", "Feature/good.test",
+                        "Feature/bad.yaml"]
+    assert set(json.loads((target / "commands.json").read_text())) == set(selected)
+    assert "call :test_2" in (target / "run.cmd").read_text()
+
+
+def test_repro_windows_partial_graphics_names(workspace, tmp_path, monkeypatch):
+    llvm, build, native = precompiled_fixture(workspace, "windows-x64")
+    sites = build / "tools/OffloadTest/test"
+    (sites / "clang-vk").rename(sites / "warp-d3d12")
+    dxc = workspace / "host-dxc/bin"
+    (dxc / "dxc").write_bytes((native / "clang-dxc").read_bytes())
+    (dxc / "dxc").chmod(0o755)
+    monkeypatch.setenv("HLSL_DXC_PREBUILT_DIR", str(dxc))
+    tests = build / "install/share/hlsl-test-suite/test"
+    graphics = tests / "Graphics"
+    graphics.mkdir()
+    for name in ("MultipleViewports", "SimpleTriangle"):
+        (graphics / f"{name}.test").write_text((tests / "Feature/good.test").read_text())
+    archive = tmp_path / "graphics.zip"
+    args = ("package", "repro", "Graphics/MultipleViewports",
+            "Graphics/SimpleTriangle", "--suite", "warp-d3d12", "--in",
+            str(llvm), "--platform", "windows-x64", "--dxc", "nix",
+            "--no-auto", "--out", str(archive))
+    preview = cli(workspace, *args, "--dry-run")
+    assert preview.returncode == 0, preview.stderr
+    assert ("selected tests Graphics/MultipleViewports.test, "
+            "Graphics/SimpleTriangle.test" in preview.stdout)
+    result = cli(workspace, *args)
+    assert result.returncode == 0, result.stderr
+    target = tmp_path / "graphics"
+    unpack(archive, target)
+    assert json.loads((target / "provenance.json").read_text())["selected_tests"] == [
+        "Graphics/MultipleViewports.test", "Graphics/SimpleTriangle.test"]
+    assert "Target execution unverified (windows-x64)" in (
+        target / "REPRO.md").read_text()
+
+
+def test_repro_resolves_directory_and_rejects_unmatched_or_unsafe_names(workspace):
+    llvm, build, _ = precompiled_fixture(workspace)
+    tests = build / "install/share/hlsl-test-suite/test/Feature"
+    (tests / "Inputs").mkdir()
+    (tests / "Inputs/hidden.test").write_text((tests / "good.test").read_text())
+    (tests / "Output").mkdir()
+    (tests / "Output/stale.test").write_text((tests / "good.test").read_text())
+    (tests / "good.test-extra.test").write_text((tests / "good.test").read_text())
+    (tests / "outside.test").symlink_to(workspace / "outside.test")
+    (workspace / "outside.test").write_text((tests / "good.test").read_text())
+    options = ("--suite", "clang-vk", "--in", str(llvm), "--no-auto",
+               "--dry-run")
+    for selector in ("Feature", "Feature/"):
+        preview = cli(workspace, "package", "repro", selector, *options)
+        assert preview.returncode == 0, preview.stderr
+        assert "Feature/good.test" in preview.stdout
+        assert "Feature/bad.yaml" in preview.stdout
+        assert "Feature/Inputs/hidden.test" not in preview.stdout
+        assert "Feature/Output/stale.test" not in preview.stdout
+        assert "Feature/outside.test" not in preview.stdout
+    for name in ("Feature/good.test", "test/Feature/good.test",
+                 str(tests / "good.test")):
+        exact = cli(workspace, "package", "repro", name, *options)
+        assert exact.returncode == 0, exact.stderr
+        assert "selected tests Feature/good.test\n" in exact.stdout
+        assert "Feature/good.test-extra.test" not in exact.stdout
+    for name, message in (("missing", "no tests match"),
+                          ("Feature//", "unsafe or unsupported"),
+                          ("Feature/../good", "unsafe or unsupported"),
+                          ("Feature/Inputs/hidden.test", "no tests match"),
+                          ("Feature/outside.test", "no tests match")):
+        failed = cli(workspace, "package", "repro", name, *options)
+        assert failed.returncode != 0
+        assert message in failed.stderr
+    missing = cli(workspace, "package", "repro", "Feature/good.test",
+                  "missing", *options)
+    assert missing.returncode != 0
+    assert "no tests match" in missing.stderr
+
+
 def test_repro_runs_every_named_test_without_target_python(workspace, tmp_path):
     llvm, build, native = precompiled_fixture(workspace)
     split = native / "split-file"
