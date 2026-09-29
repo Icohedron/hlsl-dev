@@ -34,7 +34,7 @@ class Test:
     path: str
     # Each step is (kind, argv), where argv excludes the tool name.
     steps: tuple[tuple[str, tuple[str, ...]], ...]
-    xfail: bool
+    target_requirements: tuple[str, ...]
 
 
 def _select(request, source, checkout):
@@ -71,14 +71,19 @@ def _parse(test, name, features):
             raise BuildError(f"{name}: lit.local.cfg changes test semantics")
         if parent.name == "test":
             break
-    xfail = False
+    target_requirements = []
     for raw in test.read_text(encoding="utf-8", errors="replace").splitlines():
         match = DIRECTIVE.match(raw)
         if match:
-            if match.group(1) == "XFAIL" and match.group(2).strip() == "*":
-                xfail = True
+            directive, value = match.group(1), match.group(2).strip()
+            if directive == "XFAIL":
+                continue  # Reproducers expose failures, including known XFAILs.
+            if directive in ("REQUIRES", "UNSUPPORTED") and value:
+                # The named repro is run only on a supported target. Preserve
+                # lit's conditions as explicit preconditions, not runtime checks.
+                target_requirements.append(f"{directive}: {value}")
             else:
-                raise BuildError(f"{name}: unsupported {match.group(1)}: {match.group(2)}")
+                raise BuildError(f"{name}: unsupported {directive}: {value}")
     steps = []
     outputs = set()
     for line in precompiled._lines(test):
@@ -135,7 +140,7 @@ def _parse(test, name, features):
         raise BuildError(f"{name}: no supported compile step")
     if not any(step[0] not in ("split", "compile") for step in steps):
         raise BuildError(f"{name}: no supported runtime step")
-    return Test(name, tuple(steps), xfail)
+    return Test(name, tuple(steps), tuple(target_requirements))
 
 
 def _tests(request, plan):
@@ -179,12 +184,16 @@ def _warning(unsupported):
 
 
 def preview(request):
-    plan, selected, _, unsupported, archive = _plan(request)
+    plan, selected, parsed, unsupported, archive = _plan(request)
     runtime = ("lit/Python 3; no target compiler or DXC" if unsupported else
                "POSIX sh / Windows cmd; no Python or compiler")
+    preconditions = ("" if unsupported else "".join(
+        f"target precondition {test.path}: {requirement}\n"
+        for test in parsed for requirement in test.target_requirements
+    ))
     return Plan(plan.text + f"selected tests {', '.join(selected)}\n"
                 f"repro archive {archive}\n" + _warning(unsupported) +
-                f"runtime: {runtime}\n")
+                preconditions + f"runtime: {runtime}\n")
 
 
 def _trim_tests(source, selected):
@@ -194,6 +203,22 @@ def _trim_tests(source, selected):
                               file.suffix == ".yaml" and precompiled._lines(file)):
             if file.relative_to(source).as_posix() not in keep:
                 file.unlink()
+
+
+def _omit_xfails(source, selected):
+    """Reproducers expose expected failures rather than reporting XFAIL."""
+    for name in selected:
+        path = source / name
+        original = path.read_text(encoding="utf-8", errors="replace")
+        lines = []
+        for line in original.splitlines(keepends=True):
+            match = DIRECTIVE.match(line)
+            if match and match.group(1) == "XFAIL":
+                continue
+            lines.append(line)
+        updated = "".join(lines)
+        if updated != original:
+            path.write_text(updated, encoding="utf-8")
 
 
 def _shell_arg(arg):
@@ -259,11 +284,8 @@ def _script(stage, suite, tests, reports, compiler, flags, split,
                    '  mkdir -p -- "$T" || return 1',
                    f'  cp -R "$ROOT/{data_rel}/." "$T/" || return 1'])
         cmd.extend([f'call :test_{index}', 'if errorlevel 1 (',
-                    f'  echo {"XFAIL" if test.xfail else "FAIL"}: {rel}',
-                    *([] if test.xfail else ['  set "failed=1"']),
-                    ') else (',
-                    f'  echo {"XPASS" if test.xfail else "PASS"}: {rel}',
-                    *(['  set "failed=1"'] if test.xfail else []), ')'])
+                    f'  echo FAIL: {rel}', '  set "failed=1"', ') else (',
+                    f'  echo PASS: {rel}', ')'])
         win_test = rel.replace("/", "\\")
         win_scratch = scratch_rel.replace("/", "\\")
         win_data = data_rel.replace("/", "\\")
@@ -310,10 +332,8 @@ def _script(stage, suite, tests, reports, compiler, flags, split,
         if next(compiled, None) is not None:
             raise BuildError(f"{rel}: unused precompiled verdict")
         sh += ['}', f'if run_{index}; then',
-               f'  echo {shlex.quote(("XPASS" if test.xfail else "PASS") + ": " + rel)}',
-               *(['  failed=1'] if test.xfail else []), 'else',
-               f'  echo {shlex.quote(("XFAIL" if test.xfail else "FAIL") + ": " + rel)}',
-               *([] if test.xfail else ['  failed=1']), 'fi']
+               f'  echo {shlex.quote("PASS: " + rel)}', 'else',
+               f'  echo {shlex.quote("FAIL: " + rel)}', '  failed=1', 'fi']
         subroutines.extend(body + ['exit /b 0'])
     sh += ['exit "$failed"']
     # Subroutines must follow the main exit so execution cannot fall through.
@@ -334,12 +354,17 @@ def _script(stage, suite, tests, reports, compiler, flags, split,
         "The archive contains selected test sources, fresh split-file test data, "
         "precompiled objects and compile exit verdicts. See provenance.json "
         "for checkout revisions and commands.json for exact RUN lines and "
-        "compiler verdicts. Unsupported tests fail during packaging; no "
-        "selected test is silently omitted. XFAIL: * is honored; other lit "
-        "feature conditions are refused.\n"
-        + (f"{package._target_warning(archive_platform)}.\n"
+        "compiler verdicts. Unsupported direct replay semantics use lit instead; "
+        "no selected test is silently omitted. XFAIL directives are omitted "
+        "so a known bug reports FAIL, not XFAIL.\n\n"
+        "Target feature requirements are assumed, not checked by the runner. "
+        "Run only on a machine satisfying REQUIRES and not matching UNSUPPORTED:\n"
+        + ("".join(f"- `{test.path}`: {requirement}\n"
+                   for test in tests for requirement in test.target_requirements)
+           or "- None declared.\n")
+        + (f"\n{package._target_warning(archive_platform)}.\n"
            if archive_platform != "native" else "")
-        + "\n" + "\n".join(f"- `{t.path}`" for t in tests) + "\n"
+        + "\nSelected tests:\n" + "\n".join(f"- `{t.path}`" for t in tests) + "\n"
     )
     commands = {}
     for test in tests:
@@ -356,7 +381,7 @@ def _script(stage, suite, tests, reports, compiler, flags, split,
                 [str(split), *shlex.split(expanded)] if kind == "split" else
                 [str(compiler), *flags, *shlex.split(expanded)])
         commands[test.path] = {
-            "RUN": precompiled._lines(path), "XFAIL": test.xfail,
+            "RUN": precompiled._lines(path),
             "host_commands": host_commands,
             "objects": {key: reports["objects"][key]
                         for key in reports["compiled"][test.path]},
@@ -410,8 +435,9 @@ def _lit_script(stage, suite, tests, unsupported, platform):
         "graphics driver are required; lit and PyYAML are bundled. psutil "
         "is optional (per-test timeouts). No compiler or DXC is required. "
         "See requirements.txt for dependencies.\n\n"
-        "All selected tests run through lit, including their XFAIL, REQUIRES "
-        "and shell semantics. The host compiled every selected test; "
+        "All selected tests run through lit, including REQUIRES and shell "
+        "semantics. XFAIL directives are omitted so a known bug reports FAIL. "
+        "The host compiled every selected test; "
         "precompiled-cc.py replays each compiler exit status, including "
         "expected compile failures. See commands.json and provenance.json "
         "for recorded verdicts and revisions.\n\n"
@@ -459,6 +485,7 @@ def execute(request):
             package._stage(full, stage, set(current.suites))
             source = stage / "share/hlsl-test-suite/test"
             _trim_tests(source, tests)
+            _omit_xfails(source, tests)
             if not unsupported:
                 for path in (stage / "share/hlsl-test-suite/lit",
                              stage / "share/hlsl-test-suite/python"):
@@ -512,6 +539,10 @@ def execute(request):
                                "selected_tests": list(tests),
                                "runner": "lit/Python" if unsupported else "Python-free sh/cmd",
                                "fallback_reasons": unsupported,
+                               "target_requirements": (
+                                   {test.path: list(test.target_requirements)
+                                    for test in parsed if test.target_requirements}
+                                   if not unsupported else {}),
                                "host_compiler": str(compiler),
                                "host_compiler_flags": flags,
                                "host_split_file": str(split),

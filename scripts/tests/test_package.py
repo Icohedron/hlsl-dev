@@ -1140,7 +1140,8 @@ def test_repro_runs_every_named_test_without_target_python(workspace, tmp_path):
     assert "PASS: Feature/good.test" in completed.stdout
     assert "FAIL: Feature/runtime-bad.test" in completed.stdout
     assert "FAIL: Feature/bad.yaml" in completed.stdout
-    assert "XFAIL: Feature/expected.test" in completed.stdout
+    assert "FAIL: Feature/expected.test" in completed.stdout
+    assert "# XFAIL:" not in (target / "share/hlsl-test-suite/test/Feature/expected.test").read_text()
     assert "PASS: Feature/other.test" in completed.stdout
     assert "PYTHON_USED" not in completed.stderr
     assert "call :test_4" in (target / "run.cmd").read_text()
@@ -1271,12 +1272,13 @@ def test_repro_falls_back_to_lit_for_all_named_tests(workspace, tmp_path):
                             capture_output=True, text=True,
                             env={**os.environ, "PYTHON": sys.executable,
                                  "PYTHONDONTWRITEBYTECODE": "1"})
-    assert run_it.returncode == 0, run_it.stdout + run_it.stderr
+    assert run_it.returncode == 1, run_it.stdout + run_it.stderr
     assert "PASS: Repro-clang-vk :: Feature/good.test" in run_it.stdout
     assert "PASS: Repro-clang-vk :: Feature/pipe.test" in run_it.stdout
     assert "PASS: Repro-clang-vk :: Feature/negative.test" in run_it.stdout
-    assert "XFAIL: Repro-clang-vk :: Feature/expected-bad.test" in run_it.stdout
-    assert "XFAIL: Repro-clang-vk :: Feature/nested-not.test" in run_it.stdout
+    assert "FAIL: Repro-clang-vk :: Feature/expected-bad.test" in run_it.stdout
+    assert "FAIL: Repro-clang-vk :: Feature/nested-not.test" in run_it.stdout
+    assert "# XFAIL:" not in (target / "share/hlsl-test-suite/test/Feature/expected-bad.test").read_text()
     assert "PASS: Repro-clang-vk :: Feature/bang.test" in run_it.stdout
     assert "inside.test" not in run_it.stdout
     assert "bad.yaml" not in run_it.stdout
@@ -1353,6 +1355,56 @@ def test_repro_windows_archives_cmd_runner_without_python(workspace, tmp_path):
     assert "Target execution unverified" not in result.stdout
 
 
+def test_repro_feature_requirements_are_target_preconditions_not_python(workspace, tmp_path):
+    llvm, build, native = precompiled_fixture(workspace, "windows-x64")
+    site = build / "tools/OffloadTest/test/clang-vk"
+    warp = site.with_name("warp-d3d12")
+    site.rename(warp)
+    configured = warp / "lit.site.cfg.py"
+    configured.write_text(configured.read_text().replace("clang-vk", "warp-d3d12")
+                          + "config.offloadtest_test_warp = True\n")
+    dxc = workspace / "host-dxc/bin"
+    (dxc / "dxc").write_text((native / "clang-dxc").read_text())
+    (dxc / "dxc").chmod(0o755)
+    test = build / "install/share/hlsl-test-suite/test/Feature/required.test"
+    test.write_text(
+        "# REQUIRES: multi-viewport\n"
+        "# UNSUPPORTED: broken-d3d12\n"
+        "# XFAIL: WARP\n"
+        "# XFAIL: Clang\n"
+        "# RUN: split-file %s %t\n"
+        "# RUN: %dxc_target -Fo %t.o %t/source.hlsl\n"
+        "# RUN: %offloader %t/pipeline.yaml %t.o\n"
+    )
+    archive = tmp_path / "required.zip"
+    args = ("package", "repro", "Feature/required.test", "--suite", "warp-d3d12",
+            "--dxc", str(dxc), "--in", str(llvm), "--platform", "windows-x64",
+            "--no-auto", "--out", str(archive))
+    preview = cli(workspace, *args, "--dry-run")
+    assert preview.returncode == 0, preview.stderr
+    assert "runtime: POSIX sh / Windows cmd; no Python" in preview.stdout
+    assert "REQUIRES: multi-viewport" in preview.stdout
+    result = cli(workspace, *args)
+    assert result.returncode == 0, result.stderr
+    target = tmp_path / "required"
+    unpack(archive, target)
+    assert (target / "run.cmd").is_file()
+    assert "FAIL: Feature/required.test" in (target / "run.sh").read_text()
+    assert "XFAIL:" not in (target / "run.sh").read_text()
+    assert "# XFAIL:" not in (target / "share/hlsl-test-suite/test/Feature/required.test").read_text()
+    assert not (target / "bin/lit.cmd").exists()
+    assert "No target Python packages required" in (target / "requirements.txt").read_text()
+    instructions = (target / "REPRO.md").read_text()
+    assert "REQUIRES: multi-viewport" in instructions
+    assert "UNSUPPORTED: broken-d3d12" in instructions
+    provenance = json.loads((target / "provenance.json").read_text())
+    assert provenance["target_requirements"] == {
+        "Feature/required.test": ["REQUIRES: multi-viewport",
+                                  "UNSUPPORTED: broken-d3d12"]
+    }
+    assert provenance["target_python"] == "not required"
+
+
 def test_repro_xpass_and_duplicate_compile_are_not_hidden(workspace, tmp_path):
     llvm, build, _ = precompiled_fixture(workspace)
     tests = build / "install/share/hlsl-test-suite/test/Feature"
@@ -1385,8 +1437,8 @@ def test_repro_xpass_and_duplicate_compile_are_not_hidden(workspace, tmp_path):
     unpack(archive, target)
     run_it = subprocess.run(["/bin/sh", str(target / "run.sh")],
                             capture_output=True, text=True)
-    assert run_it.returncode == 1
-    assert "XPASS: Feature/unexpected.test" in run_it.stdout
+    assert run_it.returncode == 0
+    assert "PASS: Feature/unexpected.test" in run_it.stdout
 
 
 def test_repro_replays_multiple_runtime_commands_and_golden_data(workspace, tmp_path):

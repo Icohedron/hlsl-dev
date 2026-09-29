@@ -296,11 +296,16 @@ configured; omitted suite names mean all configured suites. Check the included
 `PRECOMPILED.md` and per-suite `precompiled.json` for skipped tests and
 verdicts. `repro TEST... --suite SUITE` packs selected tests and provenance:
 when the RUN lines can be replayed faithfully, its `run.sh`/`run.cmd` need
-only the target shell and GPU driver. Otherwise the whole selection falls back
-to bundled lit and PyYAML, **requiring target Python 3**; the preview and
-archive `REPRO.md`/`requirements.txt` say which mode and why. The host must
+only the target shell and GPU driver. The caller must choose a machine
+satisfying each selected test's `REQUIRES` and not matching `UNSUPPORTED`;
+Python-free repros list these assumptions in the preview, `REPRO.md` and
+`provenance.json` rather than evaluating them at runtime. Repros omit `XFAIL`
+directives, so a known bug reports `FAIL` instead of being treated as expected.
+Unsupported RUN semantics or other lit constructs still trigger bundled lit
+and PyYAML for all selected tests, **requiring target Python 3**; the preview
+and archive `REPRO.md`/`requirements.txt` say which mode and why. The host must
 compile every selected test; none is silently omitted. Rejected compiler
-outputs retain their original status, important for expected failures/XFAIL.
+outputs retain their original status so failing compiles remain reproducible.
 For all non-native packages, **target execution is unverified** until the
 archive is actually run on the target. The archive instructions and
 `provenance.json` (`target_execution_unverified`) record this without repeating
