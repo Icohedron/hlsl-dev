@@ -1681,9 +1681,11 @@ def test_devenv_llvm_distribution_components_cover_standalone_build():
     if not native or not windows:
         pytest.skip("enter the updated devenv shell for CMake flag templates")
     required = ("clang", "hlsl-resource-headers", "llvm-headers", "LLVMSupport",
-                "LLVMObject", "cmake-exports")
+                "LLVMObject", "LLVMOption", "cmake-exports")
     for name in required:
         assert name in native and name in windows
+    assert "LLVMMC${HD_SEMI}LLVMOption" in native
+    assert "LLVMMC${HD_SEMI}LLVMOption" in windows
     assert "LLVM${HD_SEMI}clang-cpp" in native
     assert "LLVM${HD_SEMI}clang-cpp" not in windows
 

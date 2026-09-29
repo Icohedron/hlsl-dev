@@ -112,7 +112,8 @@ let
     "FileCheck" "split-file" "obj2yaml" "not" "llvm-headers"
     "LLVMSupport" "LLVMDemangle" "LLVMObject" "LLVMBitReader"
     "LLVMBitstreamReader" "LLVMCore" "LLVMRemarks" "LLVMMC"
-    "LLVMDebugInfoDWARFLowLevel" "LLVMIRReader" "LLVMAsmParser"
+    "LLVMOption" "LLVMDebugInfoDWARFLowLevel" "LLVMIRReader"
+    "LLVMAsmParser"
     "LLVMBinaryFormat" "LLVMMCParser" "LLVMTargetParser" "LLVMTextAPI"
     "cmake-exports"
   ];
