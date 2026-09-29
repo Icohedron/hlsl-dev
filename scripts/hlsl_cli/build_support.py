@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -18,6 +19,45 @@ from . import workspace as ws
 _LOCKS = threading.local()
 _PLACEHOLDER = re.compile(r"\$(?:\{(HD_[A-Z_]+)\}|(HD_[A-Z_]+))")
 _VALID_TEMPLATE = re.compile(r"^[A-Za-z0-9_./:=,+${}%-]+$")
+
+
+class _LockProgress:
+    """Show a spinner on a terminal, or one wait notice when redirected."""
+
+    def __init__(self, label):
+        self.stream = sys.stderr
+        self.label = label
+        self.tty = self.stream.isatty()
+        self.frame = None
+        self.message = ""
+        self.shown = False
+
+    def update(self, elapsed):
+        if elapsed < 0.25:
+            return
+        if not self.tty and self.shown:
+            return
+        if self.tty:
+            frame = int(elapsed * 8) % 4
+            if frame == self.frame:
+                return
+            self.frame = frame
+            self.message = f"Waiting for lock on {self.label} " + "|/-\\"[frame]
+        else:
+            self.message = f"Waiting for lock on {self.label}"
+        self.stream.write(("\r" if self.tty else "") + self.message +
+                          ("" if self.tty else "\n"))
+        self.stream.flush()
+        self.shown = True
+
+    def finish(self, acquired):
+        if not self.shown:
+            return
+        if self.tty:
+            self.stream.write("\r" + " " * len(self.message) + "\r")
+        if acquired:
+            self.stream.write(f"Acquired lock on {self.label}\n")
+        self.stream.flush()
 
 
 class BuildError(ws.SelectionError):
@@ -126,17 +166,26 @@ def build_lock(root, directory, timeout=None):
                 raise BuildError(
                     "HLSL_LOCK_TIMEOUT must be a number of seconds"
                 ) from error
-        deadline = time.monotonic() + max(0, timeout)
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError as error:
-                if time.monotonic() >= deadline:
-                    raise BuildError(
-                        f"timed out waiting for the build lock on {directory}"
-                    ) from error
-                time.sleep(min(0.05, deadline - time.monotonic()))
+        start = time.monotonic()
+        deadline = start + max(0, timeout)
+        progress = _LockProgress(_key(root, directory).replace("%", "/"))
+        acquired = False
+        try:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except BlockingIOError as error:
+                    now = time.monotonic()
+                    if now >= deadline:
+                        raise BuildError(
+                            f"timed out waiting for the build lock on {directory}"
+                        ) from error
+                    progress.update(now - start)
+                    time.sleep(min(0.05, deadline - now))
+        finally:
+            progress.finish(acquired)
         held[path] = fd
         try:
             yield

@@ -28,7 +28,9 @@ on commands that support it. Prefer one target/test over the default umbrella
 build; a missing LLVM distribution or DXC can be expensive. Use `--jobs N` to
 limit parallelism, especially under container process limits.
 
-If a build is stuck or later builds are silently waiting on its lock, preview
+Lock contention shows a spinner on interactive terminals after 0.25 seconds;
+redirected output receives one wait notice and an acquisition notice instead.
+If a build is stuck or later builds are waiting on its lock, preview
 `hlsl builds stop --dry-run`, then run `hlsl builds stop --yes` to stop all
 visible, same-user build-related commands in this workspace (across worktrees):
 `build`, `configure`, `test`, `distribution install`, `package`, and
