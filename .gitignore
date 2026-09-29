@@ -47,3 +47,8 @@ __pycache__/
 
 # matt pocock issue tracker scratch space
 .scratch/
+
+# local secrets held in age.
+# There is nothing that needs to be shared, so it can be gitignored.
+# But if it does get committed by accident, it is still ok since it is encrypted with age.
+secrets.age
