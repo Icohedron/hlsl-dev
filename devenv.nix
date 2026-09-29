@@ -401,6 +401,7 @@ in
 
     # Development / utility tools
     git
+    ripgrep # `rg`: grep alternative agents tend to default to using
     worktrunk # `wt`: the worktrees every task resolves against
     pythonDeps
     cvise
