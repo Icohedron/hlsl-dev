@@ -53,6 +53,13 @@ index.
    configured build trees and finished archives. Resolve preflight conflicts
    instead of deleting tracked `.gitignore` changes by hand. CodeGraph is
    retired; do not index or restore its managed block as a new workflow.
+6. **Implementation default.** An unqualified request to “implement an HLSL
+   feature” means Clang/LLVM in `llvm-project/` or the selected LLVM worktree,
+   unless the request or referenced spec/ticket explicitly targets another
+   component. Follow
+   [HLSL feature planning](docs/agents/hlsl-feature-planning.md) for source
+   references and offload-test-first TDD, treating Clang and DXC as independent
+   implementations under test.
 
 ## Command patterns
 
@@ -188,5 +195,5 @@ secrets in plaintext. Workspace GPU choices are not secrets.
 
 - **Issue tracking and local `.scratch/` tickets:** `docs/agents/issue-tracker.md`.
 - **Triage label rules:** `docs/agents/triage-labels.md`.
-- **Domain terminology or ADR changes:** root `CONTEXT.md`, `docs/adr/` and
-  `docs/agents/domain.md` (single-context policy).
+- **Specs, tickets, domain terminology or ADR changes:** root `GLOSSARY.md`,
+  `docs/adr/` and `docs/agents/domain.md` (single-context policy).

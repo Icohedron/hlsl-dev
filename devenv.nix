@@ -24,6 +24,7 @@ let
   pythonDeps = pkgs.python3.withPackages (
     python-pkgs: with python-pkgs; [
       pyyaml
+      markdown-it-py
       pytest
       virtualenv
     ]

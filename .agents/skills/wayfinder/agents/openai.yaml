@@ -1,0 +1,5 @@
+interface:
+  display_name: "Wayfinder"
+  short_description: "Map HLSL decisions and a DXC-first Clang plan"
+policy:
+  allow_implicit_invocation: false

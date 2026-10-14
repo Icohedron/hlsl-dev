@@ -339,6 +339,13 @@ hlsl tools explorer --llvm llvm-project --dxc nix --dry-run
 hlsl tools explorer --llvm llvm-project --dxc nix  # foreground service; never auto-started
 ```
 
+For shareable Clang/DXC compilation repros on public [godbolt.org](https://godbolt.org/),
+use the agent skill
+[`hlsl-godbolt-repro`](.agents/skills/hlsl-godbolt-repro/SKILL.md).
+It covers live compiler discovery, API compilation, reduction and verified
+share links. Upload only source authorized for public disclosure; use
+`hlsl package repro` above for offload/runtime repro archives.
+
 Run `devenv test` for workspace checks without building a compiler. Direct
 `offloader-monitor`, `offloader-triage`, `offloader-site` and `offloader-test`
 remain independent; their stdlib-only Python tooling is not part of the new
