@@ -176,6 +176,8 @@ LLVM/Clang changes follow upstream style (`[HLSL] …` commit subjects,
 `clang/test/…` or `llvm/test/…` tests, changed-line `hlsl format`); DXC
 follows its own style and `test/` layout; offload tests use `.test` and YAML
 with golden images where output changes. Avoid unrelated formatting churn.
+Size HLSL tests, split element-type files and pick documentation targets per
+[test scope and documentation](docs/agents/hlsl-feature-planning.md#test-scope-and-layout).
 CLI orchestration is stdlib Python in `scripts/hlsl_cli/`; tests are in
 `scripts/tests/`. Change CMake flag templates and package/environment
 configuration in `devenv.nix`, not in a checkout's build cache. Build actions

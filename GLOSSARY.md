@@ -96,6 +96,12 @@ Indicators of shader properties and capabilities carried in DXIL entry-point inf
 **Container feature information (SFI0)**:
 The feature-requirement information carried in a DXIL container. Its feature bits and DXIL shader-flag bits are distinct encodings.
 
+**Per-function compatibility information**:
+Usage properties and requirements associated with a shader function, including properties inherited from functions it calls. It is distinct from whole-shader device-feature requirements.
+
+**DXIL runtime data (RDAT)**:
+Structured information in a DXIL container describing functions, resources and subobjects, including per-function compatibility information.
+
 **DXIL validation**:
 Checking a DXIL program against the applicable representation rules and declared shader model. It is distinct from executing the shader and checking its observable results.
 _Avoid_: Runtime test
@@ -172,8 +178,8 @@ An HLSL intrinsic that interprets a resource-access status and reports whether e
 _Avoid_: CheckFullyAccessedMapped
 
 **Access status**:
-An opaque value accompanying a resource-access result, interpreted by CheckAccessFullyMapped to determine whether the accessed data was fully mapped.
-_Avoid_: Status Boolean, error code
+An opaque value accompanying a resource-access result, interpreted by CheckAccessFullyMapped to determine whether the accessed data was fully mapped. Direct3D names the method parameter that returns it `Status`; SPIR-V calls the value a residency code.
+_Avoid_: Status Boolean, error code, feedback parameter
 
 **Sparse texture**:
 A texture whose virtual regions can be backed independently by physical memory, allowing valid resources to contain mapped and unmapped regions.
@@ -207,7 +213,11 @@ A layout-defined region containing small mip levels whose backing is managed as 
 
 
 **Texture query**:
-An operation that reports texture dimensions, counts, or sampling level of detail without returning texel values. A sampling-LOD query may depend on sampler state and implicit derivatives; it is distinct from sampling and residency feedback.
+An operation that reports texture dimensions, counts, or sampling level of detail without returning texel values. An LOD query may depend on sampler state and implicit derivatives; it is distinct from sampling and residency feedback.
+
+**LOD query**:
+A texture query that reports the level of detail a sampling operation would use at given coordinates, without sampling. HLSL exposes it as `CalculateLevelOfDetail` and `CalculateLevelOfDetailUnclamped`; Vulkan names the operation an LOD query.
+_Avoid_: Pixel LOD, ordinary LOD, LOD calculation
 
 **Mip level**:
 One image resolution within a texture's mip chain. A mip level is distinct from a texture layer or multisample index.
@@ -220,8 +230,9 @@ _Avoid_: Normalized-coordinate delta
 **Constant texel offset**:
 A texel offset whose value is fixed at compile time. A constant result can come from simplifying an expression, not only from a literal in the source.
 
-**Dynamic texel offset**:
-A texel offset whose value is determined during shader execution rather than fixed at compile time. Programmable offset is the DirectX specification's name for this behavior.
+**Programmable offset**:
+A texel offset whose value is determined during shader execution rather than fixed at compile time.
+_Avoid_: Dynamic texel offset, variable offset
 
 **Level of detail (LOD)**:
 A mip-resolution selection expressed relative to the most detailed mip in the bound texture view. Fractional values can describe selection between mip levels.
@@ -234,6 +245,10 @@ _Avoid_: Unbiased LOD
 The level of detail corresponding to sampling after applicable sampler, resource-view and mip-selection rules. It does not include a separate shader-provided per-sample clamp.
 _Avoid_: Zero-clamped LOD
 
+**Instruction LOD clamp**:
+A shader-supplied limit, given with one sampling operation, on the most detailed mip level that operation may use. It applies to fully backed and sparse textures alike and is distinct from sampler and texture-view LOD limits.
+_Avoid_: Sampler MinLOD, resource MinLOD
+
 **SamplerComparisonState**:
 An HLSL sampler type representing state that specifies how a supplied comparison reference is compared with sampled texture values.
 _Avoid_: ComparisonSampler, new sampler type
@@ -245,9 +260,21 @@ _Avoid_: Comparison of filtered depth
 **Texture allocation**:
 The complete texture storage, including its allocated dimensions, mip levels, array layers and samples. A texture view can expose only part of that storage without changing the allocation.
 
+**Texture element type**:
+The scalar or vector type declared for each shader-visible element of a texture resource. It is distinct from the texture's storage and view formats.
+
+**Texture component type**:
+The scalar type of a texture element, whether that element is scalar or vector. Its bit width is distinct from the total bit width of a texel containing multiple components.
+
+**SPIR-V image sampled type**:
+The scalar type named by `OpTypeImage` for image values. It is distinct from the HLSL texture element type and the bound texture view format.
+
 **Texture view**:
 An interpretation of texture storage that selects subresources and a format, with component mapping where supported by the graphics API. It is distinct from a shader resource's declared element type.
 _Avoid_: Shader element type when referring to the bound view
+
+**Texture view format**:
+The graphics-API format through which a bound texture view interprets texel data. It is distinct from the shader-visible texture element type and the SPIR-V image sampled type.
 
 **Restricted texture view**:
 A texture view that exposes a mip-level or array-layer range smaller than its texture allocation. Shader coordinates address the visible range relative to the view rather than the allocation's selected origin.
@@ -255,6 +282,9 @@ A texture view that exposes a mip-level or array-layer range smaller than its te
 **Ordinary gather**:
 A texture operation that returns one selected component from each of four texels without filtering the returned values together. It is distinct from retrieving four components of one texel or returning comparison outcomes.
 _Avoid_: Four-channel fetch, bilinear sample
+
+**Ordinary named gathers**:
+The HLSL methods `GatherRed`, `GatherGreen`, `GatherBlue` and `GatherAlpha`, which select the corresponding component for an ordinary gather. The generic `Gather` method selects red but is not part of this four-name group.
 
 **Raw gather**:
 A texture operation that returns unsigned integers preserving the raw bits of each of four texels, including all of each texel's channels, without numerical format conversion. It is distinct from an ordinary selected-component gather or an untyped buffer load.
@@ -264,8 +294,15 @@ _Avoid_: GatherRed alias, raw buffer load
 A texture operation that returns four per-texel comparison outcomes for one selected texture component without filtering those outcomes together. It is distinct from retrieving four components of one texel or from comparison sampling.
 _Avoid_: Filtered comparison sampling, four-channel comparison
 
+**Named comparison gathers**:
+The HLSL methods `GatherCmpRed`, `GatherCmpGreen`, `GatherCmpBlue` and `GatherCmpAlpha`, which compare the corresponding component from each gathered texel with a reference. The generic `GatherCmp` method selects red but is not part of this four-name group.
+
 **Quad**:
 A subdivision of a wave consisting of four lanes computing adjacent values. A quad of shader invocations is distinct from the four texture texels returned by a gather.
+
+**Quad layout**:
+How a compute shader's `numthreads` dimensions assign lanes to quads. **1D quads** apply when X is divisible by 4 and Y = Z = 1; each quad is four consecutive `SV_GroupIndex` values. **2D quads** apply when X and Y are divisible by 2; each quad is a 2×2 block of `SV_GroupThreadID.xy`. Other shapes have no quad layout for derivatives. In Vulkan they correspond to the `DerivativeGroupLinearKHR` and `DerivativeGroupQuadsKHR` execution modes.
+_Avoid_: Compute quad layout; derivative group (Vulkan's workgroup-level term)
 
 **Derivative group**:
 A set of shader invocations over which derivative-uniformity requirements are defined. In SPIR-V compute shaders it is a workgroup, not an individual four-lane quad.
@@ -273,6 +310,10 @@ A set of shader invocations over which derivative-uniformity requirements are de
 **Implicit derivatives**:
 Coordinate or value differences derived from neighboring shader invocations within a derivative group, rather than supplied by the caller.
 _Avoid_: Explicit gradients
+
+**Derivative-dependent entry point**:
+An entry point that reaches an operation using implicit derivatives, directly or through any callee. The compute thread-group shape rule and the Vulkan derivative-group execution mode apply to it. A callee that only receives precomputed gradients does not make its caller derivative-dependent.
+_Avoid_: Reached entry, derivative-using function
 
 **Explicit gradients**:
 Caller-supplied coordinate derivatives that describe a sampling footprint. For array textures, they describe spatial coordinates, not the texture-layer coordinate.

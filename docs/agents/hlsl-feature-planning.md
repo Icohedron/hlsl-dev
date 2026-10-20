@@ -5,6 +5,9 @@ writing specs and tickets for language features and compiler implementation.
 
 Before choosing terms for plans, specs or tickets, read [Domain docs](domain.md)
 for the canonical workspace vocabulary, upstream references and wording checks.
+Prefer HLSL names and the terms that the DirectX and Vulkan documentation use.
+Check those sources before adopting a new term, and replace project shorthand
+with the official term.
 
 ## Language and target requirements
 
@@ -12,6 +15,11 @@ Establish the language behavior before choosing its implementation. Identify the
 HLSL language version, shader model and stages, runtime APIs, and generated
 formats in scope. Keep language semantics, compiler lowering, and runtime/device
 requirements distinct; a SPIR-V target does not by itself imply Vulkan.
+
+Target **HLSL 2021** by default. Use HLSL 202x only when a test requires 202x
+behavior. Clang defaults to 202x, so pass `-std=hlsl2021` (or `-HV 2021` in
+clang-dxc mode) unless 202x is required; DXC defaults to 2021 and takes
+`-HV 202x` when a test needs it.
 
 Include **DirectX/D3D12 with DXIL** and **Vulkan with SPIR-V** in every feature's
 implementation and test coverage. Both target paths must be done before the
@@ -89,11 +97,14 @@ scope, even when the operations or resource types already have lowering support.
    [SampleCmpGradientOrBias's SFI0 definition](https://github.com/microsoft/hlsl-specs/blob/main/proposals/0014-expanded-comparison-sampling.md#runtime-information)). Put
    required changes in the implementation tickets and acceptance criteria,
    rather than treating flag emission as optional follow-up work.
-3. **Specify flag evidence.** Plan focused compiler tests for required bits being
-   set and remaining clear when their criteria are absent, plus applicable
-   version/stage boundaries. Check emitted metadata and container feature
-   information against the applicable specifications. Correct
-   operations or runtime results alone do not establish correct flag emission.
+3. **Specify flag evidence.** When the work sets a flag, plan focused compiler
+   tests for the bit being set, for the bit remaining clear when its criteria
+   are absent, and for applicable version/stage boundaries. Check emitted
+   metadata and container feature information against the applicable
+   specifications. Correct operations or runtime results alone do not establish
+   correct flag emission. When the work sets no flag, record that finding and
+   plan no flag test: a test in which every flag stays clear checks nothing the
+   work changes.
 
 ## Offload-test-first TDD
 
@@ -132,7 +143,9 @@ apply this sequence per implementation slice, using that slice's target scope:
    from the sources above. Before implementing the Clang feature, find related
    tests in `offload-test-suite/` and extend them or add focused runtime tests
    using its existing shader, pipeline and result conventions. Cover the
-   feature's observable behavior and relevant edge cases. Existing tests can
+   feature's observable behavior with representative typical values, following
+   [Test scope and layout](#test-scope-and-layout) and
+   [Offload check scope](#offload-check-scope). Existing tests can
    satisfy this step when their coverage matches the planned work.
 2. **Observe the missing behavior.** Run the tests with the current Clang on the
    slice's targets, locally where available and through CI where unavailable, to
@@ -165,6 +178,46 @@ criterion.
 For diagnostic-only or compile-time behavior with no runtime observation, state
 why runtime coverage is inapplicable and specify focused compiler tests instead.
 
+## Test scope and layout
+
+Tests are representative, not exhaustive. Pick a handful of forms that exercise
+the feature; leave the full overload × type × resource product untested. Plans
+and tickets may list every candidate case and dimension; the implementer
+chooses the representative subset.
+
+| Suite | Representative cases | Element-type files |
+| --- | --- | --- |
+| Offload tests | Typical values. Drivers and GPU vendors resolve edge cases differently, so keep extremes, limits and undefined or implementation-defined behavior out of runtime tests. | The base `.test` file covers every 32-bit type. Each 16-bit type family gets its own file, as in `abs.fp16.test` and `abs.int16.test`. |
+| Clang/LLVM in-tree tests | Representative forms plus edge cases: boundaries, rejected forms, conversions. The compiler is hardware-agnostic, so its edge cases are deterministic. | All element types, 16-bit included, go in the feature's base test file, such as `Textures-Gather.hlsl`. |
+
+### Offload check scope
+
+An offload test exists to exercise the shader compiler on real hardware. Assign
+each runtime check by these rules:
+
+- **Compiler output:** each check exercises something the compiler lowers, such
+  as a new method, overload, receiver, element type, stage or operand. Leave out
+  checks whose results depend only on the runtime or the device, such as sampler
+  settings, more values from the same compiled operation, or a resource setup
+  such as sparse backing that needs no compiler change.
+- **Expressible results:** each check uses the suite's result rules
+  (`BufferExact`, `BufferFloatULP`, `BufferFloatEpsilon`). A tolerance that
+  depends on a device limit, such as Vulkan's `mipmapPrecisionBits`, cannot be
+  checked.
+- **Precedent:** a lowering detail that no existing offload test exercises, such
+  as textures or samplers selected at run time, belongs in focused compiler
+  tests instead.
+
+## Documentation targets
+
+Add documentation only to an existing document whose subject covers the change;
+read the document before assigning work to it. HLSL support in Clang does not
+yet warrant `clang/docs/ReleaseNotes.md` entries.
+`clang/docs/HLSL/ResourceTypes.md` describes how Clang implements resource types
+internally (handle types and their attributes); it is not a place for
+per-method overloads or element-type behavior. When no existing document
+covers a change, it needs no documentation work.
+
 ## Planning outputs
 
 - **Grilling:** look up facts first, then ask only unresolved decisions. Ground
@@ -192,3 +245,11 @@ why runtime coverage is inapplicable and specify focused compiler tests instead.
   where supported, with compiler-specific differences explained and unavailable
   results pending. Keep planned checks distinct from observed passes when
   creating or rewriting a ticket.
+- **Combinations with other features:** when a feature combines with features
+  that other deliverables or tickets supply, such as a method in compute shaders
+  or with programmable offsets, give each combination its own ticket pair. Each
+  pair then waits only on its own prerequisite and can proceed when that
+  prerequisite lands.
+- **Offload infrastructure tickets:** test new runner support with checks that
+  do not depend on the compiler feature it serves, so the infrastructure can
+  land before that feature.

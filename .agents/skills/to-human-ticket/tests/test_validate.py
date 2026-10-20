@@ -7,6 +7,7 @@ import sys
 import pytest
 
 
+DISCLAIMER = "_Disclaimer: This issue was written with the help of AI and may contain some inaccuracies._"
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "validate.py"
 
 
@@ -26,7 +27,16 @@ def ticket(repo="llvm-project", count=1, verb="Implement"):
     prefix = "[HLSL]" if repo == "llvm-project" else ""
     file = "clang/lib/CodeGen/CGHLSLBuiltins.cpp" if repo == "llvm-project" else "test/Feature/Textures/GetDimensions.test"
     tasks = "\n".join(f"- [ ] {verb} query case {number} in [`{file}`][source]." for number in range(count))
-    return f"""# {prefix}[DirectX][{tag}] Extend texture dimension queries
+    return f"""**Filing metadata.** Delete this block, through the line below it, before you file the issue on GitHub.
+
+- **Repository:** llvm/{repo}
+- **Parent:** llvm/wg-hlsl#490 [deliverable] Texture Query Methods
+- **Blocked by:** none
+- **Status:** ready
+
+---
+
+# {prefix}[DirectX][{tag}] Extend texture dimension queries
 
 Cover texture query results with explicit mip levels.
 
@@ -34,23 +44,44 @@ Cover texture query results with explicit mip levels.
 
 {tasks}
 
-## DirectX
+## References
 
-Use [DirectX query semantics][dx].
+<details>
+<summary>DirectX</summary>
 
-## {backend}
+- Use [DirectX query semantics][dx].
 
-Use [native query semantics][native].
+</details>
 
-## HLSL
+<details>
+<summary>{backend}</summary>
 
-Observe [Texture2D.GetDimensions][language] output types.
+- Use [native query semantics][native].
+
+</details>
+
+<details>
+<summary>HLSL</summary>
+
+- Observe [Texture2D.GetDimensions][language] output types.
+
+</details>
+
+{DISCLAIMER}
 
 [source]: https://github.com/llvm/{repo}/blob/main/{file}
 [dx]: https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm
 [native]: https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html#OpImageQuerySizeLod
 [language]: https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/sm5-object-texture2d-getdimensions
 """
+
+
+BRIEF = "Cover texture query results with explicit mip levels.\n"
+
+
+def with_brief(extra, content=None):
+    """Insert body text after the brief, where it stays inside the active ticket."""
+    return (ticket() if content is None else content).replace(BRIEF, BRIEF + extra, 1)
 
 
 def write_ticket(tmp_path, content=None, repo="llvm-project", name="query.md"):
@@ -79,22 +110,10 @@ def test_valid_owner_inference_and_explicit_owner(tmp_path, repo):
     assert explicit.returncode == 0, explicit.stdout + explicit.stderr
 
 
-@pytest.mark.parametrize("count, code", [(5, 0), (6, 1)])
-def test_five_item_group_boundary(tmp_path, count, code):
-    path = write_ticket(tmp_path, ticket(count=count))
-    result = invoke(path)
-    assert result.returncode == code, result.stdout + result.stderr
-    if code:
-        assert_rule(result, "CHECKLIST_GROUP", path)
-
-
-def test_explicit_subgroups_reset_limit_and_historical_checks_stay_checked(tmp_path):
-    content = ticket(count=5)
-    content = content.replace("## DirectX", "### Preserve regression coverage\n\n- [x] Retain an existing query check.\n\n## DirectX", 1)
-    path = write_ticket(tmp_path, content)
+def test_acceptance_checklists_have_no_group_size_limit(tmp_path):
+    path = write_ticket(tmp_path, ticket(count=12))
     result = invoke(path)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert path.read_text(encoding="utf-8") == content
 
 
 @pytest.mark.parametrize("verb", ["Reconcile", "Audit", "Characterize", "Consolidate"])
@@ -110,8 +129,22 @@ def test_arbitrary_imperative_words_are_not_a_whitelist(tmp_path, verb):
         ("[HLSL][DirectX]", "[HLSL] [DirectX]", "PREFIX"),
         ("[SPIRV]", "[Vulkan]", "PREFIX"),
         ("## Acceptance Criteria", "## Work", "ACCEPTANCE"),
-        ("## SPIR-V", "## Vulkan", "OWNER_SECTION"),
-        ("## HLSL", "## Language", "SECTION"),
+        ("<summary>SPIR-V</summary>", "<summary>Vulkan</summary>", "OWNER_SECTION"),
+        ("<summary>HLSL</summary>", "<summary>Language</summary>", "SECTION"),
+        ("<summary>HLSL</summary>", "<summary>Language</summary>", "REFERENCE_FORMAT"),
+        ("<summary>DirectX</summary>", "<summary>HLSL</summary>", "REFERENCE_FORMAT"),
+        ("- Use [DirectX query semantics][dx].", "Use [DirectX query semantics][dx].", "REFERENCE_FORMAT"),
+        ("<details>\n<summary>DirectX</summary>\n\n- Use [DirectX query semantics][dx].\n\n</details>", "### DirectX\n\n- Use [DirectX query semantics][dx].", "REFERENCE_FORMAT"),
+        ("**Filing metadata.**", "**Metadata.**", "METADATA"),
+        ("- **Blocked by:** none\n- **Status:** ready", "- **Status:** ready\n- **Blocked by:** none", "METADATA"),
+        ("- **Blocked by:** none", "- **Blocked by:**", "METADATA"),
+        ("\n---\n", "\n", "METADATA"),
+        (DISCLAIMER + "\n", "", "DISCLAIMER"),
+        (DISCLAIMER, DISCLAIMER.strip("_"), "DISCLAIMER"),
+        ("## References", "## Background", "SECTION"),
+        ("## References", "## Notes\n\n- A gotcha.\n\n## References\n\n## Notes", "SECTION_ORDER"),
+        ("## Acceptance Criteria", "## References\n\n## Acceptance Criteria", "SECTION_ORDER"),
+        ("## References", "## Background\n\n## References", "SECTION_ORDER"),
         ("Cover texture query results with explicit mip levels.\n\n", "", "SCOPE"),
     ],
 )
@@ -120,10 +153,112 @@ def test_structural_contract_findings(tmp_path, old, new, rule):
     assert_rule(invoke(path), rule, path)
 
 
+def test_notes_between_criteria_and_references_are_accepted(tmp_path):
+    content = ticket().replace("## References", "## Notes\n\n- A gotcha no reference covers.\n\n## References", 1)
+    result = invoke(write_ticket(tmp_path, content))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_metadata_blockers_may_be_a_nested_list(tmp_path):
+    content = ticket().replace(
+        "- **Blocked by:** none",
+        "- **Blocked by:**\n  - llvm/offload-test-suite `[DirectX][Vulkan] Test queries`: file this issue first.",
+        1,
+    )
+    result = invoke(write_ticket(tmp_path, content))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_metadata_may_name_an_existing_issue_first(tmp_path):
+    existing = "- **Existing issue:** llvm/offload-test-suite#1605 (replace its title and body)\n"
+    content = ticket().replace("- **Repository:**", existing + "- **Repository:**", 1)
+    result = invoke(write_ticket(tmp_path, content))
+    assert result.returncode == 0, result.stdout + result.stderr
+    content = ticket().replace("- **Status:** ready\n", "- **Status:** ready\n" + existing, 1)
+    assert_rule(invoke(write_ticket(tmp_path, content)), "METADATA")
+
+
+def test_text_after_the_disclaimer_is_a_finding(tmp_path):
+    content = ticket().replace(DISCLAIMER, DISCLAIMER + "\n\nA trailing remark.", 1)
+    assert_rule(invoke(write_ticket(tmp_path, content)), "DISCLAIMER")
+
+
+@pytest.mark.parametrize("title,valid", [("Write a proposal for queries", True), ("[0037] Describe queries", True), ("[HLSL] Describe queries", False), ("[0037][0050] Describe queries", False)])
+def test_wg_hlsl_titles_use_no_tag_or_one_proposal_number(tmp_path, title, valid):
+    content = ticket("offload-test-suite").replace("[DirectX][Vulkan] Extend texture dimension queries", title, 1)
+    content = content.replace("[`test/Feature/Textures/GetDimensions.test`][source]", "[llvm/offload-test-suite:test/Feature/Textures/GetDimensions.test][source]")
+    content = content.replace("<details>\n<summary>Vulkan</summary>\n\n- Use [native query semantics][native].\n\n</details>\n\n", "")
+    content = "\n".join(line for line in content.splitlines() if not line.startswith("[native]:")) + "\n"
+    path = write_ticket(tmp_path, content, repo="wg-hlsl")
+    result = invoke(path)
+    if valid:
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert_rule(result, "PREFIX", path)
+
+
+SUGGESTED = """### Suggested Implementation
+
+<details>
+<summary>Show details</summary>
+
+#### DirectX
+
+| Receiver | Coordinates |
+| --- | --- |
+| Texture2D | c0, c1 |
+
+- Use the [native query][native].
+
+</details>
+
+"""
+
+
+@pytest.mark.parametrize("gotchas", ["", "- A gotcha no reference covers.\n\n"])
+def test_suggested_details_at_the_end_of_notes_are_accepted(tmp_path, gotchas):
+    content = ticket().replace("## References", f"## Notes\n\n{gotchas}{SUGGESTED}## References", 1)
+    result = invoke(write_ticket(tmp_path, content))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "suggested,rule",
+    [
+        ("## Notes\n\n" + SUGGESTED.replace("Show details", "Details"), "DETAILS"),
+        ("## Notes\n\n" + SUGGESTED.replace("</summary>\n\n", "</summary>\n"), "DETAILS"),
+        ("## Notes\n\n" + SUGGESTED.replace("</details>\n", ""), "DETAILS"),
+        ("## Notes\n\n" + SUGGESTED.replace("<details>", "Loose text.\n\n<details>"), "DETAILS"),
+        ("## Notes\n\n" + SUGGESTED + SUGGESTED.split("\n", 2)[2], "DETAILS"),
+        ("## Notes\n\n" + SUGGESTED.replace("### Suggested Implementation\n\n", ""), "DETAILS_ORDER"),
+        (SUGGESTED, "DETAILS_ORDER"),
+        ("## Notes\n\n" + SUGGESTED + "### Later\n\n- A later note.\n\n", "DETAILS_ORDER"),
+        ("## Notes\n\n" + SUGGESTED.replace("#### DirectX", "### DirectX"), "DETAILS_ORDER"),
+        ("## Notes\n\n" + SUGGESTED.replace("- Use", "- [ ] Use"), "DETAILS_CHECKBOX"),
+    ],
+)
+def test_suggested_details_contract_findings(tmp_path, suggested, rule):
+    content = ticket().replace("## References", f"{suggested}## References", 1)
+    path = write_ticket(tmp_path, content)
+    assert_rule(invoke(path), rule, path)
+
+
+def test_checkboxes_inside_details_do_not_satisfy_acceptance(tmp_path):
+    content = ticket().replace("- [ ] Implement query case 0 in [`clang/lib/CodeGen/CGHLSLBuiltins.cpp`][source].\n", "", 1)
+    content = content.replace("## References", "## Notes\n\n" + SUGGESTED.replace("- Use", "- [ ] Use") + "## References", 1)
+    assert_rule(invoke(write_ticket(tmp_path, content)), "ACCEPTANCE")
+
+
+def test_technology_links_count_only_inside_references(tmp_path):
+    content = ticket().replace("- Use [DirectX query semantics][dx].", "- No link here.", 1)
+    content = content.replace("## References", "## Notes\n\n- Use [DirectX query semantics][dx].\n\n## References", 1)
+    assert_rule(invoke(write_ticket(tmp_path, content)), "SECTION_REFERENCE")
+
+
 def test_second_active_title_is_rejected_but_fenced_title_is_not(tmp_path):
-    path = write_ticket(tmp_path, ticket() + "\n# Another deliverable\n")
+    path = write_ticket(tmp_path, with_brief("\n# Another deliverable\n"))
     assert_rule(invoke(path), "TITLE")
-    path.write_text(ticket() + "\n```markdown\n# Not a second title\n[bogus][missing]\n```\n", encoding="utf-8")
+    path.write_text(with_brief("\n```markdown\n# Not a second title\n[bogus][missing]\n```\n"), encoding="utf-8")
     result = invoke(path)
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -149,7 +284,7 @@ def test_unresolved_explicit_references_are_findings(tmp_path, syntax):
 
 def test_ordinary_brackets_escaped_punctuation_and_code_are_not_missing_links(tmp_path):
     prose = "\nSource expressions A[i], values[index + 1], [0, n), and \\[not a link] are literal.\n\n`[also][undefined]` and `[ ]` are code.\n"
-    result = invoke(write_ticket(tmp_path, ticket() + prose))
+    result = invoke(write_ticket(tmp_path, with_brief(prose)))
     assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -175,11 +310,17 @@ def test_github_file_label_requires_full_repo_root_path(tmp_path, label):
     assert_rule(invoke(write_ticket(tmp_path, content)), "FILE_LABEL")
 
 
-def test_distinct_file_anchors_can_have_distinct_reference_ids(tmp_path):
-    content = ticket().replace("## HLSL", "See [`clang/lib/CodeGen/CGHLSLBuiltins.cpp`][other-source].\n\n## HLSL")
-    content += "\n[other-source]: https://github.com/llvm/llvm-project/blob/main/clang/lib/CodeGen/CGHLSLBuiltins.cpp#L10\n"
+@pytest.mark.parametrize(
+    "anchor,label",
+    [("#L10", ":L10"), ("#L10-L15", ":L10-15"), ("#code-generation", "#code-generation")],
+)
+def test_github_file_labels_show_their_anchor(tmp_path, anchor, label):
+    url = f"https://github.com/llvm/llvm-project/blob/1b4e7f41268eb3db5300e79256764140e509e3f5/clang/lib/CodeGen/CGHLSLBuiltins.cpp{anchor}"
+    content = with_brief(f"\nSee [clang/lib/CodeGen/CGHLSLBuiltins.cpp{label}][other-source].\n") + f"\n[other-source]: {url}\n"
     result = invoke(write_ticket(tmp_path, content))
     assert result.returncode == 0, result.stdout + result.stderr
+    content = with_brief("\nSee [clang/lib/CodeGen/CGHLSLBuiltins.cpp][other-source].\n") + f"\n[other-source]: {url}\n"
+    assert_rule(invoke(write_ticket(tmp_path, content)), "FILE_LABEL")
 
 
 @pytest.mark.parametrize("url", ["../another-ticket.md", "/workspace/hlsl-dev/file.md", "file:///tmp/ticket.md", "http://localhost:9000/ticket", ".scratch/query.md"])
@@ -209,8 +350,17 @@ def test_hlsl_needs_official_language_not_only_backend_reference(tmp_path, url):
 
 
 def test_official_language_proposal_qualifies_with_full_file_label(tmp_path):
-    content = ticket().replace("[Texture2D.GetDimensions][language]", "[proposals/0033-resources-get-dimensions.md][language]")
+    content = ticket().replace("[Texture2D.GetDimensions][language]", "[llvm/wg-hlsl:proposals/0033-resources-get-dimensions.md][language]")
     content = content.replace("https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/sm5-object-texture2d-getdimensions", "https://github.com/llvm/wg-hlsl/blob/main/proposals/0033-resources-get-dimensions.md")
+    result = invoke(write_ticket(tmp_path, content))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_external_repository_file_label_names_the_repository(tmp_path):
+    url = "https://github.com/microsoft/DirectXShaderCompiler/blob/791e06620e6eccad215440ff2af6f37620589115/docs/DXIL.rst#calculatelod"
+    content = with_brief("\nSee [docs/DXIL.rst#calculatelod][dxil].\n") + f"\n[dxil]: {url}\n"
+    assert_rule(invoke(write_ticket(tmp_path, content)), "FILE_LABEL")
+    content = with_brief("\nSee [microsoft/DirectXShaderCompiler:docs/DXIL.rst#calculatelod][dxil].\n") + f"\n[dxil]: {url}\n"
     result = invoke(write_ticket(tmp_path, content))
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -232,15 +382,10 @@ def test_unsupported_hardware_boundary_is_not_runner_status_accounting(tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_historical_discussion_and_comments_are_preserved_but_not_active_rules(tmp_path):
-    content = "<!-- [old][missing]\n# Historical title\n-->\n" + ticket()
-    content += "\n## History\n\n# Not history at a higher heading\n"
-    # Historical text is bounded by its heading, not by a guessed timestamp.
-    content = content.replace("\n# Not history at a higher heading\n", "\n### Earlier discussion\n\n[old][missing]\n\n- [x] An obsolete criterion.\n" * 7)
-    path = write_ticket(tmp_path, content)
-    result = invoke(path)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert path.read_text(encoding="utf-8") == content
+@pytest.mark.parametrize("heading", ["## History", "### Discussion", "## Comments"])
+def test_ticket_history_sections_are_findings(tmp_path, heading):
+    content = ticket().replace("[source]:", f"{heading}\n\nEarlier rationale.\n\n[source]:", 1)
+    assert_rule(invoke(write_ticket(tmp_path, content)), "HISTORY")
 
 
 def test_recursive_explicit_directory_includes_ignored_scratch(tmp_path):
@@ -248,8 +393,9 @@ def test_recursive_explicit_directory_includes_ignored_scratch(tmp_path):
     root.mkdir(parents=True)
     (tmp_path / ".gitignore").write_text(".scratch/\n", encoding="utf-8")
     write_ticket(root)
-    bad = write_ticket(root, ticket("offload-test-suite", count=6), repo="offload-test-suite")
-    assert_rule(invoke(root), "CHECKLIST_GROUP", bad)
+    content = ticket("offload-test-suite").replace("## Acceptance Criteria", "## Work")
+    bad = write_ticket(root, content, repo="offload-test-suite")
+    assert_rule(invoke(root), "ACCEPTANCE", bad)
 
 
 @pytest.mark.parametrize("mode", ["no-input", "empty-directory", "missing-file", "owner-missing", "invalid-utf8", "invalid-repo"])
@@ -276,7 +422,7 @@ def test_invocation_and_io_errors_are_exit_two(tmp_path, mode):
 
 
 def test_examples_extract_both_annotated_four_backtick_blocks_and_nested_code(tmp_path):
-    compiler = ticket() + "\n```hlsl\n// [not][a-reference]\nuint query(Texture2D<float4> tex) { uint w, h; tex.GetDimensions(w, h); return w; }\n```\n"
+    compiler = with_brief("\n```hlsl\n// [not][a-reference]\nuint query(Texture2D<float4> tex) { uint w, h; tex.GetDimensions(w, h); return w; }\n```\n")
     skill = tmp_path / "SKILL.md"
     skill.write_text("# Skill prose is not a ticket\n\n````markdown repo=llvm-project\n" + compiler + "````\n\n````markdown repo=offload-test-suite\n" + ticket("offload-test-suite") + "````\n\n```markdown\n# Unannotated template\n```\n", encoding="utf-8")
     result = invoke("--examples", skill)
@@ -285,12 +431,16 @@ def test_examples_extract_both_annotated_four_backtick_blocks_and_nested_code(tm
 
 def test_example_diagnostics_keep_source_file_line_numbers(tmp_path):
     skill = tmp_path / "SKILL.md"
-    content = "# Skill\n\n````markdown repo=llvm-project\n" + ticket(count=6) + "````\n"
+    content = (
+        "# Skill\n\n````markdown repo=llvm-project\n"
+        + ticket()
+        + "\nSee [texture method][missing].\n````\n"
+    )
     skill.write_text(content, encoding="utf-8")
-    line = next(number for number, value in enumerate(content.splitlines(), 1) if "query case 5" in value)
+    line = next(number for number, value in enumerate(content.splitlines(), 1) if "[missing]" in value)
     result = invoke("--examples", skill)
-    assert_rule(result, "CHECKLIST_GROUP", skill)
-    assert f"{skill}:{line}: CHECKLIST_GROUP:" in result.stdout
+    assert_rule(result, "REFERENCE_UNDEFINED", skill)
+    assert f"{skill}:{line}: REFERENCE_UNDEFINED:" in result.stdout
 
 
 def test_examples_request_without_annotated_blocks_is_an_error(tmp_path):
@@ -305,19 +455,11 @@ def test_examples_are_repeatable_and_selection_errors_do_not_disappear(tmp_path)
     first = tmp_path / "first.md"
     second = tmp_path / "second.md"
     first.write_text("````markdown repo=llvm-project\n" + ticket() + "````\n", encoding="utf-8")
-    second.write_text("````markdown repo=offload-test-suite\n" + ticket("offload-test-suite", count=6) + "````\n", encoding="utf-8")
-    assert_rule(invoke("--examples", first, "--examples", second), "CHECKLIST_GROUP", second)
+    content = ticket("offload-test-suite").replace("## Acceptance Criteria", "## Work")
+    second.write_text("````markdown repo=offload-test-suite\n" + content + "````\n", encoding="utf-8")
+    assert_rule(invoke("--examples", first, "--examples", second), "ACCEPTANCE", second)
     result = invoke("--examples", first, tmp_path / "missing.md")
     assert result.returncode == 2
-
-
-def test_reference_used_only_by_preserved_discussion_is_not_unused(tmp_path):
-    content = ticket().replace(
-        "[source]:", "## Discussion\n\nEarlier rationale used [old notes][archive].\n\n[source]:", 1
-    )
-    content += "\n[archive]: https://example.org/historical-notes\n"
-    result = invoke(write_ticket(tmp_path, content))
-    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_reference_collisions_use_unicode_casefolding(tmp_path):
@@ -326,28 +468,24 @@ def test_reference_collisions_use_unicode_casefolding(tmp_path):
     assert_rule(invoke(write_ticket(tmp_path, content)), "REFERENCE_COLLISION")
 
 
-def test_metal_is_required_only_when_tagged(tmp_path):
-    content = ticket("offload-test-suite").replace("[DirectX][Vulkan]", "[DirectX][Vulkan][Metal]", 1)
-    path = write_ticket(tmp_path, content, repo="offload-test-suite")
-    assert_rule(invoke(path), "SECTION")
-    content = content.replace("## HLSL", "## Metal\n\nUse [Metal resource semantics][metal].\n\n## HLSL", 1)
-    content += "\n[metal]: https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf\n"
-    path.write_text(content, encoding="utf-8")
-    result = invoke(path)
+def test_shared_offload_reference_can_replace_duplicate_api_sections(tmp_path):
+    content = ticket("offload-test-suite").replace(
+        "<summary>DirectX</summary>\n\n- Use [DirectX query semantics][dx].\n\n</details>\n\n<details>\n<summary>Vulkan</summary>\n\n- Use [native query semantics][native].\n\n</details>",
+        "<summary>Offload test suite</summary>\n\n- Use [docs/MipMappedTextures.md][docs].\n\n</details>",
+        1,
+    )
+    content = "\n".join(line for line in content.splitlines() if not line.startswith(("[dx]:", "[native]:")))
+    content += "\n[docs]: https://github.com/llvm/offload-test-suite/blob/c90d8bd5d976593af12a4d96316c2fe5af402d9e/docs/MipMappedTextures.md\n"
+    result = invoke(write_ticket(tmp_path, content, repo="offload-test-suite"))
     assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_single_backend_ticket_does_not_require_unassigned_technology(tmp_path):
     content = ticket().replace("[DirectX][SPIRV]", "[DirectX]", 1)
-    content = content.replace("## SPIR-V\n\nUse [native query semantics][native].\n\n", "")
+    content = content.replace("<details>\n<summary>SPIR-V</summary>\n\n- Use [native query semantics][native].\n\n</details>\n\n", "")
     content = "\n".join(line for line in content.splitlines() if not line.startswith("[native]:")) + "\n"
     result = invoke(write_ticket(tmp_path, content))
     assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_status_metadata_alone_is_not_a_scope_paragraph(tmp_path):
-    content = ticket().replace("Cover texture query results with explicit mip levels.", "**Status:** ready")
-    assert_rule(invoke(write_ticket(tmp_path, content)), "SCOPE")
 
 
 def test_nested_h1_is_not_a_standalone_ticket_title(tmp_path):

@@ -16,8 +16,18 @@ from markdown_it.rules_inline.image import image
 from markdown_it.rules_inline.link import link as parse_link
 
 
-REPOSITORIES = ("llvm-project", "offload-test-suite")
+REPOSITORIES = ("llvm-project", "offload-test-suite", "wg-hlsl")
 HISTORY = {"history", "discussion", "comments", "historical discussion"}
+SECTIONS = ("Acceptance Criteria", "Notes", "References")
+TECHNOLOGIES = {"DirectX", "SPIR-V", "Vulkan", "Metal", "HLSL"}
+REFERENCE_GROUPS = ("HLSL", "DirectX", "SPIR-V", "Vulkan", "Metal", "Offload test suite")
+DETAILS_SECTION = "Suggested Implementation"
+DETAILS_SUMMARY = "Show details"
+COLLAPSED = re.compile(r"<details>\s*<summary>([^<]+)</summary>")
+METADATA_OPENER = "Filing metadata."
+METADATA_FIELDS = ("Repository", "Parent", "Blocked by", "Status")
+METADATA_OPTIONAL = "Existing issue"
+DISCLAIMER = "_Disclaimer: This issue was written with the help of AI and may contain some inaccuracies._"
 
 
 @dataclass(frozen=True)
@@ -93,44 +103,6 @@ def markdown():
     return parser
 
 
-def active_text(text, parser):
-    """Exclude explicitly headed historical discussion without moving lines."""
-    tokens = parser.parse(text)
-    lines = text.splitlines(keepends=True)
-    original_lines = list(lines)
-    ignored_level = None
-    ignored_start = 0
-    for index, token in enumerate(tokens):
-        if token.type != "heading_open":
-            continue
-        level = int(token.tag[1:])
-        if ignored_level is not None and level <= ignored_level:
-            for line in range(ignored_start, token.map[0]):
-                lines[line] = "\n"
-            ignored_level = None
-        title = visible(tokens[index + 1].children or []).strip().casefold()
-        if ignored_level is None and title in HISTORY:
-            ignored_level = level
-            ignored_start = token.map[0]
-    if ignored_level is not None:
-        for line in range(ignored_start, len(lines)):
-            lines[line] = "\n"
-    # Definitions at the shared footer can follow a History section. Keep the
-    # parser's real definitions available to both active and preserved links.
-    for token in tokens:
-        if token.type == "definition":
-            start, end = token.map
-            lines[start:end] = original_lines[start:end]
-    preserved_uses = {
-        normalizeReference(child.meta["label"]).casefold()
-        for token in tokens
-        if token.type == "inline"
-        for child in token.children or []
-        if child.type in {"link_open", "image"} and child.meta.get("label")
-    }
-    return "".join(lines), preserved_uses
-
-
 def language_reference(url):
     """Recognize official language reference families, not backend file names."""
     parsed = urlsplit(url)
@@ -173,9 +145,7 @@ def language_reference(url):
 
 def validate(text, repo, source, offset=0):
     parser = markdown()
-    text, preserved_uses = active_text(text, parser)
-    env = {}
-    tokens = parser.parse(text, env)
+    tokens = parser.parse(text)
     findings = []
 
     def report(line, rule, message):
@@ -187,18 +157,89 @@ def validate(text, repo, source, offset=0):
             headings.append(
                 (index, int(token.tag[1:]), visible(tokens[index + 1].children or []).strip(), token.map[0] + 1)
             )
+    for _, _, title, line in headings:
+        if title.casefold() in HISTORY:
+            report(line, "HISTORY", "Remove ticket history; describe only the current work.")
+
+    def section_at(index):
+        """The level-two section containing a token, or None before the first one."""
+        for position, level, title, _ in reversed(headings):
+            if position < index and level <= 2:
+                return title if level == 2 else None
+        return None
+
+    def opener(token):
+        return token.level == 0 and (token.type.endswith("_open") or token.type in {"fence", "code_block", "hr", "html_block"})
+
+    blocks = []
+    opened = None
+    for index, token in enumerate(tokens):
+        if token.type != "html_block" or token.level != 0:
+            continue
+        content = token.content.strip()
+        line = token.map[0] + 1
+        if content.startswith("<details"):
+            if opened is not None:
+                report(line, "DETAILS", "Close each collapsed block before opening another one.")
+            match = COLLAPSED.fullmatch(content)
+            if not match:
+                report(line, "DETAILS", "Open a collapsed block with <details> and a one-line <summary>, followed by a blank line.")
+            opened = (index, match[1].strip() if match else None, line)
+        elif content.startswith("</details>"):
+            if opened is None:
+                report(line, "DETAILS", "Remove the </details> line that closes no collapsed block.")
+            else:
+                blocks.append((opened[0], index, opened[1], opened[2]))
+                opened = None
+    if opened is not None:
+        report(opened[2], "DETAILS", "Close the collapsed block with a </details> line.")
+    boundaries = {index for start, end, _, _ in blocks for index in (start, end)}
+
+    def block_at(index):
+        return next((block for block in blocks if block[0] < index < block[1]), None)
+
+    def in_details(index):
+        """Whether a token sits under Notes' Suggested Implementation subsection."""
+        for position, level, title, _ in reversed(headings):
+            if position < index and level <= 3 and not block_at(position):
+                return level == 3 and title == DETAILS_SECTION and section_at(position) == "Notes"
+        return False
+
     titles = [heading for heading in headings if heading[1] == 1]
     tags = []
     if len(titles) != 1:
         report(1, "TITLE", "Provide exactly one descriptive level-one title.")
     else:
         title_index, _, title, title_line = titles[0]
-        first_block = next(
-            (item for item in tokens if item.type not in {"html_block", "definition"}),
-            None,
-        )
-        if tokens[title_index].level != 0 or first_block is not tokens[title_index]:
-            report(title_line, "TITLE", "Start the active ticket with a standalone top-level H1.")
+        if tokens[title_index].level != 0 or block_at(title_index):
+            report(title_line, "TITLE", "Make the title a standalone top-level H1 after the filing metadata.")
+        lead = [index for index in range(title_index) if opener(tokens[index])]
+        valid = [tokens[index].type for index in lead] == ["paragraph_open", "bullet_list_open", "hr"] and visible(
+            tokens[lead[0] + 1].children or []
+        ).startswith(METADATA_OPENER)
+        if valid:
+            items = []
+            list_end = next(
+                index for index in range(lead[1], title_index)
+                if tokens[index].type == "bullet_list_close" and tokens[index].level == 0
+            )
+            for index in range(lead[1], list_end):
+                if tokens[index].type != "list_item_open" or tokens[index].level != 1:
+                    continue
+                close = next(
+                    item for item in range(index, list_end)
+                    if tokens[item].type == "list_item_close" and tokens[item].level == 1
+                )
+                inline = next((tokens[item] for item in range(index, close) if tokens[item].type == "inline"), None)
+                nested = any(tokens[item].type == "bullet_list_open" for item in range(index, close))
+                field, _, value = visible(inline.children or []).strip().partition(":") if inline else ("", "", "")
+                items.append((field.strip(), bool(value.strip()) or nested))
+            fields = [field for field, _ in items]
+            if fields[:1] == [METADATA_OPTIONAL]:
+                fields = fields[1:]
+            valid = fields == list(METADATA_FIELDS) and all(filled for _, filled in items)
+        if not valid:
+            report(1, "METADATA", f"Start with the filing metadata: a '{METADATA_OPENER}' paragraph, filled bullets for an optional {METADATA_OPTIONAL} and then {', '.join(METADATA_FIELDS)} in that order, and a --- line before the title.")
         rest = title
         while match := re.match(r"^\[([^\]]+)\]", rest):
             tags.append(match[1])
@@ -206,62 +247,107 @@ def validate(text, repo, source, offset=0):
             if re.match(r"^\s+\[", rest):
                 report(title_line, "PREFIX", "Put adjacent title tags together without spaces.")
                 rest = rest.lstrip()
-        allowed = {"HLSL", "DirectX", "SPIRV", "NFC"} if repo == "llvm-project" else {"DirectX", "Vulkan", "Metal"}
-        if not tags or len(tags) != len(set(tags)) or any(tag not in allowed for tag in tags):
-            report(title_line, "PREFIX", f"Use applicable unique {repo} title tags: {', '.join(sorted(allowed))}.")
+        if repo == "wg-hlsl":
+            if len(tags) > 1 or any(not re.fullmatch(r"\d{4}", tag) for tag in tags):
+                report(title_line, "PREFIX", "Use no title tag for a new wg-hlsl proposal, or one [NNNN] proposal-number tag for an amendment.")
+        else:
+            allowed = {"HLSL", "DirectX", "SPIRV", "NFC"} if repo == "llvm-project" else {"DirectX", "Vulkan", "Metal"}
+            if not tags or len(tags) != len(set(tags)) or any(tag not in allowed for tag in tags):
+                report(title_line, "PREFIX", f"Use applicable unique {repo} title tags: {', '.join(sorted(allowed))}.")
         if not any(character.isalpha() for character in rest):
             report(title_line, "TITLE", "Add a descriptive deliverable after the title tags.")
         next_heading = next((item[0] for item in headings if item[0] > title_index), len(tokens))
-        scope = next(
-            (
-                tokens[index + 1]
-                for index in range(title_index + 3, next_heading)
-                if tokens[index].type == "paragraph_open" and tokens[index].level == 0
-            ),
-            None,
-        )
-        if scope is not None and re.match(
-            r"^(?:status|state|labels|assignee):", visible(scope.children or []).strip(), re.I
+        if not any(
+            tokens[index].type == "paragraph_open" and tokens[index].level == 0
+            for index in range(title_index + 3, next_heading)
         ):
-            scope = None
-        if not scope:
             report(title_line, "SCOPE", "Follow the title with a short deliverable paragraph.")
 
-    section_names = {title for _, level, title, _ in headings if level == 2}
+    sections = [(title, line) for _, level, title, line in headings if level == 2]
+    section_names = {title for title, _ in sections}
+    rank = -1
+    for title, line in sections:
+        if title in SECTIONS and SECTIONS.index(title) > rank:
+            rank = SECTIONS.index(title)
+        else:
+            report(line, "SECTION_ORDER", f"Use only {', '.join(SECTIONS)} level-two sections, once each and in that order.")
     if "Acceptance Criteria" not in section_names:
         report(1, "ACCEPTANCE", "Add a level-two Acceptance Criteria section.")
-    required = set()
-    if "DirectX" in tags:
-        required.add("DirectX")
-    if "SPIRV" in tags:
-        required.add("SPIR-V")
-    if "Vulkan" in tags:
-        required.add("Vulkan")
-    if "Metal" in tags:
-        required.add("Metal")
-    if set(tags) - {"NFC"}:
-        required.add("HLSL")
-    for name in sorted(required - section_names):
-        report(1, "SECTION", f"Add a level-two {name} section for the title's technologies.")
-    wrong_role = "Vulkan" if repo == "llvm-project" else "SPIR-V"
-    if wrong_role in section_names:
-        line = next(item[3] for item in headings if item[2] == wrong_role)
-        report(line, "OWNER_SECTION", f"Use {'SPIR-V compiler' if repo == 'llvm-project' else 'Vulkan runtime'} sections for {repo}, not {wrong_role}.")
+    if "References" not in section_names:
+        report(1, "SECTION", "Add a level-two References section after the criteria and Notes.")
 
-    used = set(preserved_uses)
-    section = None
+    reference_sections = {}
+    for start, end, summary, line in blocks:
+        for index, level, _, heading_line in headings:
+            if start < index < end and level <= 2:
+                report(heading_line, "DETAILS_ORDER", "Use level-three or lower headings inside collapsed blocks.")
+        section = section_at(start)
+        if in_details(start):
+            if summary is not None and summary != DETAILS_SUMMARY:
+                report(line, "DETAILS", f"Use <summary>{DETAILS_SUMMARY}</summary> for the {DETAILS_SECTION} block.")
+            for index, level, _, heading_line in headings:
+                if start < index < end and level == 3:
+                    report(heading_line, "DETAILS_ORDER", f"Use level-four or lower headings inside the {DETAILS_SECTION} block.")
+        elif section == "References":
+            if summary is not None and summary not in REFERENCE_GROUPS:
+                report(line, "REFERENCE_FORMAT", f"Name each References block with one of: {', '.join(REFERENCE_GROUPS)}.")
+            elif summary in reference_sections:
+                report(line, "REFERENCE_FORMAT", f"Use one {summary} block in References.")
+            elif summary is not None:
+                reference_sections[summary] = line
+            for index in range(start + 1, end):
+                if opener(tokens[index]) and tokens[index].type != "bullet_list_open":
+                    report(tokens[index].map[0] + 1, "REFERENCE_FORMAT", "Write each reference as a bullet inside its collapsed block.")
+        else:
+            report(line, "DETAILS_ORDER", f"Use collapsed blocks only under the {DETAILS_SECTION} subsection of Notes and in References.")
+    for position, level, title, line in headings:
+        if level != 3 or title != DETAILS_SECTION or block_at(position):
+            continue
+        if section_at(position) != "Notes":
+            report(line, "DETAILS_ORDER", f"Put {DETAILS_SECTION} under Notes.")
+            continue
+        following = next((heading for heading in headings if heading[0] > position and heading[1] <= 3 and not block_at(heading[0])), None)
+        if following is not None and following[1] == 3:
+            report(following[3], "DETAILS_ORDER", f"Make {DETAILS_SECTION} the last part of Notes.")
+        if sum(1 for start, _, _, _ in blocks if start > position and in_details(start)) != 1:
+            report(line, "DETAILS", f"Give {DETAILS_SECTION} exactly one collapsed block.")
+
+    paragraphs = [
+        index for index, token in enumerate(tokens)
+        if token.type == "paragraph_open" and token.level == 0 and not block_at(index)
+    ]
+    disclaimer = paragraphs[-1] if paragraphs else None
+    if (
+        disclaimer is None
+        or tokens[disclaimer + 1].content.strip() != DISCLAIMER
+        or section_at(disclaimer) != "References"
+        or any(end > disclaimer for _, end, _, _ in blocks)
+    ):
+        disclaimer = None
+        report(1, "DISCLAIMER", f"End the body, after References and before the link definitions, with: {DISCLAIMER}")
+    for index, token in enumerate(tokens):
+        if not opener(token) or index in boundaries or index == disclaimer or block_at(index):
+            continue
+        if token.type == "heading_open" and token.tag in {"h2", "h3"}:
+            continue
+        if in_details(index):
+            report(token.map[0] + 1, "DETAILS", f"Put all {DETAILS_SECTION} content inside its one collapsed block.")
+        elif section_at(index) == "References":
+            report(token.map[0] + 1, "REFERENCE_FORMAT", "Group References links in collapsed blocks named by subsection.")
+    for index, level, _, line in headings:
+        if level == 3 and section_at(index) == "References" and not block_at(index):
+            report(line, "REFERENCE_FORMAT", "Group References links in collapsed blocks named by subsection.")
+
+    if "HLSL" in tags and "HLSL" not in reference_sections:
+        report(1, "SECTION", "Add an HLSL block under References for HLSL-tagged work.")
+    wrong_role = {"llvm-project": "Vulkan", "offload-test-suite": "SPIR-V"}.get(repo)
+    if wrong_role in reference_sections:
+        report(reference_sections[wrong_role], "OWNER_SECTION", f"Use {'SPIR-V compiler' if repo == 'llvm-project' else 'Vulkan runtime'} blocks for {repo}, not {wrong_role}.")
+
+    used = set()
     section_links = {}
-    group_count = 0
-    acceptance = False
     acceptance_items = 0
     for index, token in enumerate(tokens):
-        if token.type == "heading_open":
-            title = visible(tokens[index + 1].children or []).strip()
-            if token.tag in {"h1", "h2", "h3"}:
-                group_count = 0
-            if token.tag in {"h1", "h2"}:
-                section = title if token.tag == "h2" else None
-                acceptance = section == "Acceptance Criteria"
         if token.type != "inline":
             continue
         if index and tokens[index - 1].type == "heading_open" and tokens[index - 1].tag == "h1":
@@ -269,15 +355,17 @@ def validate(text, repo, source, offset=0):
             continue
         children = token.children or []
         line = token.map[0] + 1
+        block = block_at(index)
+        section = section_at(index)
+        subsection = block[2] if block and section == "References" else None
         if re.match(r"^\[[ xX]\](?:\s|$)", token.content) and any(
             item.type == "list_item_open" and item.map[0] == token.map[0]
             for item in tokens[:index]
         ):
-            group_count += 1
-            if acceptance:
+            if block:
+                report(line, "DETAILS_CHECKBOX", "Use plain bullets inside collapsed blocks; GitHub counts checkboxes as task progress.")
+            elif section == "Acceptance Criteria":
                 acceptance_items += 1
-            if group_count == 6:
-                report(line, "CHECKLIST_GROUP", "Split this checklist into explicit H2/H3 groups of at most five items.")
         for child_index, child in enumerate(children):
             position = child.meta.get("offset", 0)
             link_line = line + token.content[:position].count("\n")
@@ -296,8 +384,8 @@ def validate(text, repo, source, offset=0):
             parsed = urlsplit(href)
             if parsed.scheme not in {"https", "http", "mailto"} or parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
                 report(link_line, "LOCAL_LINK", "Replace local-file, local-ticket or workspace links with a published reference.")
-            if section:
-                section_links.setdefault(section, []).append(href)
+            if subsection:
+                section_links.setdefault(subsection, []).append(href)
             if parsed.hostname == "github.com":
                 parts = parsed.path.strip("/").split("/")
                 if len(parts) >= 5 and parts[2] == "blob":
@@ -306,6 +394,12 @@ def validate(text, repo, source, offset=0):
                         end += 1
                     text_label = visible(children[child_index + 1 : end]) if child.type == "link_open" else visible(child.children or [])
                     expected = unquote("/".join(parts[4:]))
+                    if (parts[0], parts[1]) != ("llvm", repo):
+                        expected = f"{parts[0]}/{parts[1]}:{expected}"
+                    if lines := re.fullmatch(r"L(\d+)(?:-L(\d+))?", parsed.fragment):
+                        expected += f":L{lines[1]}" + (f"-{lines[2]}" if lines[2] else "")
+                    elif parsed.fragment:
+                        expected += f"#{unquote(parsed.fragment)}"
                     if text_label != expected:
                         revision = parts[3]
                         unambiguous = (
@@ -313,11 +407,11 @@ def validate(text, repo, source, offset=0):
                             or "/" in unquote(revision)
                         )
                         if unambiguous:
-                            report(link_line, "FILE_LABEL", f"Label this GitHub file link with its full repo-root path: {expected}.")
+                            report(link_line, "FILE_LABEL", f"Label this GitHub file link with its full repo-root path and location: {expected}.")
                         else:
                             report(link_line, "GITHUB_REVISION", "A named revision may contain slashes; use a full commit SHA or percent-encode the reference's slashes before checking this repo-root label.")
     if "Acceptance Criteria" in section_names and not acceptance_items:
-        report(1, "ACCEPTANCE", "Add at least one acceptance checklist action; historical checked items may stay checked.")
+        report(1, "ACCEPTANCE", "Add at least one acceptance checklist goal.")
 
     definitions = {}
     for token in tokens:
@@ -331,14 +425,12 @@ def validate(text, repo, source, offset=0):
             definitions[label] = line
         if label not in used:
             report(line, "REFERENCE_UNUSED", f"Remove unused reference [{token.meta['label']}], or use it in the active ticket.")
-    for name in sorted(required & section_names):
+    for name in sorted(TECHNOLOGIES & reference_sections.keys()):
         links = section_links.get(name, [])
         if not links:
-            heading_line = next(item[3] for item in headings if item[2] == name)
-            report(heading_line, "SECTION_REFERENCE", f"Link {name} documentation inside its own section.")
+            report(reference_sections[name], "SECTION_REFERENCE", f"Link {name} documentation inside its own References block.")
         elif name == "HLSL" and not any(language_reference(url) for url in links):
-            heading_line = next(item[3] for item in headings if item[2] == name)
-            report(heading_line, "HLSL_LANGUAGE", "Link official HLSL language documentation, a language proposal or shader-model language reference inside HLSL; backend files alone do not qualify.")
+            report(reference_sections[name], "HLSL_LANGUAGE", "Link official HLSL language documentation, a language proposal or shader-model language reference inside the HLSL block; backend files alone do not qualify.")
     return sorted(findings, key=lambda finding: (finding.line, finding.rule, finding.message))
 
 
@@ -355,8 +447,7 @@ def main(argv=None):
         epilog=(
             "Checks explicit full/collapsed reference resolution and resolved "
             "shortcut links. Undefined bare [expressions] remain ordinary "
-            "CommonMark text. History/Discussion/Comments sections are preserved "
-            "but not validated as active requirements."
+            "CommonMark text. History/Discussion/Comments sections are findings."
             " GitHub label mismatches on named refs require a full commit SHA "
             "or percent-encoded reference slashes to avoid guessing a file path."
         ),
