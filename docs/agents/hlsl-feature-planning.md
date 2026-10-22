@@ -103,8 +103,7 @@ scope, even when the operations or resource types already have lowering support.
    metadata and container feature information against the applicable
    specifications. Correct operations or runtime results alone do not establish
    correct flag emission. When the work sets no flag, record that finding and
-   plan no flag test: a test in which every flag stays clear checks nothing the
-   work changes.
+   plan no flag test (see [Test scope and layout](#test-scope-and-layout)).
 
 ## Offload-test-first TDD
 
@@ -189,6 +188,12 @@ chooses the representative subset.
 | --- | --- | --- |
 | Offload tests | Typical values. Drivers and GPU vendors resolve edge cases differently, so keep extremes, limits and undefined or implementation-defined behavior out of runtime tests. | The base `.test` file covers every 32-bit type. Each 16-bit type family gets its own file, as in `abs.fp16.test` and `abs.int16.test`. |
 | Clang/LLVM in-tree tests | Representative forms plus edge cases: boundaries, rejected forms, conversions. The compiler is hardware-agnostic, so its edge cases are deterministic. | All element types, 16-bit included, go in the feature's base test file, such as `Textures-Gather.hlsl`. |
+
+Leave out negative shader flag tests: a test whose purpose is to show that an
+operation sets no flag, and any control cases that exist only to support it. A
+clear flag inside a test of a flag being set can stay, such as a zero clamp next
+to nonzero clamps that set a flag. Error tests are ordinary tests: a file such as
+`CalculateLOD-errors.ll` that checks only rejected code is expected.
 
 ### Offload check scope
 

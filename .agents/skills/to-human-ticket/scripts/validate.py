@@ -25,8 +25,10 @@ DETAILS_SECTION = "Suggested Implementation"
 DETAILS_SUMMARY = "Show details"
 COLLAPSED = re.compile(r"<details>\s*<summary>([^<]+)</summary>")
 METADATA_OPENER = "Filing metadata."
-METADATA_FIELDS = ("Repository", "Parent", "Blocked by", "Status")
+METADATA_FIELDS = ("Repository", "Parent", "Blocked by", "Status", "Estimate")
 METADATA_OPTIONAL = "Existing issue"
+ESTIMATE = re.compile(r"\d+(?:\.\d+)?(?:[–-]\d+(?:\.\d+)?)? (?:hours?|days?)")
+SOURCE_PATH = re.compile(r"(?<![\w./:-])[\w.+-]+(?:/[\w.+-]+)+\.\w+")
 DISCLAIMER = "_Disclaimer: This issue was written with the help of AI and may contain some inaccuracies._"
 
 
@@ -138,6 +140,7 @@ def language_reference(url):
         )
     return (
         (host == "microsoft.github.io" and path.startswith("/hlsl-specs/"))
+        or (host == "microsoft.github.io" and re.fullmatch(r"/directx-specs/d3d/(hlsl_|shadermodel)[^/]*\.html", path) is not None)
         or (host == "llvm.github.io" and path.startswith("/wg-hlsl/"))
         or (host == "hlsl-tc57.github.io" and path.startswith("/tc57/"))
     )
@@ -233,11 +236,14 @@ def validate(text, repo, source, offset=0):
                 inline = next((tokens[item] for item in range(index, close) if tokens[item].type == "inline"), None)
                 nested = any(tokens[item].type == "bullet_list_open" for item in range(index, close))
                 field, _, value = visible(inline.children or []).strip().partition(":") if inline else ("", "", "")
-                items.append((field.strip(), bool(value.strip()) or nested))
-            fields = [field for field, _ in items]
+                items.append((field.strip(), value.strip(), bool(value.strip()) or nested))
+            fields = [field for field, _, _ in items]
             if fields[:1] == [METADATA_OPTIONAL]:
                 fields = fields[1:]
-            valid = fields == list(METADATA_FIELDS) and all(filled for _, filled in items)
+            valid = fields == list(METADATA_FIELDS) and all(filled for _, _, filled in items)
+            estimate = next((value for field, value, _ in items if field == "Estimate"), "")
+            if valid and not ESTIMATE.fullmatch(estimate):
+                report(1, "ESTIMATE", "Write the Estimate as hours or days of one person's work: '6 hours', '2 days' or '2–3 days'.")
         if not valid:
             report(1, "METADATA", f"Start with the filing metadata: a '{METADATA_OPENER}' paragraph, filled bullets for an optional {METADATA_OPTIONAL} and then {', '.join(METADATA_FIELDS)} in that order, and a --- line before the title.")
         rest = title
@@ -412,6 +418,19 @@ def validate(text, repo, source, offset=0):
                             report(link_line, "GITHUB_REVISION", "A named revision may contain slashes; use a full commit SHA or percent-encode the reference's slashes before checking this repo-root label.")
     if "Acceptance Criteria" in section_names and not acceptance_items:
         report(1, "ACCEPTANCE", "Add at least one acceptance checklist goal.")
+    details_text = "\n".join(
+        token.content for index, token in enumerate(tokens)
+        if token.type == "inline" and block_at(index) and in_details(index)
+    )
+    if details_text and repo != "wg-hlsl":
+        for index, token in enumerate(tokens):
+            if token.type != "inline" or section_at(index) != "Acceptance Criteria" or block_at(index):
+                continue
+            if not re.match(r"^\[[ xX]\](?:\s|$)", token.content):
+                continue
+            for path in dict.fromkeys(SOURCE_PATH.findall(token.content)):
+                if path not in details_text:
+                    report(token.map[0] + 1, "UNJUSTIFIED_FILE", f"Say in {DETAILS_SECTION} what changes in {path}, or remove it from this criterion.")
 
     definitions = {}
     for token in tokens:

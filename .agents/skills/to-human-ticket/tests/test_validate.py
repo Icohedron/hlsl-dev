@@ -33,6 +33,7 @@ def ticket(repo="llvm-project", count=1, verb="Implement"):
 - **Parent:** llvm/wg-hlsl#490 [deliverable] Texture Query Methods
 - **Blocked by:** none
 - **Status:** ready
+- **Estimate:** 2 days
 
 ---
 
@@ -138,6 +139,9 @@ def test_arbitrary_imperative_words_are_not_a_whitelist(tmp_path, verb):
         ("**Filing metadata.**", "**Metadata.**", "METADATA"),
         ("- **Blocked by:** none\n- **Status:** ready", "- **Status:** ready\n- **Blocked by:** none", "METADATA"),
         ("- **Blocked by:** none", "- **Blocked by:**", "METADATA"),
+        ("- **Estimate:** 2 days\n", "", "METADATA"),
+        ("- **Estimate:** 2 days", "- **Estimate:** a couple of days", "ESTIMATE"),
+        ("- **Estimate:** 2 days", "- **Estimate:** 2 weeks", "ESTIMATE"),
         ("\n---\n", "\n", "METADATA"),
         (DISCLAIMER + "\n", "", "DISCLAIMER"),
         (DISCLAIMER, DISCLAIMER.strip("_"), "DISCLAIMER"),
@@ -208,7 +212,7 @@ SUGGESTED = """### Suggested Implementation
 | --- | --- |
 | Texture2D | c0, c1 |
 
-- Use the [native query][native].
+- Extend the query in `clang/lib/CodeGen/CGHLSLBuiltins.cpp`. Use the [native query][native].
 
 </details>
 
@@ -234,7 +238,7 @@ def test_suggested_details_at_the_end_of_notes_are_accepted(tmp_path, gotchas):
         (SUGGESTED, "DETAILS_ORDER"),
         ("## Notes\n\n" + SUGGESTED + "### Later\n\n- A later note.\n\n", "DETAILS_ORDER"),
         ("## Notes\n\n" + SUGGESTED.replace("#### DirectX", "### DirectX"), "DETAILS_ORDER"),
-        ("## Notes\n\n" + SUGGESTED.replace("- Use", "- [ ] Use"), "DETAILS_CHECKBOX"),
+        ("## Notes\n\n" + SUGGESTED.replace("- Extend", "- [ ] Extend"), "DETAILS_CHECKBOX"),
     ],
 )
 def test_suggested_details_contract_findings(tmp_path, suggested, rule):
@@ -243,9 +247,36 @@ def test_suggested_details_contract_findings(tmp_path, suggested, rule):
     assert_rule(invoke(path), rule, path)
 
 
+def test_suggested_details_must_justify_each_implementation_file(tmp_path):
+    unjustified = SUGGESTED.replace("Extend the query in `clang/lib/CodeGen/CGHLSLBuiltins.cpp`. ", "")
+    content = ticket().replace("## References", f"## Notes\n\n{unjustified}## References", 1)
+    path = write_ticket(tmp_path, content)
+    assert_rule(invoke(path), "UNJUSTIFIED_FILE", path)
+
+
+@pytest.mark.parametrize("test_cases,clean", [("#### Test Cases\n\n##### `test/Feature/Textures/GetDimensions.test`\n\n- Texture2D at mip 1.\n\n", True), ("", False)])
+def test_test_files_are_justified_by_their_test_cases(tmp_path, test_cases, clean):
+    suggested = SUGGESTED.replace("Extend the query in `clang/lib/CodeGen/CGHLSLBuiltins.cpp`. ", "").replace("</details>", test_cases + "</details>")
+    content = ticket("offload-test-suite").replace("## References", f"## Notes\n\n{suggested}## References", 1)
+    path = write_ticket(tmp_path, content, repo="offload-test-suite")
+    result = invoke(path)
+    if clean:
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert_rule(result, "UNJUSTIFIED_FILE", path)
+
+
+def test_documentation_files_need_justification_in_suggested_details(tmp_path):
+    criterion = "- [ ] Document the query in `llvm/docs/DirectX/DXILResources.md`.\n"
+    content = ticket().replace("\n## References", f"{criterion}\n## References", 1)
+    content = content.replace("## References", f"## Notes\n\n{SUGGESTED}## References", 1)
+    path = write_ticket(tmp_path, content)
+    assert_rule(invoke(path), "UNJUSTIFIED_FILE", path)
+
+
 def test_checkboxes_inside_details_do_not_satisfy_acceptance(tmp_path):
     content = ticket().replace("- [ ] Implement query case 0 in [`clang/lib/CodeGen/CGHLSLBuiltins.cpp`][source].\n", "", 1)
-    content = content.replace("## References", "## Notes\n\n" + SUGGESTED.replace("- Use", "- [ ] Use") + "## References", 1)
+    content = content.replace("## References", "## Notes\n\n" + SUGGESTED.replace("- Extend", "- [ ] Extend") + "## References", 1)
     assert_rule(invoke(write_ticket(tmp_path, content)), "ACCEPTANCE")
 
 
@@ -505,10 +536,17 @@ def test_multiline_reference_diagnostic_uses_the_link_line(tmp_path):
     assert f"{path}:{line}: REFERENCE_UNDEFINED:" in result.stdout
 
 
-def test_official_shader_model_language_page_qualifies(tmp_path):
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://learn.microsoft.com/en-us/windows/win32/direct3d12/hlsl-shader-model-6-8-features",
+        "https://microsoft.github.io/DirectX-Specs/d3d/HLSL_SM_6_7_Advanced_Texture_Ops.html#writable-msaa-textures",
+    ],
+)
+def test_official_shader_model_language_page_qualifies(tmp_path, url):
     content = ticket().replace(
         "https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/sm5-object-texture2d-getdimensions",
-        "https://learn.microsoft.com/en-us/windows/win32/direct3d12/hlsl-shader-model-6-8-features",
+        url,
     )
     result = invoke(write_ticket(tmp_path, content))
     assert result.returncode == 0, result.stdout + result.stderr
