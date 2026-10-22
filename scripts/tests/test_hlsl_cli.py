@@ -2175,6 +2175,32 @@ def test_vulkan_use_accepts_driver_named_status(workspace, test_workspace):
     assert "driver status" in cli(workspace, "gpu", "vulkan", "status").stdout
 
 
+@pytest.mark.parametrize("available, directory, disabled", [
+    (False, "build", "ON"),
+    (True, "build-d3d12", "OFF"),
+])
+@pytest.mark.parametrize("kind", ["llvm", "offload"])
+def test_native_build_defaults_to_d3d12_availability(
+    workspace, monkeypatch, kind, available, directory, disabled
+):
+    llvm = checkout(workspace, "llvm-project", "llvm")
+    offload, _, dxc = native_inputs(workspace)
+    monkeypatch.delenv("HLSL_D3D12_DEFAULT")
+    monkeypatch.setenv("HLSL_CMAKE_FLAGS_LLVM", "-G Ninja")
+    monkeypatch.setenv("HLSL_CMAKE_FLAGS_OFFLOAD", "-G Ninja")
+    exists = Path.exists
+    monkeypatch.setattr(Path, "exists", lambda path: (
+        available if path == Path("/usr/lib/wsl/lib/libd3d12.so") else exists(path)
+    ))
+    tree = llvm if kind == "llvm" else offload
+    target = "clang" if kind == "llvm" else "install-offload-test-suite"
+    report = preview(Request("build", workspace, worktree=str(tree),
+                             dxc=str(dxc), targets=(target,)))
+    assert f"build dir {tree / directory}\n" in report.text
+    assert f"-DCMAKE_DISABLE_FIND_PACKAGE_D3D12={disabled}" in report.text
+    assert f"-DCMAKE_DISABLE_FIND_PACKAGE_D3D12_WSL={disabled}" in report.text
+
+
 def test_gpu_d3d12_saved_switch_never_reconfigures_and_override_is_ephemeral(
     workspace, test_workspace, monkeypatch
 ):

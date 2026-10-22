@@ -44,7 +44,9 @@ def driver(root, override=None):
 
 def d3d12(root, override=None):
     value = (override or os.getenv("HLSL_D3D12") or _choices(root).get("d3d12")
-             or os.getenv("HLSL_D3D12_DEFAULT", "on"))
+             or os.getenv("HLSL_D3D12_DEFAULT"))
+    if value is None:
+        value = "on" if _available() else "off"
     if value not in _CHOICES:
         raise BuildError(f"invalid D3D12 choice '{value}'; use on or off")
     return value

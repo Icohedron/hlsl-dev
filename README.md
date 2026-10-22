@@ -238,8 +238,11 @@ independent offloader tools in a shell, run `eval "$(hlsl gpu vulkan --export)"`
 to export/unset `VK_DRIVER_FILES` and `VK_ICD_FILENAMES` for that shell. A
 lavapipe-only failure does not establish a compiler defect on a real driver.
 
-D3D12 tests need Windows or WSL D3D12, unavailable on ordinary Linux. Inspect
-with `hlsl gpu d3d12 status --in offload-test-suite`; use
+D3D12 tests need Windows or WSL D3D12, unavailable on ordinary Linux. Without
+an explicit choice, native D3D12 defaults to `on` on Windows or when
+`/usr/lib/wsl/lib/libd3d12.so` exists; otherwise it defaults to `off` and uses
+`build/`. Saved choices and environment/command overrides retain precedence.
+Inspect with `hlsl gpu d3d12 status --in offload-test-suite`; use
 `hlsl gpu d3d12 off --in offload-test-suite` to save the choice and select
 `build/`, or `on` to select `build-d3d12/`. Switching the saved choice never
 configures either tree; use `hlsl configure` explicitly if a tree needs it.
