@@ -266,6 +266,10 @@ The scalar or vector type declared for each shader-visible element of a texture 
 **Texture component type**:
 The scalar type of a texture element, whether that element is scalar or vector. Its bit width is distinct from the total bit width of a texel containing multiple components.
 
+**Partial-element store**:
+A store that writes some, but not all, components of one element of a typed resource (a writable texture or typed buffer), leaving the element's other components unchanged. Components are counted in the declared element type, not in the channels of the underlying storage format.
+_Avoid_: Partial-texel store (a typed-buffer element is not a texel), component store when referring to the whole set (a store to one component of a scalar element writes the whole element)
+
 **SPIR-V image sampled type**:
 The scalar type named by `OpTypeImage` for image values. It is distinct from the HLSL texture element type and the bound texture view format.
 
@@ -355,6 +359,26 @@ Texture filtering that accounts for unequal extents of the sampling footprint in
 An upper bound on the degree of anisotropy a sampler may use, not a guarantee that every sampling footprint uses that ratio.
 _Avoid_: Actual anisotropy ratio
 
+**Rasterizer-ordered resource**:
+An HLSL read/write resource whose accesses from overlapping invocations take effect in primitive order. HLSL names these types `RasterizerOrdered*`; Direct3D calls them rasterizer-ordered views (ROVs).
+_Avoid_: Ordered UAV, interlocked resource
+
+**Overlapping invocations**:
+Pixel-shader invocations from the same draw that share a pixel under per-pixel execution, or a pixel and a sample under sample-frequency execution.
+_Avoid_: Overlapping primitives
+
+**Sample-frequency execution**:
+Execution of a pixel shader once per covered sample rather than once per pixel.
+_Avoid_: Multisampling
+
+**Fragment shader interlock**:
+The Vulkan mechanism that delimits a critical section of a fragment shader and orders it between overlapping invocations. It is how SPIR-V expresses the ordering a rasterizer-ordered resource requires.
+_Avoid_: Atomic access
+
+**ROV-dependent entry point**:
+An entry point that reaches an access to a rasterizer-ordered resource, directly or through any callee. Declaring such a resource without reaching an access does not make an entry point ROV-dependent.
+_Avoid_: ROV-declaring entry point
+
 ### Graphics execution
 
 **Graphics API**:
@@ -399,6 +423,14 @@ An additional input consumed by a test, distinct from its test-driving instructi
 A test that executes a compiled shader and checks its observable results against expected results.
 _Avoid_: Fixture, compilation-only check
 
+**Runner infrastructure test**:
+An offload test that checks an execution-backend feature, such as a resource kind, pipeline setting or readback path, using only shader lowering that already works. It is distinct from an offload test of compiler output.
+_Avoid_: Smoke test, infrastructure test, feature test
+
+**Overlap test**:
+An offload test in which overlapping invocations apply order-dependent updates to a rasterizer-ordered resource and the result is compared with the primitive-order result. A failure shows an ordering violation; a pass does not prove ordering.
+_Avoid_: Ordering proof, stress test
+
 **Compiler under test**:
 The shader compiler whose output is being evaluated. Another compiler's output is an independent result, not the expected result by definition.
 
@@ -431,3 +463,8 @@ The criterion and tolerances used to decide whether actual and expected test res
 **Golden image**:
 An image containing the expected rendered output for a test comparison.
 
+### Planning
+
+**One-off**:
+A ticket for one repository that belongs to a scenario but to none of its deliverables. It is parented directly under the scenario issue and comes before every deliverable in the scenario order.
+_Avoid_: Position-0 deliverable, LOD-clamp one-off when referring to the whole set

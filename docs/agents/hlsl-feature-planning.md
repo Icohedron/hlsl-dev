@@ -143,8 +143,9 @@ apply this sequence per implementation slice, using that slice's target scope:
    tests in `offload-test-suite/` and extend them or add focused runtime tests
    using its existing shader, pipeline and result conventions. Cover the
    feature's observable behavior with representative typical values, following
-   [Test scope and layout](#test-scope-and-layout) and
-   [Offload check scope](#offload-check-scope). Existing tests can
+   [Test scope and layout](#test-scope-and-layout),
+   [Offload check scope](#offload-check-scope) and
+   [Offload capability gates](#offload-capability-gates). Existing tests can
    satisfy this step when their coverage matches the planned work.
 2. **Observe the missing behavior.** Run the tests with the current Clang on the
    slice's targets, locally where available and through CI where unavailable, to
@@ -186,8 +187,17 @@ chooses the representative subset.
 
 | Suite | Representative cases | Element-type files |
 | --- | --- | --- |
-| Offload tests | Typical values. Drivers and GPU vendors resolve edge cases differently, so keep extremes, limits and undefined or implementation-defined behavior out of runtime tests. | The base `.test` file covers every 32-bit type. Each 16-bit type family gets its own file, as in `abs.fp16.test` and `abs.int16.test`. |
-| Clang/LLVM in-tree tests | Representative forms plus edge cases: boundaries, rejected forms, conversions. The compiler is hardware-agnostic, so its edge cases are deterministic. | All element types, 16-bit included, go in the feature's base test file, such as `Textures-Gather.hlsl`. |
+| Offload tests | Typical values. Drivers and GPU vendors resolve edge cases differently, so keep extremes, limits and undefined or implementation-defined behavior out of runtime tests. | The base `.test` file covers every 32-bit type. Each 16-bit type family gets its own file, as in `abs.fp16.test` and `abs.int16.test`. Each 64-bit type family that the operation accepts on at least one API gets its own file too: `.int64.test` for `int64_t`/`uint64_t` and `.fp64.test` for `double`, as in `Load.int64.test` and `Load.fp64.test`. Split a family further only where gates differ, as in `Sample.int64.test` and `Sample.Vector.int64.test`. |
+| Clang/LLVM in-tree tests | Representative forms plus edge cases: boundaries, rejected forms, conversions. The compiler is hardware-agnostic, so its edge cases are deterministic. | All element types, 16-bit and 64-bit included, go in the feature's base test file, such as `Textures-Gather.hlsl`. |
+
+A type family that the operation rejects on every API gets compiler tests only.
+A family that only some APIs accept runs on those APIs: gate its file with
+an API scope such as `UNSUPPORTED: !Vulkan`. Gate 64-bit files on the
+capability features that cover them (`Int64`, `Double` and, for textures,
+`Int64TypedResources` and `Int64SampledTextures`), per
+[Offload capability gates](#offload-capability-gates). The element-type
+files count as compiler output under [Offload check scope](#offload-check-scope)
+even when the lowering does not depend on the element type.
 
 Leave out negative shader flag tests: a test whose purpose is to show that an
 operation sets no flag, and any control cases that exist only to support it. A
@@ -212,6 +222,33 @@ each runtime check by these rules:
 - **Precedent:** a lowering detail that no existing offload test exercises, such
   as textures or samplers selected at run time, belongs in focused compiler
   tests instead.
+- **Runner features:** an infrastructure ticket that adds a runner feature
+  (a resource kind, a pipeline setting or a readback path) keeps one runner
+  infrastructure test of that feature in `test/Tools/Offloader/`. A feature with
+  its own capability gate counts as a separate feature. The test's shader uses
+  only lowering that already works, so it needs no `XFAIL: Clang`. The rules
+  above govern `test/Feature/` checks; they do not apply to these tests.
+
+### Offload capability gates
+
+These rules apply to every test in `offload-test-suite/`, including runner
+infrastructure tests and tests outside any feature plan:
+
+- **One lit feature per capability.** Gate a test that needs a device
+  capability on a lit feature that `test/lit.cfg.py` sets from the capability
+  data of the API under test. Do not combine API names with capabilities, as in
+  `!DirectX || X` or `(DirectX && X) || (Vulkan && Y)`.
+- **Shared features.** When a DirectX capability and a Vulkan feature or
+  extension provide the same or very similar functionality, both set one
+  shared feature, as `Int16` and `Half` do. Name it for what it gates, not
+  after one API's bit; split a bit that covers several capabilities into
+  several features.
+- **Always-present capabilities.** lit sets features only for the API under
+  test, so an API that always has the capability sets the feature
+  unconditionally.
+- **API names.** Name an API in a gate only for API scope, such as
+  `UNSUPPORTED: !DirectX` for a DirectX-only type or method, and in `XFAIL`
+  lines.
 
 ## Documentation targets
 
